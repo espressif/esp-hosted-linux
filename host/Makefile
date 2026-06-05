@@ -20,6 +20,9 @@ CONFIG_DEBUG_LOGS ?= y
 ifeq ($(CONFIG_AP_SUPPORT), y)
     EXTRA_CFLAGS += -DCONFIG_AP_MODE
 endif
+ifeq ($(CONFIG_DEBUG_STATS), y)
+    EXTRA_CFLAGS += -DESP_DEBUG_STATS
+endif
 
 # Source and include paths
 PWD := $(shell pwd)
@@ -57,4 +60,3 @@ clean:
 
 check:
 	$(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) -C $(KERNEL) M=$(PWD) $(module_objects)
-

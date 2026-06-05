@@ -1525,6 +1525,25 @@ int process_auth_request(uint8_t if_type, uint8_t *payload, uint16_t payload_len
 
         /* Common handling for rest sec prot */
         ESP_LOGI(TAG, "AUTH Commit\n");
+
+#if 0
+        wifi_protocols_t protocols = {
+            .ghz_2g = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N,
+            .ghz_5g = WIFI_PROTOCOL_11A | WIFI_PROTOCOL_11N,
+        };
+        ret = esp_wifi_set_protocols(WIFI_IF_STA, &protocols);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set protocols ret=%d", ret);
+        }
+        wifi_bandwidths_t bw = {
+            .ghz_2g = WIFI_BW_HT40,
+            .ghz_5g = WIFI_BW_HT40,
+        };
+        ret = esp_wifi_set_bandwidths(WIFI_IF_STA, &bw);
+        if (ret) {
+            ESP_LOGE(TAG, "Failed to set wifi bandwidth: %d\n", ret);
+        }
+#endif
         ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
         if (ret) {
             ESP_LOGE(TAG, "Failed to set wifi config: %d\n", ret);

@@ -55,6 +55,7 @@ static int raw_tp_tx_process(void *data)
 	pad_len = sizeof(struct esp_payload_header);
 	total_len = TEST_RAW_TP__BUF_SIZE + pad_len;
 	pad_len += SKB_DATA_ADDR_ALIGNMENT - (total_len % SKB_DATA_ADDR_ALIGNMENT);
+	total_len = TEST_RAW_TP__BUF_SIZE + pad_len;
 
 	msleep(2000);
 
@@ -68,14 +69,14 @@ static int raw_tp_tx_process(void *data)
 
 		if (esp_is_tx_queue_paused(priv)) {
 
-			tx_skb = esp_if_alloc_skb(adapter, TEST_RAW_TP__BUF_SIZE);
+			tx_skb = esp_if_alloc_skb(adapter, total_len);
 			if (!tx_skb) {
 				esp_info("%u adapter->if_ops->alloc_skb failed\n", __LINE__);
 				msleep(10);
 				continue;
 			}
-			memset(tx_skb->data, 0, TEST_RAW_TP__BUF_SIZE);
-			tx_skb->len = TEST_RAW_TP__BUF_SIZE;
+			skb_put(tx_skb, total_len);
+			memset(tx_skb->data, 0, total_len);
 			cb = (struct esp_skb_cb *) tx_skb->cb;
 			cb->priv = priv;
 
