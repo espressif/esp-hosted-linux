@@ -28,7 +28,10 @@
 #define ESP_SLAVE_LEN_MASK             0xFFFFF
 #define ESP_BLOCK_SIZE                 512
 #define ESP_RX_BYTE_MAX                0x100000
-#define ESP_RX_BUFFER_SIZE             2048
+#define ESP_RX_BUFFER_SIZE             3584
+#define ESP_HOST_TX_AGGR_SIZE          ESP_RX_BUFFER_SIZE
+#define ESP_HOST_RX_AGGR_SIZE          (4092 * 2)
+#define ESP_HOST_TX_LATENCY_BYPASS_SIZE 256
 
 #define ESP_TX_BUFFER_MASK             0xFFF
 #define ESP_TX_BUFFER_MAX              0x1000
@@ -77,6 +80,7 @@ struct esp_sdio_context {
 	struct esp_adapter     *adapter;
 	struct sdio_func       *func;
 	struct sk_buff_head    tx_q[MAX_PRIORITY_QUEUES];
+	struct sk_buff_head    rx_q;
 	u32                    rx_byte_count;
 	u32                    tx_buffer_count;
 	u32			sdio_clk_mhz;

@@ -117,6 +117,10 @@ typedef struct {
 interface_context_t * interface_insert_driver(int (*callback)(uint8_t val));
 int interface_remove_driver();
 /*void generate_startup_event(uint8_t cap);*/
+#ifdef CONFIG_ESP_SDIO_HOST_INTERFACE
+int32_t sdio_write_aggr(interface_handle_t *handle, uint8_t *payload,
+                        uint16_t payload_len);
+#endif
 esp_err_t send_to_host(uint8_t prio_q_idx, interface_buffer_handle_t *buf_handle);
 esp_err_t send_bootup_event_to_host(uint8_t cap);
 #endif

@@ -23,8 +23,8 @@
 #include "esp_kernel_port.h"
 
 extern u32 raw_tp_mode;
-#define MAX_WRITE_RETRIES       2
-#define TX_MAX_PENDING_COUNT    200
+#define MAX_WRITE_RETRIES       2000
+#define TX_MAX_PENDING_COUNT    1000
 #define TX_RESUME_THRESHOLD     (TX_MAX_PENDING_COUNT/5)
 
 #define CHECK_SDIO_RW_ERROR(ret) do {			\
@@ -35,6 +35,16 @@ extern u32 raw_tp_mode;
 struct esp_sdio_context sdio_context;
 static atomic_t tx_pending;
 static atomic_t queue_items[MAX_PRIORITY_QUEUES];
+#ifdef ESP_DEBUG_STATS
+static atomic_t h2e_host_tx_queued;
+static atomic_t h2e_host_tx_sent;
+static atomic_t h2e_host_drop_queue_full;
+static atomic_t h2e_host_drop_invalid;
+static atomic_t h2e_host_drop_truncated;
+static atomic_t h2e_host_no_credit_waits;
+static atomic_t h2e_host_write_fail;
+static unsigned long h2e_host_stats_jiffies;
+#endif
 struct task_struct *tx_thread;
 volatile u8 host_sleep;
 
@@ -42,6 +52,39 @@ static int init_context(struct esp_sdio_context *context);
 static struct sk_buff *read_packet(struct esp_adapter *adapter);
 static int write_packet(struct esp_adapter *adapter, struct sk_buff *skb);
 /*int deinit_context(struct esp_adapter *adapter);*/
+
+#ifdef ESP_DEBUG_STATS
+#define H2E_HOST_STATS_INC(counter) atomic_inc(&(counter))
+
+static void print_h2e_host_stats(void)
+{
+	unsigned long now = jiffies;
+
+	if (time_before(now, h2e_host_stats_jiffies + 5 * HZ))
+		return;
+
+	h2e_host_stats_jiffies = now;
+	if (atomic_read(&h2e_host_tx_queued) ||
+	    atomic_read(&h2e_host_tx_sent) ||
+	    atomic_read(&h2e_host_drop_queue_full) ||
+	    atomic_read(&h2e_host_drop_invalid) ||
+	    atomic_read(&h2e_host_drop_truncated) ||
+	    atomic_read(&h2e_host_no_credit_waits) ||
+	    atomic_read(&h2e_host_write_fail)) {
+		esp_dbg("H2E host stats: queued=%d sent=%d qfull=%d invalid=%d truncated=%d no_credit=%d write_fail=%d\n",
+			 atomic_xchg(&h2e_host_tx_queued, 0),
+			 atomic_xchg(&h2e_host_tx_sent, 0),
+			 atomic_xchg(&h2e_host_drop_queue_full, 0),
+			 atomic_xchg(&h2e_host_drop_invalid, 0),
+			 atomic_xchg(&h2e_host_drop_truncated, 0),
+			 atomic_xchg(&h2e_host_no_credit_waits, 0),
+			 atomic_xchg(&h2e_host_write_fail, 0));
+	}
+}
+#else
+#define H2E_HOST_STATS_INC(counter) do { } while (0)
+static inline void print_h2e_host_stats(void) { }
+#endif
 
 static const struct sdio_device_id esp_devices[] = {
 	{ SDIO_DEVICE(ESP_VENDOR_ID_1, ESP_DEVICE_ID_ESP32_1) },
@@ -205,9 +248,9 @@ static int esp_get_len_from_slave(struct esp_sdio_context *context, u32 *rx_size
 		temp = ESP_RX_BYTE_MAX - context->rx_byte_count;
 		*len = temp + *len;
 
-		if (*len > ESP_RX_BUFFER_SIZE) {
+		if (*len > ESP_HOST_RX_AGGR_SIZE) {
 			esp_info("Len from slave[%d] exceeds max [%d]\n",
-					*len, ESP_RX_BUFFER_SIZE);
+					*len, ESP_HOST_RX_AGGR_SIZE);
 		}
 	}
 	*rx_size = *len;
@@ -254,6 +297,7 @@ static void esp_remove(struct sdio_func *func)
 	if (context) {
 		for (prio_q_idx = 0; prio_q_idx < MAX_PRIORITY_QUEUES; prio_q_idx++)
 			skb_queue_purge(&(sdio_context.tx_q[prio_q_idx]));
+		skb_queue_purge(&(sdio_context.rx_q));
 		atomic_set(&tx_pending, 0);
 	}
 
@@ -374,6 +418,7 @@ static int init_context(struct esp_sdio_context *context)
 		skb_queue_head_init(&(sdio_context.tx_q[prio_q_idx]));
 		atomic_set(&queue_items[prio_q_idx], 0);
 	}
+	skb_queue_head_init(&(sdio_context.rx_q));
 
 	context->adapter->if_type = ESP_IF_TYPE_SDIO;
 
@@ -382,13 +427,13 @@ static int init_context(struct esp_sdio_context *context)
 
 static struct sk_buff *read_packet(struct esp_adapter *adapter)
 {
-	u32 len_from_slave, data_left, len_to_read, size, num_blocks;
+	u32 len_from_slave, data_left, len_to_read, num_blocks;
 	int ret = 0;
 	struct sk_buff *skb;
 	u8 *pos;
 	struct esp_sdio_context *context;
 	struct esp_payload_header *header;
-	u16 len, offset;
+	u16 len, offset, frame_len, aligned_len, pos_in_aggr;
 
 	if (!adapter || !adapter->if_context) {
 		esp_err("INVALID args\n");
@@ -396,6 +441,9 @@ static struct sk_buff *read_packet(struct esp_adapter *adapter)
 	}
 
 	context = adapter->if_context;
+	skb = skb_dequeue(&(context->rx_q));
+	if (skb)
+		return skb;
 
 	if (!context || !context->func) {
 		esp_err("Invalid context/state\n");
@@ -412,12 +460,6 @@ static struct sk_buff *read_packet(struct esp_adapter *adapter)
 	if (ret || !len_from_slave) {
 		sdio_release_host(context->func);
 		return NULL;
-	}
-
-	size = ESP_BLOCK_SIZE * 4;
-
-	if (len_from_slave > size) {
-		esp_info("Rx large packet: %d\n", len_from_slave);
 	}
 
 	skb = esp_if_alloc_skb(context->adapter, len_from_slave);
@@ -486,8 +528,55 @@ static struct sk_buff *read_packet(struct esp_adapter *adapter)
 		dev_kfree_skb(skb);
 		return NULL;
 	}
+	frame_len = len + offset;
+	if (frame_len > len_from_slave) {
+		esp_err("Drop truncated pkt: len=%d offset=%d total=%d\n",
+			len, offset, len_from_slave);
+		dev_kfree_skb(skb);
+		return NULL;
+	}
+	aligned_len = (frame_len + 3) & ~3;
+	if (aligned_len >= len_from_slave) {
+		if (frame_len < skb->len)
+			skb_trim(skb, frame_len);
+		return skb;
+	}
 
-	return skb;
+	pos_in_aggr = 0;
+	while (pos_in_aggr + sizeof(*header) <= len_from_slave) {
+		struct sk_buff *frame_skb = NULL;
+
+		header = (struct esp_payload_header *)(skb->data + pos_in_aggr);
+		len = le16_to_cpu(header->len);
+		offset = le16_to_cpu(header->offset);
+		if (!len)
+			break;
+		if (len > ESP_RX_BUFFER_SIZE || !ESP_OFFSET_VALID(offset)) {
+			esp_err("Drop invalid aggregate pkt: len=%d offset=%d pos=%d\n",
+				len, offset, pos_in_aggr);
+			break;
+		}
+		frame_len = len + offset;
+		aligned_len = (frame_len + 3) & ~3;
+		if (pos_in_aggr + frame_len > len_from_slave) {
+			esp_err("Drop truncated aggregate pkt: len=%d offset=%d pos=%d total=%d\n",
+				len, offset, pos_in_aggr, len_from_slave);
+			break;
+		}
+
+		frame_skb = esp_if_alloc_skb(adapter, frame_len);
+		if (!frame_skb) {
+			esp_err("SKB alloc failed for aggregate frame\n");
+			break;
+		}
+		skb_put(frame_skb, frame_len);
+		memcpy(frame_skb->data, skb->data + pos_in_aggr, frame_len);
+		skb_queue_tail(&(context->rx_q), frame_skb);
+		pos_in_aggr += aligned_len;
+	}
+
+	dev_kfree_skb(skb);
+	return skb_dequeue(&(context->rx_q));
 }
 
 static int write_packet(struct esp_adapter *adapter, struct sk_buff *skb)
@@ -518,9 +607,10 @@ static int write_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 	cb = (struct esp_skb_cb *)skb->cb;
 	if (cb && cb->priv && (atomic_read(&tx_pending) >= TX_MAX_PENDING_COUNT)) {
 		esp_tx_pause(cb->priv);
+		H2E_HOST_STATS_INC(h2e_host_drop_queue_full);
 		dev_kfree_skb(skb);
 		skb = NULL;
-/*		esp_err("TX Pause busy");*/
+	/*		esp_err("TX Pause busy");*/
 		return -EBUSY;
 	}
 
@@ -536,6 +626,7 @@ static int write_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 		prio = PRIO_Q_LOW;
 
 	atomic_inc(&queue_items[prio]);
+	H2E_HOST_STATS_INC(h2e_host_tx_queued);
 	skb_queue_tail(&(sdio_context.tx_q[prio]), skb);
 
 	return 0;
@@ -549,7 +640,7 @@ static int is_sdio_write_buffer_available(u32 buf_needed)
 	int ret = 0;
 	static u32 buf_available;
 	struct esp_sdio_context *context = &sdio_context;
-	u8 retry = MAX_WRITE_RETRIES;
+	int retry = MAX_WRITE_RETRIES;
 
 	/*If buffer needed are less than buffer available
 	  then only read for available buffer number from slave*/
@@ -591,9 +682,17 @@ static int tx_process(void *data)
 	struct esp_adapter *adapter = (struct esp_adapter *) data;
 	struct esp_sdio_context *context = NULL;
 	struct esp_skb_cb *cb = NULL;
-	u8 retry;
+	struct esp_payload_header *payload_header = NULL;
+	u8 *aggr_buf = NULL;
+	u32 aggr_len = 0;
+	u32 frame_len = 0;
+	bool flush_after_pkt = false;
+	int prio = -1;
 
 	context = adapter->if_context;
+	aggr_buf = kzalloc(ESP_HOST_TX_AGGR_SIZE, GFP_KERNEL);
+	if (!aggr_buf)
+		return -ENOMEM;
 
 	while (!kthread_should_stop()) {
 
@@ -609,64 +708,120 @@ static int tx_process(void *data)
 			continue;
 		}
 
-		if (atomic_read(&queue_items[PRIO_Q_HIGH]) > 0) {
-			tx_skb = skb_dequeue(&(context->tx_q[PRIO_Q_HIGH]));
+		aggr_len = 0;
+		while (aggr_len < ESP_HOST_TX_AGGR_SIZE) {
+			prio = -1;
+			if (atomic_read(&queue_items[PRIO_Q_HIGH]) > 0)
+				prio = PRIO_Q_HIGH;
+			else if (atomic_read(&queue_items[PRIO_Q_MID]) > 0)
+				prio = PRIO_Q_MID;
+			else if (atomic_read(&queue_items[PRIO_Q_LOW]) > 0)
+				prio = PRIO_Q_LOW;
+
+			if (prio < 0)
+				break;
+
+			tx_skb = skb_peek(&(context->tx_q[prio]));
 			if (!tx_skb) {
+				atomic_dec(&queue_items[prio]);
 				continue;
 			}
-			atomic_dec(&queue_items[PRIO_Q_HIGH]);
-		} else if (atomic_read(&queue_items[PRIO_Q_MID]) > 0) {
-			tx_skb = skb_dequeue(&(context->tx_q[PRIO_Q_MID]));
-			if (!tx_skb) {
+
+			payload_header = (struct esp_payload_header *)tx_skb->data;
+				if (!ESP_OFFSET_VALID(le16_to_cpu(payload_header->offset)) ||
+				    !le16_to_cpu(payload_header->len)) {
+					esp_err("Drop invalid tx pkt: len=%d offset=%d\n",
+						le16_to_cpu(payload_header->len),
+						le16_to_cpu(payload_header->offset));
+					H2E_HOST_STATS_INC(h2e_host_drop_invalid);
+					tx_skb = skb_dequeue(&(context->tx_q[prio]));
+					if (tx_skb) {
+					atomic_dec(&queue_items[prio]);
+					dev_kfree_skb(tx_skb);
+					tx_skb = NULL;
+				}
 				continue;
 			}
-			atomic_dec(&queue_items[PRIO_Q_MID]);
-		} else if (atomic_read(&queue_items[PRIO_Q_LOW]) > 0) {
-			tx_skb = skb_dequeue(&(context->tx_q[PRIO_Q_LOW]));
-			if (!tx_skb) {
+			frame_len = le16_to_cpu(payload_header->offset) +
+				le16_to_cpu(payload_header->len);
+				if (frame_len > tx_skb->len) {
+					esp_err("Drop truncated tx pkt: frame_len=%d skb_len=%d\n",
+						frame_len, tx_skb->len);
+					H2E_HOST_STATS_INC(h2e_host_drop_truncated);
+					tx_skb = skb_dequeue(&(context->tx_q[prio]));
+					if (tx_skb) {
+					atomic_dec(&queue_items[prio]);
+					dev_kfree_skb(tx_skb);
+					tx_skb = NULL;
+				}
 				continue;
 			}
-			atomic_dec(&queue_items[PRIO_Q_LOW]);
-		} else {
-			/* esp_verbose("not ready high=%d mid=%d low=%d\n",
-					atomic_read(&queue_items[PRIO_Q_HIGH]),
-					atomic_read(&queue_items[PRIO_Q_MID]),
-					atomic_read(&queue_items[PRIO_Q_LOW])); */
+			len_to_send = (frame_len + 3) & ~3;
+			flush_after_pkt = prio == PRIO_Q_LOW &&
+				le16_to_cpu(payload_header->len) <=
+				ESP_HOST_TX_LATENCY_BYPASS_SIZE;
+			if (flush_after_pkt && aggr_len)
+				break;
+			if (aggr_len + len_to_send > ESP_HOST_TX_AGGR_SIZE)
+				break;
+
+			tx_skb = skb_dequeue(&(context->tx_q[prio]));
+			if (!tx_skb)
+				continue;
+
+			atomic_dec(&queue_items[prio]);
+			if (atomic_read(&tx_pending))
+				atomic_dec(&tx_pending);
+
+			/* resume network tx queue if bearable load */
+			cb = (struct esp_skb_cb *)tx_skb->cb;
+			if (cb && cb->priv &&
+			    atomic_read(&tx_pending) < TX_RESUME_THRESHOLD) {
+				esp_tx_resume(cb->priv);
+#if TEST_RAW_TP
+				if (raw_tp_mode != 0)
+					esp_raw_tp_queue_resume();
+#endif
+			}
+
+			memcpy(aggr_buf + aggr_len, tx_skb->data, frame_len);
+			if (len_to_send > frame_len)
+				memset(aggr_buf + aggr_len + frame_len, 0,
+				       len_to_send - frame_len);
+			aggr_len += len_to_send;
+			dev_kfree_skb(tx_skb);
+			tx_skb = NULL;
+			if (flush_after_pkt)
+				break;
+			}
+
+		if (!aggr_len) {
 			msleep(1);
 			continue;
 		}
 
-		if (atomic_read(&tx_pending))
-			atomic_dec(&tx_pending);
+		buf_needed = (aggr_len + ESP_RX_BUFFER_SIZE - 1) / ESP_RX_BUFFER_SIZE;
 
-		retry = MAX_WRITE_RETRIES;
+			/*If SDIO slave buffer is available to write then only write data
+			else wait till buffer is available*/
+			do {
+				ret = is_sdio_write_buffer_available(buf_needed);
+				if (ret)
+					break;
+				H2E_HOST_STATS_INC(h2e_host_no_credit_waits);
+				msleep(1);
+			} while (!kthread_should_stop());
+			if (kthread_should_stop())
+				break;
 
-		/* resume network tx queue if bearable load */
-		cb = (struct esp_skb_cb *)tx_skb->cb;
-		if (cb && cb->priv && atomic_read(&tx_pending) < TX_RESUME_THRESHOLD) {
-			esp_tx_resume(cb->priv);
-#if TEST_RAW_TP
-			if (raw_tp_mode != 0) {
-				esp_raw_tp_queue_resume();
-			}
-#endif
-		}
-
-		buf_needed = (tx_skb->len + ESP_RX_BUFFER_SIZE - 1) / ESP_RX_BUFFER_SIZE;
-
-		/*If SDIO slave buffer is available to write then only write data
-		else wait till buffer is available*/
-		ret = is_sdio_write_buffer_available(buf_needed);
-		if (!ret) {
-			dev_kfree_skb(tx_skb);
-			continue;
-		}
-
-		pos = tx_skb->data;
+		pos = aggr_buf;
 		data_left = len_to_send = 0;
 
-		data_left = tx_skb->len;
-		pad = ESP_BLOCK_SIZE - (data_left % ESP_BLOCK_SIZE);
+		data_left = aggr_len;
+		pad = (ESP_BLOCK_SIZE - (data_left % ESP_BLOCK_SIZE)) %
+			ESP_BLOCK_SIZE;
+		if (pad)
+			memset(aggr_buf + aggr_len, 0, pad);
 		data_left += pad;
 
 
@@ -676,10 +831,11 @@ static int tx_process(void *data)
 			ret = esp_write_block(context, ESP_SLAVE_CMD53_END_ADDR - len_to_send,
 					pos, (len_to_send + 3) & (~3), ACQUIRE_LOCK);
 
-			if (ret) {
-				esp_err("Failed to send data: %d %d %d\n", ret, len_to_send, data_left);
-				break;
-			}
+				if (ret) {
+					esp_err("Failed to send data: %d %d %d\n", ret, len_to_send, data_left);
+					H2E_HOST_STATS_INC(h2e_host_write_fail);
+					break;
+				}
 
 			data_left -= len_to_send;
 			pos += len_to_send;
@@ -687,17 +843,16 @@ static int tx_process(void *data)
 
 		if (ret) {
 			/* drop the packet */
-			dev_kfree_skb(tx_skb);
 			continue;
 		}
 
-		context->tx_buffer_count += buf_needed;
-		context->tx_buffer_count = context->tx_buffer_count % ESP_TX_BUFFER_MAX;
+			context->tx_buffer_count += buf_needed;
+			context->tx_buffer_count = context->tx_buffer_count % ESP_TX_BUFFER_MAX;
+			H2E_HOST_STATS_INC(h2e_host_tx_sent);
+			print_h2e_host_stats();
+		}
 
-		dev_kfree_skb(tx_skb);
-		tx_skb = NULL;
-	}
-
+	kfree(aggr_buf);
 	do_exit(0);
 	return 0;
 }

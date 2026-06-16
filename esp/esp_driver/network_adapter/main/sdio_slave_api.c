@@ -32,6 +32,8 @@
 #include "stats.h"
 #include "soc/gpio_reg.h"
 #include "esp_fw_version.h"
+#include "esp_heap_caps.h"
+#include "esp_memory_utils.h"
 
 #define SDIO_DMA_ALIGNMENT_BYTES    4
 #define SDIO_DMA_ALIGNMENT_MASK     (SDIO_DMA_ALIGNMENT_BYTES - 1)
@@ -235,6 +237,7 @@ static int32_t sdio_write(interface_handle_t *handle, interface_buffer_handle_t 
     uint8_t* sendbuf = NULL;
     uint16_t offset = 0;
     struct esp_payload_header *header = NULL;
+    bool free_sendbuf = false;
 
     if (!handle || !buf_handle) {
         ESP_LOGE(TAG, "Invalid arguments");
@@ -263,6 +266,16 @@ static int32_t sdio_write(interface_handle_t *handle, interface_buffer_handle_t 
         uint32_t payload_addr = (uint32_t)buf_handle->payload;
         align_padding = (SDIO_DMA_ALIGNMENT_BYTES - (payload_addr % SDIO_DMA_ALIGNMENT_BYTES)) % SDIO_DMA_ALIGNMENT_BYTES;
         sendbuf = (uint8_t *)buf_handle->payload - sizeof(struct esp_payload_header) - align_padding;
+        if (!esp_ptr_dma_capable(sendbuf) || !IS_SDIO_DMA_ALIGNED(sendbuf)) {
+            align_padding = 0;
+            sendbuf = heap_caps_malloc(buf_handle->payload_len + offset, MALLOC_CAP_DMA);
+            if (sendbuf == NULL) {
+                ESP_LOGE(TAG, "Malloc send buffer fail!");
+                return ESP_ERR_NO_MEM;
+            }
+            memcpy(sendbuf + offset, buf_handle->payload, buf_handle->payload_len);
+            free_sendbuf = true;
+        }
     } else {
 
         sendbuf = heap_caps_malloc(buf_handle->payload_len + offset, MALLOC_CAP_DMA);
@@ -301,7 +314,13 @@ static int32_t sdio_write(interface_handle_t *handle, interface_buffer_handle_t 
     ret = sdio_slave_transmit(sendbuf, total_len);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "sdio slave transmit error, ret : 0x%x\r\n", ret);
+        if (free_sendbuf) {
+            heap_caps_free(sendbuf);
+        }
         return ret;
+    }
+    if (free_sendbuf) {
+        heap_caps_free(sendbuf);
     }
 #if 0
     ESP_LOGE(TAG, "\nTo Host");
@@ -310,6 +329,29 @@ static int32_t sdio_write(interface_handle_t *handle, interface_buffer_handle_t 
 #endif
 
     return buf_handle->payload_len;
+}
+
+int32_t sdio_write_aggr(interface_handle_t *handle, uint8_t *payload,
+                        uint16_t payload_len)
+{
+    esp_err_t ret = ESP_OK;
+
+    if (!handle || !payload || !payload_len) {
+        ESP_LOGE(TAG, "Invalid aggregate write arguments");
+        return ESP_FAIL;
+    }
+
+    if (handle->state != ACTIVE || power_save_on) {
+        return ESP_FAIL;
+    }
+
+    ret = sdio_slave_transmit(payload, payload_len);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "sdio slave aggregate transmit error, ret: 0x%x\r\n", ret);
+        return ret;
+    }
+
+    return payload_len;
 }
 
 esp_err_t send_bootup_event_to_host(uint8_t cap)
@@ -397,11 +439,6 @@ esp_err_t send_bootup_event_to_host(uint8_t cap)
 
 static int sdio_read(interface_handle_t *if_handle, interface_buffer_handle_t *buf_handle)
 {
-    struct esp_payload_header *header = NULL;
-#if CONFIG_ESP_SDIO_CHECKSUM
-    uint16_t rx_checksum = 0, checksum = 0;
-#endif
-    uint16_t len = 0, offset = 0;
     size_t sdio_read_len = 0;
 
     if (!if_handle) {
@@ -417,42 +454,12 @@ static int sdio_read(interface_handle_t *if_handle, interface_buffer_handle_t *b
                     &(sdio_read_len), portMAX_DELAY);
     buf_handle->payload_len = sdio_read_len & 0xFFFF;
 
-    header = (struct esp_payload_header *) buf_handle->payload;
-
-    offset = le16toh(header->offset);
-    len = le16toh(header->len);
-
-    if (len == 0) {
-        sdio_read_done(buf_handle->sdio_buf_handle);
-        return 0;
-    }
-    if (len > RX_BUF_SIZE || !ESP_OFFSET_VALID(offset)) {
-        ESP_LOGE(TAG, "Drop invalid pkt: len=%d offset=%d", len, offset);
-        sdio_read_done(buf_handle->sdio_buf_handle);
-        return 0;
-    }
-
-#if CONFIG_ESP_SDIO_CHECKSUM
-    rx_checksum = le16toh(header->checksum);
-    header->checksum = 0;
-
-    checksum = compute_checksum(buf_handle->payload, len + offset);
-
-    if (checksum != rx_checksum) {
-        ESP_LOGD(TAG, "checksum mismatch");
-        sdio_read_done(buf_handle->sdio_buf_handle);
-        return ESP_FAIL;
-    }
-#endif
-
-    buf_handle->if_type = header->if_type;
-    buf_handle->if_num = header->if_num;
     buf_handle->free_buf_handle = sdio_read_done;
 #if 0
     ESP_LOGE(TAG, "\nFrom Host");
-    ESP_LOG_BUFFER_HEXDUMP("h->s", buf_handle->payload, len, ESP_LOG_INFO);
+    ESP_LOG_BUFFER_HEXDUMP("h->s", buf_handle->payload, buf_handle->payload_len, ESP_LOG_INFO);
 #endif
-    return len;
+    return buf_handle->payload_len;
 }
 
 static esp_err_t sdio_reset(interface_handle_t *handle)
