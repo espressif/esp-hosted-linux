@@ -16,12 +16,15 @@ target ?= sdio
 MODULE_NAME := esp32_$(target)
 
 # Debug and AP support
+# NOTE: use ccflags-y (not EXTRA_CFLAGS) for -D defines. Modern kbuild
+# (kernel 6.x, confirmed on 6.18) ignores EXTRA_CFLAGS, which silently
+# dropped these defines and compiled out the debug stats.
 CONFIG_DEBUG_LOGS ?= y
 ifeq ($(CONFIG_AP_SUPPORT), y)
-    EXTRA_CFLAGS += -DCONFIG_AP_MODE
+    ccflags-y += -DCONFIG_AP_MODE
 endif
 ifeq ($(CONFIG_DEBUG_STATS), y)
-    EXTRA_CFLAGS += -DESP_DEBUG_STATS
+    ccflags-y += -DESP_DEBUG_STATS
 endif
 
 # Source and include paths
