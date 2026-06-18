@@ -717,7 +717,8 @@ static int tx_process(void *data)
 	ktime_t aggr_start, credit_start, write_start;
 
 	context = adapter->if_context;
-	aggr_buf = kzalloc(ESP_HOST_TX_AGGR_SIZE, GFP_KERNEL);
+	u32 tx_aggr_size = adapter->tx_aggr_size ? adapter->tx_aggr_size : ESP_HOST_TX_AGGR_SIZE;
+	aggr_buf = kzalloc(tx_aggr_size, GFP_KERNEL);
 	if (!aggr_buf)
 		return -ENOMEM;
 
@@ -737,7 +738,7 @@ static int tx_process(void *data)
 
 		aggr_start = ktime_get();
 		aggr_len = 0;
-		while (aggr_len < ESP_HOST_TX_AGGR_SIZE) {
+		while (aggr_len < tx_aggr_size) {
 			prio = -1;
 			if (atomic_read(&queue_items[PRIO_Q_HIGH]) > 0)
 				prio = PRIO_Q_HIGH;
@@ -790,7 +791,7 @@ static int tx_process(void *data)
 				ESP_HOST_TX_LATENCY_BYPASS_SIZE;
 			if (flush_after_pkt && aggr_len)
 				break;
-			if (aggr_len + len_to_send > ESP_HOST_TX_AGGR_SIZE)
+			if (aggr_len + len_to_send > tx_aggr_size)
 				break;
 
 			tx_skb = skb_dequeue(&(context->tx_q[prio]));
