@@ -296,6 +296,13 @@ esp_err_t send_bootup_event_to_host(uint8_t cap)
     *pos = LENGTH_1_BYTE;                 pos++; len++;
     *pos = cap;                           pos++; len++;
 
+    /* TLV - Slave RX Buffer Size */
+    *pos = ESP_BOOTUP_RX_BUF_SIZE;        pos++; len++;
+    *pos = 4;                             pos++; len++;
+    uint32_t rx_buf_sz = htole32(RX_BUF_SIZE);
+    memcpy(pos, &rx_buf_sz, sizeof(rx_buf_sz));
+    pos += sizeof(rx_buf_sz);             len += sizeof(rx_buf_sz);
+
     /* TLV - FW data */
     *pos = ESP_BOOTUP_FW_DATA;            pos++; len++;
     *pos = sizeof(struct fw_data);        pos++; len++;

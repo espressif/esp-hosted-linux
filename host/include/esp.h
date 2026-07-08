@@ -130,6 +130,7 @@ struct esp_adapter {
 
 	unsigned long           state_flags;
 	int                     chipset;
+	u32                     tx_aggr_size;
 };
 
 struct esp_device {

@@ -308,6 +308,8 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 	}
 
 	clear_bit(ESP_INIT_DONE, &adapter->state_flags);
+	/* Initialize dynamic TX aggregate size default to 0, transport-specific defaults will be used if TLV is absent */
+	adapter->tx_aggr_size = 0;
 	/* Deinit module if already initialized */
 	test_raw_tp_cleanup();
 	esp_deinit_module(adapter);
@@ -322,6 +324,13 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 		switch (*pos) {
 		case ESP_BOOTUP_CAPABILITY:
 			adapter->capabilities = *(pos + 2);
+			break;
+		case ESP_BOOTUP_RX_BUF_SIZE:
+			{
+				u32 val = le32_to_cpup((__le32 *)(pos + 2));
+				adapter->tx_aggr_size = val;
+				esp_info("Slave RX Buffer Size configured dynamically: %u bytes\n", val);
+			}
 			break;
 		case ESP_BOOTUP_FIRMWARE_CHIP_ID:
 			ret = esp_validate_chipset(adapter, *(pos + 2));

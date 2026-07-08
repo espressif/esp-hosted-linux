@@ -104,8 +104,12 @@ static int raw_tp_tx_process(void *data)
 			}
 
 		} else {
-			if (traffic_open_init_done)
-				wait_for_completion_interruptible(&traffic_open);
+			if (traffic_open_init_done) {
+				reinit_completion(&traffic_open);
+				if (!esp_is_tx_queue_paused(priv)) {
+					wait_for_completion_interruptible(&traffic_open);
+				}
+			}
 		}
 	}
 	esp_info("raw tp tx thrd stopped\n");

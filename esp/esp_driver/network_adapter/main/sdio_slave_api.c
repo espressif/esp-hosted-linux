@@ -35,11 +35,15 @@
 #include "esp_heap_caps.h"
 #include "esp_memory_utils.h"
 
+#include "hal/sdio_slave_ll.h"
+
 #define SDIO_DMA_ALIGNMENT_BYTES    4
 #define SDIO_DMA_ALIGNMENT_MASK     (SDIO_DMA_ALIGNMENT_BYTES - 1)
 #define IS_SDIO_DMA_ALIGNED(val)    (!((uint32_t)(val) & SDIO_DMA_ALIGNMENT_MASK))
 
-static uint8_t sdio_slave_rx_buffer[RX_BUF_NUM][RX_BUF_SIZE];
+uint32_t rx_buf_size = 15872;
+uint32_t sdio_tx_aggr_size = 15872;
+static uint8_t *sdio_slave_rx_buffer[RX_BUF_NUM];
 
 static interface_context_t context;
 static interface_handle_t if_handle_g;
@@ -110,6 +114,37 @@ static interface_handle_t * sdio_init(void)
 {
     esp_err_t ret = ESP_OK;
     sdio_slave_buf_handle_t handle = {0};
+
+    /* Dynamically calculate RX_BUF_SIZE and SDIO_TX_AGGR_SIZE based on hardware bitfields */
+
+    /*
+     * rx_buf_size — max SDIO CMD53 payload per transfer
+     *
+     * Sized from two hardware limits:
+     *
+     * 1) ESP SDIO slave DMA descriptor: size and length are 14/12-bit fields
+     *    (sdio_slave_ll_desc_t), so one descriptor can cover at most 2^14 - 1 = 16383/4095 bytes.
+     *
+     * 2) SDIO block mode (ESP_BLOCK_SIZE = 512): CMD53 block transfers must be
+     *    multiples of 512 bytes.
+     *
+     * Largest 512-byte-aligned size that fits in one descriptor:
+     * esp32c6/esp32c5/esp32c61
+     *   floor(16383 / 512) = 31 blocks
+     *   31 * 512 = 15872
+     * (32 * 512 = 16384 exceeds the 14-bit limit.)
+     * esp32:
+     *   floor(4095 / 512) = 7 blocks
+     *   7 * 512 = 3584
+     *
+     */
+
+    sdio_slave_ll_desc_t dummy;
+    memset(&dummy, 0xFF, sizeof(dummy));
+    rx_buf_size = (dummy.size / 512) * 512;
+    sdio_tx_aggr_size = rx_buf_size;
+    ESP_LOGI(TAG, "Calculated RX_BUF_SIZE dynamically: %lu (desc.size limit: %lu)", (unsigned long)rx_buf_size, (unsigned long)dummy.size);
+
     sdio_slave_config_t config = {
         .sending_mode       = SDIO_SLAVE_SEND_STREAM,
         .send_queue_size    = SDIO_SLAVE_QUEUE_SIZE,
@@ -158,6 +193,8 @@ static interface_handle_t * sdio_init(void)
     gpio_config(&io_conf);
 
     for (int i = 0; i < RX_BUF_NUM; i++) {
+        sdio_slave_rx_buffer[i] = heap_caps_malloc(rx_buf_size, MALLOC_CAP_DMA);
+        assert(sdio_slave_rx_buffer[i] != NULL);
         handle = sdio_slave_recv_register_buf(sdio_slave_rx_buffer[i]);
         assert(handle != NULL);
 
@@ -395,6 +432,13 @@ esp_err_t send_bootup_event_to_host(uint8_t cap)
     *pos = LENGTH_1_BYTE;                 pos++; len++;
     *pos = cap;                           pos++; len++;
 
+    /* TLV - Slave RX Buffer Size */
+    *pos = ESP_BOOTUP_RX_BUF_SIZE;        pos++; len++;
+    *pos = 4;                             pos++; len++;
+    uint32_t rx_buf_sz = htole32(RX_BUF_SIZE);
+    memcpy(pos, &rx_buf_sz, sizeof(rx_buf_sz));
+    pos += sizeof(rx_buf_sz);             len += sizeof(rx_buf_sz);
+
     /* TLV - FW data */
     *pos = ESP_BOOTUP_FW_DATA;            pos++; len++;
     *pos = sizeof(struct fw_data);        pos++; len++;
@@ -507,4 +551,10 @@ static void sdio_deinit(interface_handle_t *handle)
     }
     sdio_slave_stop();
     sdio_slave_reset();
+    for (int i = 0; i < RX_BUF_NUM; i++) {
+        if (sdio_slave_rx_buffer[i]) {
+            free(sdio_slave_rx_buffer[i]);
+            sdio_slave_rx_buffer[i] = NULL;
+        }
+    }
 }

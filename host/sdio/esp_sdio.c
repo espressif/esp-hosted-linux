@@ -18,6 +18,7 @@
 #include "esp_api.h"
 #include "esp_bt_api.h"
 #include <linux/kthread.h>
+#include <linux/ktime.h>
 #include "esp_stats.h"
 #include "esp_utils.h"
 #include "esp_kernel_port.h"
@@ -44,6 +45,9 @@ static atomic_t h2e_host_drop_truncated;
 static atomic_t h2e_host_no_credit_waits;
 static atomic_t h2e_host_write_fail;
 static unsigned long h2e_host_stats_jiffies;
+static u64 h2e_host_time_write_us;
+static u64 h2e_host_time_credit_us;
+static u64 h2e_host_time_aggr_us;
 #endif
 struct task_struct *tx_thread;
 volatile u8 host_sleep;
@@ -55,6 +59,10 @@ static int write_packet(struct esp_adapter *adapter, struct sk_buff *skb);
 
 #ifdef ESP_DEBUG_STATS
 #define H2E_HOST_STATS_INC(counter) atomic_inc(&(counter))
+#define H2E_HOST_STATS_TIME_ADD(counter, start_time) \
+	do { \
+		(counter) += ktime_to_us(ktime_sub(ktime_get(), start_time)); \
+	} while (0)
 
 static void print_h2e_host_stats(void)
 {
@@ -64,25 +72,34 @@ static void print_h2e_host_stats(void)
 		return;
 
 	h2e_host_stats_jiffies = now;
+	int sent = atomic_read(&h2e_host_tx_sent);
 	if (atomic_read(&h2e_host_tx_queued) ||
-	    atomic_read(&h2e_host_tx_sent) ||
+	    sent ||
 	    atomic_read(&h2e_host_drop_queue_full) ||
 	    atomic_read(&h2e_host_drop_invalid) ||
 	    atomic_read(&h2e_host_drop_truncated) ||
 	    atomic_read(&h2e_host_no_credit_waits) ||
 	    atomic_read(&h2e_host_write_fail)) {
-		esp_dbg("H2E host stats: queued=%d sent=%d qfull=%d invalid=%d truncated=%d no_credit=%d write_fail=%d\n",
+		u64 avg_write = sent ? (h2e_host_time_write_us / sent) : 0;
+		u64 avg_credit = sent ? (h2e_host_time_credit_us / sent) : 0;
+		u64 avg_aggr = sent ? (h2e_host_time_aggr_us / sent) : 0;
+		h2e_host_time_write_us = 0;
+		h2e_host_time_credit_us = 0;
+		h2e_host_time_aggr_us = 0;
+		esp_info("H2E host stats: queued=%d sent=%d qfull=%d invalid=%d truncated=%d no_credit=%d write_fail=%d avg_us(write/credit/aggr)=%llu/%llu/%llu\n",
 			 atomic_xchg(&h2e_host_tx_queued, 0),
 			 atomic_xchg(&h2e_host_tx_sent, 0),
 			 atomic_xchg(&h2e_host_drop_queue_full, 0),
 			 atomic_xchg(&h2e_host_drop_invalid, 0),
 			 atomic_xchg(&h2e_host_drop_truncated, 0),
 			 atomic_xchg(&h2e_host_no_credit_waits, 0),
-			 atomic_xchg(&h2e_host_write_fail, 0));
+			 atomic_xchg(&h2e_host_write_fail, 0),
+			 avg_write, avg_credit, avg_aggr);
 	}
 }
 #else
 #define H2E_HOST_STATS_INC(counter) do { } while (0)
+#define H2E_HOST_STATS_TIME_ADD(counter, start_time) do { } while (0)
 static inline void print_h2e_host_stats(void) { }
 #endif
 
@@ -247,11 +264,13 @@ static int esp_get_len_from_slave(struct esp_sdio_context *context, u32 *rx_size
 		/* Handle a case of roll over */
 		temp = ESP_RX_BYTE_MAX - context->rx_byte_count;
 		*len = temp + *len;
+	}
 
-		if (*len > ESP_HOST_RX_AGGR_SIZE) {
-			esp_info("Len from slave[%d] exceeds max [%d]\n",
-					*len, ESP_HOST_RX_AGGR_SIZE);
-		}
+	if (*len > ESP_HOST_RX_AGGR_SIZE) {
+		esp_err("Len from slave[%d] exceeds max [%d]\n",
+				*len, ESP_HOST_RX_AGGR_SIZE);
+		kfree(len);
+		return -EMSGSIZE;
 	}
 	*rx_size = *len;
 
@@ -457,7 +476,14 @@ static struct sk_buff *read_packet(struct esp_adapter *adapter)
 	/* Read length */
 	ret = esp_get_len_from_slave(context, &len_from_slave, LOCK_ALREADY_ACQUIRED);
 
-	if (ret || !len_from_slave) {
+	if (ret) {
+		if (ret == -EMSGSIZE)
+			atomic_set(&context->adapter->state, ESP_CONTEXT_DISABLED);
+		sdio_release_host(context->func);
+		return NULL;
+	}
+
+	if (!len_from_slave) {
 		sdio_release_host(context->func);
 		return NULL;
 	}
@@ -652,7 +678,7 @@ static int is_sdio_write_buffer_available(u32 buf_needed)
 
 				/* Release SDIO and retry after delay*/
 				retry--;
-				usleep_range(10, 50);
+				usleep_range(5, 10);
 				continue;
 			}
 
@@ -688,9 +714,11 @@ static int tx_process(void *data)
 	u32 frame_len = 0;
 	bool flush_after_pkt = false;
 	int prio = -1;
+	ktime_t aggr_start, credit_start, write_start;
 
 	context = adapter->if_context;
-	aggr_buf = kzalloc(ESP_HOST_TX_AGGR_SIZE, GFP_KERNEL);
+	u32 tx_aggr_size = adapter->tx_aggr_size ? adapter->tx_aggr_size : ESP_HOST_TX_AGGR_SIZE;
+	aggr_buf = kzalloc(tx_aggr_size, GFP_KERNEL);
 	if (!aggr_buf)
 		return -ENOMEM;
 
@@ -708,8 +736,9 @@ static int tx_process(void *data)
 			continue;
 		}
 
+		aggr_start = ktime_get();
 		aggr_len = 0;
-		while (aggr_len < ESP_HOST_TX_AGGR_SIZE) {
+		while (aggr_len < tx_aggr_size) {
 			prio = -1;
 			if (atomic_read(&queue_items[PRIO_Q_HIGH]) > 0)
 				prio = PRIO_Q_HIGH;
@@ -762,7 +791,7 @@ static int tx_process(void *data)
 				ESP_HOST_TX_LATENCY_BYPASS_SIZE;
 			if (flush_after_pkt && aggr_len)
 				break;
-			if (aggr_len + len_to_send > ESP_HOST_TX_AGGR_SIZE)
+			if (aggr_len + len_to_send > tx_aggr_size)
 				break;
 
 			tx_skb = skb_dequeue(&(context->tx_q[prio]));
@@ -796,21 +825,24 @@ static int tx_process(void *data)
 			}
 
 		if (!aggr_len) {
-			msleep(1);
+			usleep_range(10, 20);
 			continue;
 		}
+		H2E_HOST_STATS_TIME_ADD(h2e_host_time_aggr_us, aggr_start);
 
 		buf_needed = (aggr_len + ESP_RX_BUFFER_SIZE - 1) / ESP_RX_BUFFER_SIZE;
 
 			/*If SDIO slave buffer is available to write then only write data
 			else wait till buffer is available*/
+			credit_start = ktime_get();
 			do {
 				ret = is_sdio_write_buffer_available(buf_needed);
 				if (ret)
 					break;
 				H2E_HOST_STATS_INC(h2e_host_no_credit_waits);
-				msleep(1);
+				usleep_range(10, 20);
 			} while (!kthread_should_stop());
+			H2E_HOST_STATS_TIME_ADD(h2e_host_time_credit_us, credit_start);
 			if (kthread_should_stop())
 				break;
 
@@ -825,6 +857,7 @@ static int tx_process(void *data)
 		data_left += pad;
 
 
+		write_start = ktime_get();
 		do {
 			block_cnt = data_left / ESP_BLOCK_SIZE;
 			len_to_send = data_left;
@@ -840,6 +873,7 @@ static int tx_process(void *data)
 			data_left -= len_to_send;
 			pos += len_to_send;
 		} while (data_left);
+		H2E_HOST_STATS_TIME_ADD(h2e_host_time_write_us, write_start);
 
 		if (ret) {
 			/* drop the packet */

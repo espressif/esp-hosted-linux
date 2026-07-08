@@ -877,31 +877,31 @@ Refer [RAW throughput guide](docs/Raw_TP_Testing.md) for verifying connection as
 <tr>
 <td rowspan=4 align="center">ESP32-C5</td>
 <td align="center">SDIO 2.4 GHz (11n 40MHz)</td>
-<td align="center">47.3 Mbps</td>
-<td align="center">51.9 Mbps</td>
-<td align="center">70.5 Mbps</td>
-<td align="center">59.7 Mbps</td>
+<td align="center">62.3 Mbps</td>
+<td align="center">60.3 Mbps</td>
+<td align="center">97.2 Mbps</td>
+<td align="center">81.7 Mbps</td>
 </tr>
 <tr>
 <td align="center">SDIO 2.4 GHz (11ax 20MHz)</td>
-<td align="center">44.1 Mbps</td>
-<td align="center">44.5 Mbps</td>
-<td align="center">67.9 Mbps</td>
-<td align="center">48.5 Mbps</td>
+<td align="center">52.7 Mbps</td>
+<td align="center">42.4 Mbps</td>
+<td align="center">66.2 Mbps</td>
+<td align="center">49.4 Mbps</td>
 </tr>
 <tr>
 <td align="center">SDIO 5 GHz (11n 40MHz)</td>
-<td align="center">48.2 Mbps</td>
-<td align="center">52.3 Mbps</td>
-<td align="center">70.6 Mbps</td>
-<td align="center">65.1 Mbps</td>
+<td align="center">63.3 Mbps</td>
+<td align="center">52.5 Mbps</td>
+<td align="center">97.8 Mbps</td>
+<td align="center">81.3 Mbps</td>
 </tr>
 <tr>
 <td align="center">SDIO 5 GHz (11ax 20MHz)</td>
-<td align="center">44.4 Mbps</td>
-<td align="center">54.4 Mbps</td>
-<td align="center">69.9 Mbps</td>
-<td align="center">66.7 Mbps</td>
+<td align="center">54.8 Mbps</td>
+<td align="center">47.6 Mbps</td>
+<td align="center">68 Mbps</td>
+<td align="center">65 Mbps</td>
 </tr>
 <tr>
 <td rowspan=2 align="center">ESP32-C6</td>

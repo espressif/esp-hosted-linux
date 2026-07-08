@@ -382,10 +382,9 @@ static void free_tx_buf_handle(interface_buffer_handle_t *buf_handle)
 }
 
 #ifdef CONFIG_ESP_SDIO_HOST_INTERFACE
-static void process_low_prio_tx_packets(uint16_t queued)
+static void process_low_prio_tx_packets(uint16_t queued, uint8_t *aggr_buf)
 {
     interface_buffer_handle_t buf_handle = {0};
-    uint8_t *aggr_buf = NULL;
     uint16_t aggr_len = 0;
     bool flush_after_pkt = false;
 
@@ -402,7 +401,6 @@ static void process_low_prio_tx_packets(uint16_t queued)
         return;
     }
 
-    aggr_buf = heap_caps_malloc(SDIO_TX_AGGR_SIZE, MALLOC_CAP_DMA);
     if (!aggr_buf) {
         if (xQueueReceive(to_host_queue[PRIO_Q_LOW], &buf_handle, portMAX_DELAY)) {
             process_tx_pkt(&buf_handle);
@@ -410,14 +408,18 @@ static void process_low_prio_tx_packets(uint16_t queued)
         return;
     }
 
-    while (queued--) {
+    while (queued || uxQueueMessagesWaiting(to_host_queue[PRIO_Q_LOW])) {
         struct esp_payload_header *header = NULL;
         uint16_t frame_len = 0;
         uint16_t aligned_len = 0;
         uint16_t offset = sizeof(struct esp_payload_header);
+        TickType_t wait = queued ? portMAX_DELAY : 0;
 
-        if (!xQueueReceive(to_host_queue[PRIO_Q_LOW], &buf_handle, portMAX_DELAY)) {
-            continue;
+        if (!xQueueReceive(to_host_queue[PRIO_Q_LOW], &buf_handle, wait)) {
+            break;
+        }
+        if (queued) {
+            queued--;
         }
 
         if (!buf_handle.payload || !buf_handle.payload_len ||
@@ -477,7 +479,6 @@ static void process_low_prio_tx_packets(uint16_t queued)
         }
     }
 
-    heap_caps_free(aggr_buf);
 }
 #endif
 
@@ -497,6 +498,13 @@ void send_task(void* pvParameters)
     uint16_t high_prio_pkt_waiting = 0;
     uint16_t mid_prio_pkt_waiting = 0;
     uint16_t low_prio_pkt_waiting = 0;
+#if CONFIG_ESP_SDIO_HOST_INTERFACE
+    uint8_t *sdio_aggr_buf = heap_caps_malloc(SDIO_TX_AGGR_SIZE, MALLOC_CAP_DMA);
+
+    if (!sdio_aggr_buf) {
+        ESP_LOGW(TAG, "SDIO aggregate buffer allocation failed, using single-packet path");
+    }
+#endif
 
     while (1) {
         high_prio_pkt_waiting = uxQueueMessagesWaiting(to_host_queue[PRIO_Q_HIGH]);
@@ -516,7 +524,7 @@ void send_task(void* pvParameters)
             }
         } else if (low_prio_pkt_waiting) {
 #if CONFIG_ESP_SDIO_HOST_INTERFACE
-            process_low_prio_tx_packets(low_prio_pkt_waiting);
+            process_low_prio_tx_packets(low_prio_pkt_waiting, sdio_aggr_buf);
 #else
             if (xQueueReceive(to_host_queue[PRIO_Q_LOW], &buf_handle, portMAX_DELAY)) {
                 process_tx_pkt(&buf_handle);

@@ -28,9 +28,9 @@
 #define ESP_SLAVE_LEN_MASK             0xFFFFF
 #define ESP_BLOCK_SIZE                 512
 #define ESP_RX_BYTE_MAX                0x100000
-#define ESP_RX_BUFFER_SIZE             3584
+#define ESP_RX_BUFFER_SIZE             15872
 #define ESP_HOST_TX_AGGR_SIZE          ESP_RX_BUFFER_SIZE
-#define ESP_HOST_RX_AGGR_SIZE          (4092 * 2)
+#define ESP_HOST_RX_AGGR_SIZE          15872
 #define ESP_HOST_TX_LATENCY_BYPASS_SIZE 256
 
 #define ESP_TX_BUFFER_MASK             0xFFF
