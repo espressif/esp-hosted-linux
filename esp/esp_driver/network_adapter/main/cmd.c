@@ -1527,6 +1527,7 @@ int process_auth_request(uint8_t if_type, uint8_t *payload, uint16_t payload_len
         ESP_LOGI(TAG, "AUTH Commit\n");
 
 #if 0
+#ifdef CONFIG_SOC_WIFI_SUPPORT_5G
         wifi_protocols_t protocols = {
             .ghz_2g = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N,
             .ghz_5g = WIFI_PROTOCOL_11A | WIFI_PROTOCOL_11N,
@@ -1543,6 +1544,17 @@ int process_auth_request(uint8_t if_type, uint8_t *payload, uint16_t payload_len
         if (ret) {
             ESP_LOGE(TAG, "Failed to set wifi bandwidth: %d\n", ret);
         }
+#else
+        ret = esp_wifi_set_protocol(WIFI_IF_STA,
+                WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set protocol ret=%d", ret);
+        }
+        ret = esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT40);
+        if (ret) {
+            ESP_LOGE(TAG, "Failed to set wifi bandwidth: %d\n", ret);
+        }
+#endif
 #endif
         ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
         if (ret) {
