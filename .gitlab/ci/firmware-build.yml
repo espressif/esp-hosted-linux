@@ -1,0 +1,46 @@
+# ESP network-adapter firmware build matrix.
+# These jobs stay on the existing ESP-IDF build runners, not espdevpool1.
+
+.firmware_build:
+  stage: build
+  image: "$ESP_CI_IMAGE"
+  tags:
+    - build
+  script:
+    - .gitlab/ci/scripts/build-firmware.sh "${IDF_TARGET}" "${TRANSPORT}"
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
+      - build-artifacts/firmware/
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - changes:
+        - esp/esp_driver/network_adapter/**/*
+        - esp/esp_driver/setup.sh
+        - esp/esp_driver/setup.ps1
+        - .gitlab/ci/firmware-build.yml
+        - .gitlab/ci/scripts/build-firmware.sh
+        - .gitlab-ci.yml
+
+firmware_build:
+  extends: .firmware_build
+  parallel:
+    matrix:
+      - IDF_TARGET: ["esp32"]
+        TRANSPORT: ["sdio", "spi"]
+      - IDF_TARGET: ["esp32s2", "esp32s3", "esp32c2", "esp32c3"]
+        TRANSPORT: ["spi"]
+      - IDF_TARGET: ["esp32c6", "esp32c61"]
+        TRANSPORT: ["sdio", "spi"]
+      - IDF_TARGET: ["esp32c5"]
+        TRANSPORT: ["spi"]
+
+# Preserve the old CI policy until ESP32-C5 SDIO is promoted to a hard gate.
+firmware_build_esp32c5_sdio:
+  extends: .firmware_build
+  variables:
+    IDF_TARGET: "esp32c5"
+    TRANSPORT: "sdio"
+  allow_failure: true

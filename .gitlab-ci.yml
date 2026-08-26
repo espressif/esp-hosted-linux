@@ -1,0 +1,33 @@
+stages:
+  - prepare
+  - validate
+  - build
+  - test
+  - hil
+  - deploy
+
+variables:
+  GIT_SUBMODULE_STRATEGY: none
+  ESP_CI_IMAGE: "gitlab.espressif.cn:5050/wireless/esp-hosted-linux/ci/idf-v5.5.1@sha256:1826c3da1c8ffec4f5ce54153dbfff7c788bdb4d190280c24a79f54f00f0af14"
+
+# A version-bot commit creates a newer MR pipeline. Build/test jobs are safe to
+# cancel, so do not waste resources finishing the old pre-bump pipeline.
+workflow:
+  auto_cancel:
+    on_new_commit: interruptible
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+default:
+  interruptible: true
+
+include:
+  - local: '.gitlab/ci/validate.yml'
+  - local: '.gitlab/ci/host-build.yml'
+  - local: '.gitlab/ci/firmware-build.yml'

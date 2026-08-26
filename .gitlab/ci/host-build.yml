@@ -1,0 +1,40 @@
+# Linux host-driver compatibility matrix.
+# The dedicated runner exposes /srv/esp-hosted-ci/kernel-sdk as /kernel-sdk:ro.
+
+.host_kernel_compat:
+  stage: build
+  tags:
+    - hosted_linux_kernel
+  variables:
+    HOST_DRIVER_DIR: "host"
+    HOST_BUILD_JOBS: "2"
+  script:
+    - .gitlab/ci/scripts/build-host-kernel.sh "${KERNEL_SERIES}"
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
+      - build-artifacts/host/
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - changes:
+        - host/**/*
+        - .gitlab/ci/host-build.yml
+        - .gitlab/ci/scripts/build-host-kernel.sh
+        - .gitlab/ci/kernel-sdk/**/*
+        - .gitlab/ci/docker/host-build/**/*
+        - .gitlab-ci.yml
+
+host_kernel_compat:
+  extends: .host_kernel_compat
+  parallel:
+    matrix:
+      - KERNEL_SERIES: ["4.9", "4.14", "4.19", "5.4", "5.10"]
+        HOST_CI_IMAGE: "esp-hosted-linux-ci:gcc9"
+      - KERNEL_SERIES: ["5.15", "6.1", "6.6"]
+        HOST_CI_IMAGE: "esp-hosted-linux-ci:gcc11"
+      - KERNEL_SERIES: ["6.12", "6.18", "7.x"]
+        HOST_CI_IMAGE: "esp-hosted-linux-ci:gcc13"
+  image:
+    name: "${HOST_CI_IMAGE}"
