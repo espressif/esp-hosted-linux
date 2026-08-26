@@ -1,0 +1,39 @@
+# ESP driver build artifacts
+esp/esp_driver/CMakeCache.txt
+esp/esp_driver/CMakeFiles/
+esp/esp_driver/Makefile
+esp/esp_driver/build/
+esp/esp_driver/cmake_install.cmake
+esp/esp_driver/network_adapter/build/
+esp/esp_driver/network_adapter/sdkconfig
+esp/esp_driver/network_adapter/sdkconfig.old
+esp/esp_driver/esp-idf/
+
+# Linux host driver build artifacts
+host/*.o
+host/*.ko
+host/*.mod
+host/*.mod.c
+host/*.mod.o
+host/*.order
+host/*.symvers
+host/.tmp_versions/
+host/.*.cmd
+host/.*.d
+host/Module.symvers
+host/modules.order
+host/spi/*.o
+host/spi/*.mod
+host/spi/*.mod.c
+host/spi/.*.cmd
+host/sdio/*.o
+host/sdio/*.mod
+host/sdio/*.mod.c
+host/sdio/.*.cmd
+
+# General temporary files
+*.swp
+*~
+.DS_Store
+.vscode/
+.idea/
