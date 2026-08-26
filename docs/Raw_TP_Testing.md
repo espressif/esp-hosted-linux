@@ -11,9 +11,9 @@
     1. While setting up the host, pass `rawtp_host_to_esp` or `rawtp_esp_to_host` as a argument to `rpi_init.sh`.
         - e.g if you are setting Wi-Fi over SDIO and you want to test raw TP from ESP to host over SDIO interface, then compile and load host driver as below:
         ```sh
-        $ cd esp_hosted_ng/host/
+        $ cd host/
         $ ./rpi_init.sh sdio rawtp_esp_to_host
         ```
-    2. RAW throughput is enabled by default for host, to disable it set the value of `TEST_RAW_TP` to 0 in `esp_hosted/esp_hosted_ng/host/include/stats.h`
+    2. RAW throughput is enabled by default for host, to disable it set the value of `TEST_RAW_TP` to 0 in `host/include/stats.h`
 
 

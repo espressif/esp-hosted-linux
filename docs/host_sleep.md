@@ -1,4 +1,4 @@
-# Host Sleep for ESP-Hosted-NG
+# Host Sleep for ESP-HOSTED-Linux
 - [1. Introduction](#1-introduction)
   * [2. Additional GPIO](#2-additional-gpio)
   * [3. ESP side setup](#3-esp-side-setup)
@@ -118,7 +118,7 @@ Following command should show 'wlanX' network interface
 ```sh
 $ ifconfig -a
 ```
-2. Using procedure [Connect the Wi-Fi](https://github.com/espressif/esp-hosted/tree/master/esp_hosted_ng#321-wi-fi) establish the station mode connection
+2. Using procedure [Connect the Wi-Fi](../README.md#311-wi-fi) establish the station mode connection
 3. Execute following command to verify connection with Access point
 ```sh
 $ sudo iwconfig wlan0

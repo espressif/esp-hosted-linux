@@ -2,7 +2,7 @@
 
 ## Introduction
 
-This project is used to build firmware for esp-hosted-ng solution
+This project is used to build firmware for ESP-HOSTED-Linux solution
 
 ## Building on Linux using Command Prompt
 
