@@ -78,7 +78,7 @@ Looking for other chipset? Please do check [Coming Soon](#5-coming-soon) section
   - Raspberry-Pi 3 Model B
   - Raspberry-Pi 3 Model B+
   - Raspberry-Pi 4 Model B
-- This solution is aimed for Linux based hosts only. For microcontroller (MCU) based hosts (like STM32, ESP32 MCU host, etc.), please refer to the [ESP-Hosted MCU](https://github.com/espressif/esp-hosted) repository.
+- This solution is aimed for Linux based hosts only.
 - Although we try to help in porting, We expect users to get the transport interfaces like SDIO/SPI/UART configured on your Linux platform. Device tree configuration and device drivers could be some times tricky as every Linux platform has it different.
 - It is relatively easy to port this solution to other Linux based platforms. Please refer [Porting Guide](docs/porting_guide.md) for the common steps. 
 
