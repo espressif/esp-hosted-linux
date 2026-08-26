@@ -183,7 +183,7 @@ you can suspect SPI timings mismatch. In such case, tuning might be required
 	* It is always recommended to check the SPI timings on any Logic analyzer. This way timings could be understood accurately.
 
 ###### Option 1 - Tune SPI timing at HAL slave driver
-* To adjust timing, Go to IDF setup (esp_hosted_fg/esp/esp_driver/esp-idf), in file components/hal/<esp_chipset>/include/hal/spi_ll.h, locate function, spi_ll_slave_set_mode()
+* To adjust timing, Go to IDF setup (esp/esp_driver/esp-idf), in file components/hal/<esp_chipset>/include/hal/spi_ll.h, locate function, spi_ll_slave_set_mode()
 	* In your currently configured SPI mode, tweak values of `ck_idle_edge`, `ck_i_edge`, `miso_delay_mode`, `miso_delay_num`, `mosi_delay_mode` and `mosi_delay_num` and retry on every change
 
 ###### Option 2 - Mismatch the slave and Host SPI modes

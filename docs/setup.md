@@ -1,4 +1,4 @@
-# ESP-Hosted-NG Setup
+# ESP-HOSTED-Linux Setup
 
 ## 1 Setup Introduction
 
@@ -68,8 +68,8 @@ Make sure that host machine is equipped with following:
     ```
 *  Please browse to desired ESP chipset directory
     ```sh
-    $ tar xvf ESP-Hosted-NG-release_1.x.y.tgz
-    $ cd ESP-Hosted-NG-release_1.x.y/
+    $ tar xvf ESP-HOSTED-Linux-release_1.x.y.tgz
+    $ cd ESP-HOSTED-Linux-release_1.x.y/
     $ cd <esp_chipset>
     $ cd <transport_layer>
     ```
@@ -90,19 +90,19 @@ Make sure that host machine is equipped with following:
 > This command will revert all your local changes. Stash the changes if still needed.
 
     ```sh
-    $ cd esp_hosted/esp_hosted_ng/esp/esp_driver
+    $ cd esp/esp_driver
     $ ./setup.sh
     ```
 * This will clone the required esp-idf repository and will setup it up for esp hosted firmware
 * Set-Up the esp firmware build environment using 
     ```sh
-    $ cd esp_hosted/esp_hosted_ng/esp/esp_driver/esp-idf
+    $ cd esp/esp_driver/esp-idf
     $ . ./esp-idf/export.sh
     # Optionally, You can add alias for this command in ~/.bashrc for later use
     ``` 
 * To build, flash and monitor firmware
     ```sh
-    $ cd esp_hosted/esp_hosted_ng/esp/esp_driver/network_adapter
+    $ cd esp/esp_driver/network_adapter
     $ `idf.py set-target <chip_name>` to set target
     $ `idf.py build` to compile new firmware
     $ `idf.py monitor` to monitor serial output
@@ -113,18 +113,18 @@ Make sure that host machine is equipped with following:
 Windows](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/windows-setup.html).
 
 - Use the ESP-IDF [Powershell Command
-Prompt](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/windows-setup.html#using-the-command-prompt) to execute `esp_hosted/esp_hosted_ng/esp/esp_driver/setup.ps1`. It will setup `esp-idf` as a submodule to be used by `network_adapter`.
+Prompt](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/windows-setup.html#using-the-command-prompt) to execute `esp/esp_driver/setup.ps1`. It will setup `esp-idf` as a submodule to be used by `network_adapter`.
 
 > [!CAUTION]
 > 
 > This command will revert all your local changes. Stash the changes if still needed.
 
-- Setup compiling environment by running `export.ps1` in `esp_hosted/esp_hosted_ng/esp/esp_driver/esp-idf`
+- Setup compiling environment by running `export.ps1` in `esp/esp_driver/esp-idf`
 directory
 
 * To build, flash and monitor firmware
     ```sh
-    $ cd esp_hosted/esp_hosted_ng/esp/esp_driver/network_adapter
+    $ cd esp/esp_driver/network_adapter
     $ `idf.py set-target <chip_name>` to set target
     $ `idf.py build` to compile new firmware
     $ `idf.py monitor` to monitor serial output
@@ -182,7 +182,7 @@ directory
     * Host environment setup  
         * Execute following commands in root directory of cloned ESP-Hosted repository on Raspberry-Pi
             ```sh
-            $ cd esp_hosted/esp_hosted_ng/host/
+            $ cd host/
             $ bash rpi_init.sh spi <ap_support>
             ```
          - add `ap_support` if you want to use interface as access point.
@@ -200,7 +200,7 @@ directory
         * Set up the esp-idf environment as mentioned in [ESP Comprehensive guide](#13-esp-comprehensive-guide)
         * To configure slave chip set environment
             ```
-            $ cd esp_hosted/esp_hosted_ng/esp/esp_driver/network_adapter
+            $ cd esp/esp_driver/network_adapter
             $ rm -rf sdkconfig build
             $ idf.py set-target <esp_chipset>
             ```
@@ -228,7 +228,7 @@ directory
         [   77.877911]     - HCI over SPI
         [   77.877916]     - BLE
         ```
-* Once the one of ESP-Hosted-NG mode is set-up, proceed to how to use [**Wi-Fi** and **Bluetooth** over this setup](../README.md#3-get-started)
+* Once the one of ESP-HOSTED-Linux mode is set-up, proceed to how to use [**Wi-Fi** and **Bluetooth** over this setup](../README.md#3-get-started)
 
 ### 2.2 SDIO configuration
 **Wi-Fi and Bluetooth over SDIO**
@@ -264,7 +264,7 @@ directory
     * Host environment setup  
         * Execute following commands in root directory of cloned ESP-Hosted repository on Raspberry-Pi
             ```sh
-            $ cd esp_hosted/esp_hosted_ng/host/
+            $ cd host/
             $ bash rpi_init.sh sdio <ap_support>
             ```
         - add `ap_support` if you want to use interface as access point.
@@ -282,7 +282,7 @@ directory
         * Set up the esp-idf environment as mentioned in [ESP Comprehensive guide](#13-esp-comprehensive-guide)
         * To configure slave chip set environment
             ```
-            $ cd esp_hosted/esp_hosted_ng/esp/esp_driver/network_adapter
+            $ cd esp/esp_driver/network_adapter
             $ rm -rf sdkconfig build
             $ idf.py set-target <esp_chipset>
             ```
@@ -309,7 +309,7 @@ directory
         [   77.877911]     - HCI over SDIO
         [   77.877916]     - BT/BLE dual mode
         ```
-* Once the one of ESP-Hosted-NG mode is set-up, proceed to how to use [**Wi-Fi** and **Bluetooth** over this setup](../README.md#3-get-started)
+* Once the one of ESP-HOSTED-Linux mode is set-up, proceed to how to use [**Wi-Fi** and **Bluetooth** over this setup](../README.md#3-get-started)
 
 ### 2.3 SDIO or SPI and Uart configuration
 **Wi-Fi over SDIO/SPI and Bluetooth over UART**
@@ -378,7 +378,7 @@ directory
     * Host environment setup  
         * Execute following commands in root directory of cloned ESP-Hosted repository on Raspberry-Pi
             ```sh
-            $ cd esp_hosted/esp_hosted_ng/host/
+            $ cd host/
             $ bash rpi_init.sh <transport> <bt_over_uart> <ap_support>
             ```
         - `transport` can take value `sdio` or `spi`. Defaults to `sdio`
@@ -398,7 +398,7 @@ directory
         * Set up the esp-idf environment as mentioned in [ESP Comprehensive guide](#13-esp-comprehensive-guide)
         * To configure slave chip set environment
             ```
-            $ cd esp_hosted/esp_hosted_ng/esp/esp_driver/network_adapter
+            $ cd esp/esp_driver/network_adapter
             $ rm -rf sdkconfig build
             $ idf.py set-target <esp_chipset>
             ```
@@ -442,11 +442,11 @@ directory
     * <baud_rate> should match UART baud rate while flashing ESP peripheral (Default: 921600)
 
     * For ESP32
-        * Check `CONFIG_BT_HCI_UART_BAUDRATE` parameter in *esp_hosted_ng/esp/esp_driver/network_adapter/sdkconfig*
+        * Check `CONFIG_BT_HCI_UART_BAUDRATE` parameter in *esp/esp_driver/network_adapter/sdkconfig*
         * Alternatively baud rate could be located using `idf.py menuconfig` at, `Component config ->  Bluetooth -> Bluetooth controller ->  HCI UART(H4) Options -> UART Baudrate for HCI`
 
     * For ESP32-C3/S3
-        * Check `CONFIG_EXAMPLE_HCI_UART_BAUDRATE` parameter in *esp_hosted_ng/esp/esp_driver/network_adapter/sdkconfig*
+        * Check `CONFIG_EXAMPLE_HCI_UART_BAUDRATE` parameter in *esp/esp_driver/network_adapter/sdkconfig*
         * Alternatively baud rate could be located using `idf.py menuconfig` at, `Component config -> Example Configuration -> UART Baudrate for HCI`
 
     * Check if UART is setup correctly
@@ -466,7 +466,7 @@ directory
         $ hciconfig -a
         ```
     * <baud_rate> should match UART baud rate while flashing ESP peripheral
-* Once the one of ESP-Hosted-NG mode is set-up, proceed to how to use [**Wi-Fi** and **Bluetooth** over this setup](../README.md#3-get-started)
+* Once the one of ESP-HOSTED-Linux mode is set-up, proceed to how to use [**Wi-Fi** and **Bluetooth** over this setup](../README.md#3-get-started)
 
 ### 3. Troubleshoot Setup Problems
 
@@ -489,13 +489,13 @@ If Boot-up event is not received in host `dmesg` as sample log above, please try
 - Over-The-Air (OTA) allows hosts to transport the new firmware to ESP device and update the device.
 - To update the firmware using the OTA please follow the commands on host.
     ```sh
-    $ cd /esp_hosted/esp_hosted_ng/host
+    $ cd host/
     $ ./rpi_init.sh <transport> ota_file="/path/to/ota_file"
     ```
 
 ### 6. Manually loading and unloading the Kernel Module
 
-Once the kernel modules `esp32_sdio.ko` or `esp32_spi.ko` are built, they can be found in `esp_hosted/esp_hosted_ng/host/`. You may manually load or unload these modules as needed.
+Once the kernel modules `esp32_sdio.ko` or `esp32_spi.ko` are built, they can be found in `host/`. You may manually load or unload these modules as needed.
 
 ---
 
@@ -529,13 +529,13 @@ Once the kernel modules `esp32_sdio.ko` or `esp32_spi.ko` are built, they can be
 **For SDIO:**
 
 ```bash
-$ sudo insmod esp_hosted/esp_hosted_ng/host/esp32_sdio.ko resetpin=6
+$ sudo insmod host/esp32_sdio.ko resetpin=6
 ```
 
 **For SPI:**
 
 ```bash
-$ sudo insmod esp_hosted/esp_hosted_ng/host/esp32_spi.ko resetpin=6
+$ sudo insmod host/esp32_spi.ko resetpin=6
 ```
 
 You can also pass optional parameters:

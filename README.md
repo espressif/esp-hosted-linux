@@ -1,4 +1,4 @@
-# ESP-Hosted-NG
+# ESP-HOSTED-Linux
 
 - [1. Introduction](#1-introduction)
     + [1.1 Connectivity Feature](#11-connectivity-features)
@@ -41,6 +41,10 @@ This solution offers following:
 * Configuration of Wi-Fi is supported through standard cfg80211 interface of Linux
 * A standard HCI interface 
 
+> [!TIP]
+> **Migrating from legacy `esp_hosted` (`esp_hosted_ng/`)?**
+> Please refer to our [Migration Guide](docs/migration_guide.md) and helper tool [`tools/migrate_from_esp_hosted.py`](tools/migrate_from_esp_hosted.py) to check commit mappings or port your existing commits and uncommitted changes.
+
 
 ### 1.1 Connectivity Features
 
@@ -57,7 +61,7 @@ This solution provides following WLAN and BT/BLE features to the host:
 
 ### 1.2 Supported ESP boards
 
-ESP-Hosted-NG solution is supported on following ESP boards:
+ESP-HOSTED-Linux solution is supported on following ESP boards:
 
 | Supported Targets | ESP32 | ESP32-S2 | ESP32-S3 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6/C61 |
 | ----------------- | ----- | -------- | -------- | -------- | -------- | -------- | -------- |
@@ -70,11 +74,11 @@ Looking for other chipset? Please do check [Coming Soon](#5-coming-soon) section
 
 ### 1.3 Supported Hosts
 
-- ESP-Hosted-NG solution showcase examples for following Linux based hosts out of the box.
+- ESP-HOSTED-Linux solution showcases examples for the following Linux based hosts out of the box:
   - Raspberry-Pi 3 Model B
   - Raspberry-Pi 3 Model B+
   - Raspberry-Pi 4 Model B
-- This solution is aimed for Linux based hosts only. For microcontroller(MCU) based hosts (like STM32 etc), [ESP-Hosted-FG](../esp_hosted_fg) flavour should be used.
+- This solution is aimed for Linux based hosts only. For microcontroller (MCU) based hosts (like STM32, ESP32 MCU host, etc.), please refer to the [ESP-Hosted MCU](https://github.com/espressif/esp-hosted) repository.
 - Although we try to help in porting, We expect users to get the transport interfaces like SDIO/SPI/UART configured on your Linux platform. Device tree configuration and device drivers could be some times tricky as every Linux platform has it different.
 - It is relatively easy to port this solution to other Linux based platforms. Please refer [Porting Guide](docs/porting_guide.md) for the common steps. 
 
@@ -260,7 +264,7 @@ Apart from these features, following features are supported.
 
 
 # 2. Hardware and Software setup and OTA
-This section describes how to set up and use ESP-Hosted-NG solution.
+This section describes how to set up and use ESP-HOSTED-Linux solution.
 Please check [Hardware and Software setup and OTA](docs/setup.md).
 
 ---
@@ -524,7 +528,7 @@ Following operations for station are supported as of now:
 > ## WPA2/WPA3 Enterprise mode connect
 > Note the SSID, username, and password of the WPA2/WPA3 enterprise AP to connect.
 >
-> The ESP-Hosted-NG solution supports both WPA2 Enterprise and WPA3 Enterprise authentication modes through EAP (Extensible Authentication Protocol) when operating in Station mode.
+> The ESP-HOSTED-Linux solution supports both WPA2 Enterprise and WPA3 Enterprise authentication modes through EAP (Extensible Authentication Protocol) when operating in Station mode.
 > 
 > ### Create config & Trigger connection
 > * `wpa_supplicant` already running on host operating system can interfere in testing. Execute following commands to prevent this.
@@ -758,14 +762,14 @@ This section explains building blocks of the solution. Following is the detailed
 
 Following are the key building blocks of the system:
 
-- ESP-Hosted-NG Driver
+- ESP-HOSTED-Linux Driver
 
-- ESP-Hosted-NG Firmware
+- ESP-HOSTED-Linux Firmware
 
 - Third party components
 
 
-### 4.1.1 ESP-Hosted-NG Driver
+### 4.1.1 ESP-HOSTED-Linux Driver
 
 This runs on host platform and it implements following.
 
@@ -781,11 +785,11 @@ This runs on host platform and it implements following.
   - Registers HCI interface with the Bluetooth stack running on Linux host
     - This facilitates exchange of HCI packets between Linux kernel and ESP firmware
 
-### 4.1.2 ESP-Hosted-NG Firmware
+### 4.1.2 ESP-HOSTED-Linux Firmware
 
 This implements ESP application that runs on ESP boards. It consists of the following.
 
-- **ESP-Hosted-NG Application** \
+- **ESP-HOSTED-Linux Application** \
   This implements following:
   - SDIO/SPI transport layer
   - Custom command/response implementation for configuration of Wi-Fi interface
@@ -974,11 +978,11 @@ Refer [RAW throughput guide](docs/Raw_TP_Testing.md) for verifying connection as
 
 **How to Enable:**
 
-You can enable this option using the `idf.py menuconfig` tool within the `esp_hosted_ng` project.
+You can enable this option using the `idf.py menuconfig` tool within the `esp-hosted-linux` project.
 
 1.  Navigate to the ESP firmware directory:
     ```sh
-    cd esp_hosted_ng/esp/esp_driver/network_adapter
+    cd esp/esp_driver/network_adapter
     ```
 
 2.  Launch the configuration menu:
