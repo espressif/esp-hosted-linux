@@ -29,5 +29,6 @@ default:
 
 include:
   - local: '.gitlab/ci/validate.yml'
-  - local: '.gitlab/ci/host-build.yml'
+  - local: '.gitlab/ci/linux-images.yml'
+  - local: '.gitlab/ci/linux.yml'
   - local: '.gitlab/ci/firmware-build.yml'

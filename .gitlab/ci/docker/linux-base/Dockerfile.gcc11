@@ -1,0 +1,33 @@
+FROM ubuntu:22.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc-11 \
+    g++-11 \
+    make \
+    bc \
+    bison \
+    flex \
+    libssl-dev \
+    libelf-dev \
+    kmod \
+    cpio \
+    rsync \
+    python3 \
+    ca-certificates \
+    git \
+    perl \
+    sparse \
+    shellcheck \
+    ccache \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100 && \
+    update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 100
+
+ENV CCACHE_COMPILERCHECK=content
+ENV CCACHE_NOHASHDIR=true
+
+CMD ["/bin/bash"]
