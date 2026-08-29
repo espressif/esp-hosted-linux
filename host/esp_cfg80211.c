@@ -388,6 +388,9 @@ static int8_t esp_get_mode_from_iface_type(int iface_type)
 static int esp_cfg80211_change_iface(struct wiphy *wiphy,
 					struct net_device *dev,
 					enum nl80211_iftype type,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 12, 0)
+					u32 *flags __maybe_unused,
+#endif
 					struct vif_params *params)
 {
 	struct esp_wifi_device *priv = NULL;

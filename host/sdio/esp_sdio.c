@@ -725,9 +725,10 @@ static int tx_process(void *data)
 	bool flush_after_pkt = false;
 	int prio = -1;
 	ktime_t aggr_start, credit_start, write_start;
+	u32 tx_aggr_size;
 
 	context = adapter->if_context;
-	u32 tx_aggr_size = adapter->tx_aggr_size ? adapter->tx_aggr_size : ESP_HOST_TX_AGGR_SIZE;
+	tx_aggr_size = adapter->tx_aggr_size ? adapter->tx_aggr_size : ESP_HOST_TX_AGGR_SIZE;
 	aggr_buf = kzalloc(tx_aggr_size, GFP_KERNEL);
 	if (!aggr_buf)
 		return -ENOMEM;
