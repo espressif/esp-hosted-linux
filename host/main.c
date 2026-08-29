@@ -34,12 +34,9 @@
 static char *ota_file = NULL;
 static int resetpin = HOST_GPIO_PIN_INVALID;
 static u32 clockspeed = 0;
-extern u8 ap_bssid[MAC_ADDR_LEN];
-extern volatile u8 host_sleep;
 u32 raw_tp_mode = 0;
 int log_level = ESP_INFO;
-#define VERSION_BUFFER_SIZE 50
-char version_str[VERSION_BUFFER_SIZE];
+char version_str[ESP_VERSION_BUFFER_SIZE];
 
 
 module_param(resetpin, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
@@ -57,8 +54,8 @@ MODULE_PARM_DESC(ota_file, "Ota file to update ESP firmware");
 static void deinit_adapter(void);
 
 
-struct multicast_list mcast_list = {0};
-struct esp_adapter adapter;
+static struct multicast_list mcast_list = {0};
+static struct esp_adapter adapter;
 /*struct esp_device esp_dev;*/
 
 struct esp_adapter *esp_get_adapter(void)
@@ -159,12 +156,13 @@ static int process_tx_packet(struct sk_buff *skb)
 
 	payload_header->if_type = priv->if_type;
 	payload_header->if_num = priv->if_num;
-	payload_header->len = cpu_to_le16(len);
-	payload_header->offset = cpu_to_le16(pad_len);
+	payload_header->len = esp_wire_cpu_to_le16(len);
+	payload_header->offset = esp_wire_cpu_to_le16(pad_len);
 	payload_header->packet_type = PACKET_TYPE_DATA;
 
 	if (adapter.capabilities & ESP_CHECKSUM_ENABLED)
-		payload_header->checksum = cpu_to_le16(compute_checksum(skb->data, (len + pad_len)));
+		payload_header->checksum = esp_wire_cpu_to_le16(compute_checksum(skb->data,
+									   len + pad_len));
 
 	if (!priv->stop_data) {
 		ret = esp_send_packet(priv->adapter, skb);
@@ -245,7 +243,7 @@ static void init_bt(struct esp_adapter *adapter)
 
 static int check_esp_version(struct fw_version *ver)
 {
-	snprintf(version_str, VERSION_BUFFER_SIZE, "%s-%u.%u.%u.%u.%u",
+	snprintf(version_str, ESP_VERSION_BUFFER_SIZE, "%s-%u.%u.%u.%u.%u",
 		ver->project_name, ver->major1, ver->major2, ver->minor, ver->revision_patch_1, ver->revision_patch_2);
 
 	if (strncmp(RELEASE_VERSION, version_str, strlen(version_str)) != 0) {
@@ -288,7 +286,7 @@ static int process_fw_data(struct fw_data *fw_p, int tag_len)
 	}
 
 	esp_info("ESP chipset's last reset cause:\n");
-	print_reset_reason(le32_to_cpu(fw_p->last_reset_reason));
+	print_reset_reason(esp_wire_le32_to_cpu(fw_p->last_reset_reason));
 
 	return check_esp_version(&fw_p->version);
 }
@@ -796,15 +794,15 @@ static void process_rx_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 	/* get the paload header */
 	payload_header = (struct esp_payload_header *) skb->data;
 
-	len = le16_to_cpu(payload_header->len);
-	offset = le16_to_cpu(payload_header->offset);
+	len = esp_wire_le16_to_cpu(payload_header->len);
+	offset = esp_wire_le16_to_cpu(payload_header->offset);
 
 	if (payload_header->reserved2 == 0xFF) {
 		esp_hex_dump("Wake up packet: ", skb->data, len+offset);
 	}
 
 	if (adapter->capabilities & ESP_CHECKSUM_ENABLED) {
-		rx_checksum = le16_to_cpu(payload_header->checksum);
+		rx_checksum = esp_wire_le16_to_cpu(payload_header->checksum);
 		payload_header->checksum = 0;
 
 		checksum = compute_checksum(skb->data, (len + offset));

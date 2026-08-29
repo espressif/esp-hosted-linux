@@ -16,8 +16,6 @@
 #include "esp_stats.h"
 
 #define COMMAND_RESPONSE_TIMEOUT (5 * HZ)
-u8 ap_bssid[MAC_ADDR_LEN];
-extern u32 raw_tp_mode;
 
 static int handle_mgmt_tx_done(struct esp_wifi_device *priv,
 				struct command_node *cmd_node);
@@ -472,8 +470,10 @@ static void esp_cmd_work(struct work_struct *work)
 
 	payload_header = (struct esp_payload_header *)cmd_node->cmd_skb->data;
 	if (adapter->capabilities & ESP_CHECKSUM_ENABLED)
-		payload_header->checksum = cpu_to_le16(compute_checksum(cmd_node->cmd_skb->data,
-					payload_header->len+payload_header->offset));
+		payload_header->checksum = esp_wire_cpu_to_le16(
+			compute_checksum(cmd_node->cmd_skb->data,
+				esp_wire_le16_to_cpu(payload_header->len) +
+				esp_wire_le16_to_cpu(payload_header->offset)));
 
 	ret = esp_send_packet(adapter, cmd_node->cmd_skb);
 
@@ -571,11 +571,14 @@ static struct command_node *prepare_command_request(struct esp_adapter *adapter,
 	memset(payload_header, 0, len);
 
 	payload_header->if_type = priv->if_type;
-	payload_header->len = cpu_to_le16(len - sizeof(struct esp_payload_header));
-	payload_header->offset = cpu_to_le16(sizeof(struct esp_payload_header));
+	payload_header->len = esp_wire_cpu_to_le16(
+		len - sizeof(struct esp_payload_header));
+	payload_header->offset = esp_wire_cpu_to_le16(
+		sizeof(struct esp_payload_header));
 	payload_header->packet_type = PACKET_TYPE_COMMAND_REQUEST;
 
-	cmd = (struct command_header *) (node->cmd_skb->data + payload_header->offset);
+	cmd = (struct command_header *)(node->cmd_skb->data +
+					       sizeof(struct esp_payload_header));
 	cmd->cmd_code = cmd_code;
 
 /*	payload_header->checksum = cpu_to_le16(compute_checksum(skb->data, len));*/
@@ -687,7 +690,7 @@ static void process_scan_result_event(struct esp_wifi_device *priv,
 	}
 
 	ie_buf = (u8 *) scan_evt->frame;
-	ie_len = le16_to_cpu(scan_evt->frame_len);
+	ie_len = esp_wire_le16_to_cpu(scan_evt->frame_len);
 
 	fixed_params = (struct beacon_probe_fixed_params *) ie_buf;
 
@@ -715,7 +718,7 @@ static void process_scan_result_event(struct esp_wifi_device *priv,
 		bss = CFG80211_INFORM_BSS(priv->adapter->wiphy, chan,
 				frame_type, scan_evt->bssid, timestamp,
 				cap_info, beacon_interval, ie_buf, ie_len,
-				(le32_to_cpu(scan_evt->rssi) * 100), GFP_ATOMIC);
+				(esp_wire_le32_to_cpu(scan_evt->rssi) * 100), GFP_ATOMIC);
 
 		if (bss)
 			cfg80211_put_bss(priv->adapter->wiphy, bss);
@@ -926,7 +929,7 @@ int cmd_set_mcast_mac_list(struct esp_wifi_device *priv, struct multicast_list *
 	return 0;
 }
 
-int cmd_set_ip_address(struct esp_wifi_device *priv, u32 ip)
+int cmd_set_ip_address(struct esp_wifi_device *priv, __be32 ip)
 {
 	struct command_node *cmd_node = NULL;
 	struct cmd_set_ip_addr *cmd_set_ip;
@@ -950,7 +953,11 @@ int cmd_set_ip_address(struct esp_wifi_device *priv, u32 ip)
 	cmd_set_ip = (struct cmd_set_ip_addr *)
 		(cmd_node->cmd_skb->data + sizeof(struct esp_payload_header));
 
-	cmd_set_ip->ip = cpu_to_le32(ip);
+	/* This protocol field carries the IPv4 address byte sequence unchanged.
+	 * Copy the __be32 object representation instead of converting it to host
+	 * order, preserving the existing wire format on every host endianness.
+	 */
+	memcpy(&cmd_set_ip->ip, &ip, sizeof(ip));
 
 	queue_cmd_node(priv->adapter, cmd_node, ESP_CMD_DFLT_PRIO);
 	queue_work(priv->adapter->cmd_wq, &priv->adapter->cmd_work);
@@ -1035,7 +1042,6 @@ int cmd_connect_request(struct esp_wifi_device *priv,
 		esp_err("No ssid\n");
 
 	if (params->bssid) {
-		memcpy(ap_bssid, params->bssid, MAC_ADDR_LEN);
 		memcpy(cmd->bssid, params->bssid, MAC_ADDR_LEN);
 	}
 
@@ -1160,7 +1166,8 @@ int cmd_auth_request(struct esp_wifi_device *priv,
 	struct cmd_sta_auth *cmd;
 	struct cfg80211_bss *bss;
 	/*struct cfg80211_bss *bss1;*/
-	const u8 *ssid_eid = NULL;
+	const u8 *ssid_eid;
+	u8 ssid[MAX_SSID_LEN];
 	uint8_t ssid_len;
 	struct esp_adapter *adapter = NULL;
 	u16 cmd_len;
@@ -1186,21 +1193,29 @@ int cmd_auth_request(struct esp_wifi_device *priv,
 
 	priv->bss = req->bss;
 
-	if (bss->proberesp_ies)
-		ies = bss->proberesp_ies;
-	else if (bss->beacon_ies)
-		ies = bss->beacon_ies;
-	else
-		ies = bss->ies;
+	rcu_read_lock();
+	ies = rcu_dereference(bss->proberesp_ies);
+	if (!ies)
+		ies = rcu_dereference(bss->beacon_ies);
+	if (!ies)
+		ies = rcu_dereference(bss->ies);
+
+	if (!ies) {
+		rcu_read_unlock();
+		esp_err("No BSS IEs available for authentication\n");
+		return -EINVAL;
+	}
 
 	ssid_eid = cfg80211_find_ie(WLAN_EID_SSID, ies->data, ies->len);
-	if (!ssid_eid) {
-		esp_err("\n ssid NULL in proberesp");
+	if (!ssid_eid || ssid_eid[1] > MAX_SSID_LEN) {
+		rcu_read_unlock();
+		esp_err("Invalid SSID IE in BSS data\n");
 		return -EINVAL;
-	} else {
-		ssid_len = *(ssid_eid + 1);
-		ssid_eid = ssid_eid + 2;
 	}
+
+	ssid_len = ssid_eid[1];
+	memcpy(ssid, ssid_eid + 2, ssid_len);
+	rcu_read_unlock();
 
 	adapter = priv->adapter;
 
@@ -1226,7 +1241,7 @@ int cmd_auth_request(struct esp_wifi_device *priv,
 	} else {
 		cmd->auth_type = req->auth_type;
 	}
-	memcpy(cmd->ssid, ssid_eid, ssid_len);
+	memcpy(cmd->ssid, ssid, ssid_len);
 	memcpy(cmd->bssid, bss->bssid, MAC_ADDR_LEN);
 	cmd->channel = bss->channel->hw_value;
 	cmd->auth_data_len = ESP_CFG80211_AUTH_DATA_LEN(req);

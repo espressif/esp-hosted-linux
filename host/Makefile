@@ -29,18 +29,18 @@ endif
 
 # Source and include paths
 PWD := $(shell pwd)
-ccflags-y += -I$(src) -I$(src)/include -I$(CURDIR) -I$(CURDIR)/include
+ccflags-y += -I$(src) -I$(src)/include
 EXTRA_CFLAGS += -I$(M) -I$(M)/include
 
 # Interface-specific sources
 ifeq ($(target), sdio)
-    ccflags-y += -I$(src)/sdio -I$(CURDIR)/sdio
+    ccflags-y += -I$(src)/sdio
     EXTRA_CFLAGS += -I$(M)/sdio
     module_objects += sdio/esp_sdio.o sdio/esp_sdio_api.o
 endif
 
 ifeq ($(target), spi)
-    ccflags-y += -I$(src)/spi -I$(CURDIR)/spi
+    ccflags-y += -I$(src)/spi
     EXTRA_CFLAGS += -I$(M)/spi
     module_objects += spi/esp_spi.o
 endif

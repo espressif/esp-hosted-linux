@@ -7,6 +7,7 @@
  */
 #include "utils.h"
 #include "esp_api.h"
+#include "esp_bt_api.h"
 #include "esp_kernel_port.h"
 #include "esp_if.h"
 
@@ -129,15 +130,16 @@ static ESP_BT_SEND_FRAME_PROTOTYPE()
 
 	hdr->if_type = ESP_HCI_IF;
 	hdr->if_num = 0;
-	hdr->len = cpu_to_le16(len);
-	hdr->offset = cpu_to_le16(pad_len);
+	hdr->len = esp_wire_cpu_to_le16(len);
+	hdr->offset = esp_wire_cpu_to_le16(pad_len);
 	pos = skb->data;
 
 	/* set HCI packet type */
 	*(pos + pad_len - 1) = pkt_type;
 
 	if (adapter->capabilities & ESP_CHECKSUM_ENABLED)
-		hdr->checksum = cpu_to_le16(compute_checksum(skb->data, (len + pad_len)));
+		hdr->checksum = esp_wire_cpu_to_le16(compute_checksum(skb->data,
+							       len + pad_len));
 
 	ret = esp_send_packet(adapter, skb);
 

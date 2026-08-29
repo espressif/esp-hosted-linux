@@ -12,6 +12,8 @@
 
 #define TEST_RAW_TP 1
 
+extern u32 raw_tp_mode;
+
 #if TEST_RAW_TP
 
 #define TEST_RAW_TP__BUF_SIZE    1460

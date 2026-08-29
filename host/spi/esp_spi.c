@@ -21,15 +21,14 @@
 #define TX_MAX_PENDING_COUNT    100
 #define TX_RESUME_THRESHOLD     (TX_MAX_PENDING_COUNT/5)
 
-extern u32 raw_tp_mode;
-uint8_t g_spi_mode = SPI_MODE_2;
+static uint8_t g_spi_mode = SPI_MODE_2;
 static struct sk_buff *read_packet(struct esp_adapter *adapter);
 static int write_packet(struct esp_adapter *adapter, struct sk_buff *skb);
 static void spi_exit(void);
 static int spi_init(void);
 static void adjust_spi_clock(u8 spi_clk_mhz);
 
-volatile u8 data_path;
+static volatile u8 data_path;
 volatile u8 host_sleep;
 static struct esp_spi_context spi_context;
 static char hardware_type = ESP_FIRMWARE_CHIP_UNRECOGNIZED;
@@ -247,8 +246,8 @@ static int process_rx_buf(struct sk_buff *skb)
 		return -EINVAL;
 	}
 
-	offset = le16_to_cpu(header->offset);
-	len = le16_to_cpu(header->len);
+	offset = esp_wire_le16_to_cpu(header->offset);
+	len = esp_wire_le16_to_cpu(header->len);
 
 	if (len == 0) {
 		return -EINVAL;
