@@ -14,6 +14,11 @@
 #define NUMBER_1M 1000000
 #endif
 
+#define ESP_VERSION_BUFFER_SIZE 50
+
+extern int log_level;
+extern char version_str[ESP_VERSION_BUFFER_SIZE];
+
 #ifndef MAC2STR
 #define MAC2STR(a) (a)[0], (a)[1], (a)[2], (a)[3], (a)[4], (a)[5]
 #endif

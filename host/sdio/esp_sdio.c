@@ -24,7 +24,6 @@
 #include "esp_utils.h"
 #include "esp_kernel_port.h"
 
-extern u32 raw_tp_mode;
 #define MAX_WRITE_RETRIES       2000
 #define TX_MAX_PENDING_COUNT    1000
 #define TX_RESUME_THRESHOLD     (TX_MAX_PENDING_COUNT/5)
@@ -34,7 +33,7 @@ extern u32 raw_tp_mode;
 	esp_err("CMD53 read/write error at %d\n", __LINE__);	\
 } while (0);
 
-struct esp_sdio_context sdio_context;
+static struct esp_sdio_context sdio_context;
 static atomic_t tx_pending;
 static atomic_t queue_items[MAX_PRIORITY_QUEUES];
 #ifdef ESP_DEBUG_STATS
@@ -50,7 +49,7 @@ static u64 h2e_host_time_write_us;
 static u64 h2e_host_time_credit_us;
 static u64 h2e_host_time_aggr_us;
 #endif
-struct task_struct *tx_thread;
+static struct task_struct *tx_thread;
 volatile u8 host_sleep;
 
 static int init_context(struct esp_sdio_context *context);
@@ -549,8 +548,8 @@ static struct sk_buff *read_packet(struct esp_adapter *adapter)
 	sdio_release_host(context->func);
 
 	header = (struct esp_payload_header *)skb->data;
-	len = le16_to_cpu(header->len);
-	offset = le16_to_cpu(header->offset);
+	len = esp_wire_le16_to_cpu(header->len);
+	offset = esp_wire_le16_to_cpu(header->offset);
 
 	if (len == 0) {
 		dev_kfree_skb(skb);
@@ -580,8 +579,8 @@ static struct sk_buff *read_packet(struct esp_adapter *adapter)
 		struct sk_buff *frame_skb = NULL;
 
 		header = (struct esp_payload_header *)(skb->data + pos_in_aggr);
-		len = le16_to_cpu(header->len);
-		offset = le16_to_cpu(header->offset);
+		len = esp_wire_le16_to_cpu(header->len);
+		offset = esp_wire_le16_to_cpu(header->offset);
 		if (!len)
 			break;
 		if (len > ESP_RX_BUFFER_SIZE || !ESP_OFFSET_VALID(offset)) {
@@ -682,11 +681,11 @@ static int is_sdio_write_buffer_available(u32 buf_needed)
 	  then only read for available buffer number from slave*/
 	if (buf_available < buf_needed) {
 		while (retry) {
-			ret = esp_slave_get_tx_buffer_num(context, &buf_available, ACQUIRE_LOCK);
+			ret = esp_slave_get_tx_buffer_num(context, &buf_available,
+						      ACQUIRE_LOCK);
 
-			if (buf_available < buf_needed) {
-
-				/* Release SDIO and retry after delay*/
+			if (ret || buf_available < buf_needed) {
+				/* Release SDIO and retry after delay. */
 				retry--;
 				usleep_range(5, 10);
 				continue;
@@ -710,7 +709,6 @@ static int is_sdio_write_buffer_available(u32 buf_needed)
 static int tx_process(void *data)
 {
 	int ret = 0;
-	u32 block_cnt = 0;
 	u32 buf_needed = 0;
 	u8 *pos = NULL;
 	u32 data_left, len_to_send, pad;
@@ -724,7 +722,9 @@ static int tx_process(void *data)
 	u32 frame_len = 0;
 	bool flush_after_pkt = false;
 	int prio = -1;
+#ifdef ESP_DEBUG_STATS
 	ktime_t aggr_start, credit_start, write_start;
+#endif
 	u32 tx_aggr_size;
 
 	context = adapter->if_context;
@@ -747,7 +747,9 @@ static int tx_process(void *data)
 			continue;
 		}
 
+#ifdef ESP_DEBUG_STATS
 		aggr_start = ktime_get();
+#endif
 		aggr_len = 0;
 		while (aggr_len < tx_aggr_size) {
 			prio = -1;
@@ -768,11 +770,11 @@ static int tx_process(void *data)
 			}
 
 			payload_header = (struct esp_payload_header *)tx_skb->data;
-				if (!ESP_OFFSET_VALID(le16_to_cpu(payload_header->offset)) ||
-				    !le16_to_cpu(payload_header->len)) {
+				if (!ESP_OFFSET_VALID(esp_wire_le16_to_cpu(payload_header->offset)) ||
+				    !esp_wire_le16_to_cpu(payload_header->len)) {
 					esp_err("Drop invalid tx pkt: len=%d offset=%d\n",
-						le16_to_cpu(payload_header->len),
-						le16_to_cpu(payload_header->offset));
+						esp_wire_le16_to_cpu(payload_header->len),
+						esp_wire_le16_to_cpu(payload_header->offset));
 					H2E_HOST_STATS_INC(h2e_host_drop_invalid);
 					tx_skb = skb_dequeue(&(context->tx_q[prio]));
 					if (tx_skb) {
@@ -782,8 +784,8 @@ static int tx_process(void *data)
 				}
 				continue;
 			}
-			frame_len = le16_to_cpu(payload_header->offset) +
-				le16_to_cpu(payload_header->len);
+			frame_len = esp_wire_le16_to_cpu(payload_header->offset) +
+				esp_wire_le16_to_cpu(payload_header->len);
 				if (frame_len > tx_skb->len) {
 					esp_err("Drop truncated tx pkt: frame_len=%d skb_len=%d\n",
 						frame_len, tx_skb->len);
@@ -798,7 +800,7 @@ static int tx_process(void *data)
 			}
 			len_to_send = (frame_len + 3) & ~3;
 			flush_after_pkt = prio == PRIO_Q_LOW &&
-				le16_to_cpu(payload_header->len) <=
+				esp_wire_le16_to_cpu(payload_header->len) <=
 				ESP_HOST_TX_LATENCY_BYPASS_SIZE;
 			if (flush_after_pkt && aggr_len)
 				break;
@@ -853,7 +855,9 @@ static int tx_process(void *data)
 
 			/*If SDIO slave buffer is available to write then only write data
 			else wait till buffer is available*/
+#ifdef ESP_DEBUG_STATS
 			credit_start = ktime_get();
+#endif
 			do {
 				ret = is_sdio_write_buffer_available(buf_needed);
 				if (ret)
@@ -876,9 +880,10 @@ static int tx_process(void *data)
 		data_left += pad;
 
 
+#ifdef ESP_DEBUG_STATS
 		write_start = ktime_get();
+#endif
 		do {
-			block_cnt = data_left / ESP_BLOCK_SIZE;
 			len_to_send = data_left;
 			ret = esp_write_block(context, ESP_SLAVE_CMD53_END_ADDR - len_to_send,
 					pos, (len_to_send + 3) & (~3), ACQUIRE_LOCK);

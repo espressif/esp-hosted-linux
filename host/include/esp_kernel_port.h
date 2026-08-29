@@ -14,6 +14,27 @@
 #include <linux/fs.h>
 #include <linux/timer.h>
 
+/*
+ * adapter.h is shared with the ESP firmware and therefore uses portable
+ * uint16_t/uint32_t fields for on-wire values instead of Linux __le16/__le32
+ * annotations. Keep the shared ABI unchanged and make the Linux endian/type
+ * boundary explicit here so sparse can validate all protocol accesses.
+ */
+static inline u16 esp_wire_cpu_to_le16(u16 value)
+{
+	return (__force u16)cpu_to_le16(value);
+}
+
+static inline u16 esp_wire_le16_to_cpu(u16 value)
+{
+	return le16_to_cpu((__force __le16)value);
+}
+
+static inline u32 esp_wire_le32_to_cpu(u32 value)
+{
+	return le32_to_cpu((__force __le32)value);
+}
+
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 13, 0))
     #define ESP_BT_SEND_FRAME_PROTOTYPE() \
 	int esp_bt_send_frame(struct sk_buff *skb)

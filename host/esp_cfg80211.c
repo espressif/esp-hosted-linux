@@ -14,10 +14,7 @@
 #include "esp_kernel_port.h"
 #include "esp_utils.h"
 
-/**
-  * @brief WiFi PHY rate encodings
-  *
-  */
+/* WiFi PHY rate encodings. */
 typedef enum {
 	WIFI_PHY_RATE_1M_L      = 0x00, /**< 1 Mbps with long preamble */
 	WIFI_PHY_RATE_2M_L      = 0x01, /**< 2 Mbps with long preamble */
@@ -250,7 +247,7 @@ static int esp_inetaddr_event(struct notifier_block *nb,
 
 	case NETDEV_DOWN:
 		if (priv && (priv->if_type == ESP_STA_IF)) {
-			cmd_set_ip_address(priv, 0);
+			cmd_set_ip_address(priv, cpu_to_be32(0));
 			esp_info("Interface %s Down: %d\n", netdev->name, priv->if_type);
 		}
 		break;

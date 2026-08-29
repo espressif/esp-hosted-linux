@@ -31,11 +31,8 @@ struct esp32_debugfs {
 	struct dentry *fw_log_file; /* debugfs firmware logger */
 #endif
 };
-struct esp32_debugfs drv_debugfs;
+static struct esp32_debugfs drv_debugfs;
 
-
-// Define a variable to store the logging level
-extern int log_level;
 
 #if DEBUGFS_TODO
 int debugfs_log_level;
@@ -44,10 +41,6 @@ static char log_buffer[LOG_BUFFER_SIZE] = "";
 static size_t log_length = 0;
 static size_t write_pos = 0;
 #endif
-#ifndef VERSION_BUFFER_SIZE
-#define VERSION_BUFFER_SIZE 50
-#endif
-extern char version_str[VERSION_BUFFER_SIZE];
 
 // Read operation for the debugfs file
 static ssize_t log_level_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)

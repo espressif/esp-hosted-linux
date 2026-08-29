@@ -1,0 +1,30 @@
+# Merge-request governance checks enforced from the repository.
+#
+# GitLab project settings separately enforce:
+# - protected default branch / no direct pushes
+# - required Maintainer approval
+# - successful pipeline before merge
+# - fast-forward-only merge
+# - squash disabled
+
+.mr_governance:
+  stage: validate
+  image: "$LINUX_IMAGE_6_12"
+  tags:
+    - x86_64
+  variables:
+    GIT_DEPTH: "0"
+  interruptible: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - when: never
+
+mr:release-notes:
+  extends: .mr_governance
+  script:
+    - .gitlab/ci/scripts/check-mr-release-notes.sh
+
+mr:commit-policy:
+  extends: .mr_governance
+  script:
+    - .gitlab/ci/scripts/check-mr-commits.sh

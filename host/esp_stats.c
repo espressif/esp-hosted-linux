@@ -85,12 +85,12 @@ static int raw_tp_tx_process(void *data)
 
 			payload_header->if_type = ESP_TEST_IF;
 			payload_header->if_num = 0;
-			payload_header->len = cpu_to_le16(TEST_RAW_TP__BUF_SIZE);
-			payload_header->offset = cpu_to_le16(pad_len);
+			payload_header->len = esp_wire_cpu_to_le16(TEST_RAW_TP__BUF_SIZE);
+			payload_header->offset = esp_wire_cpu_to_le16(pad_len);
 
 			if (adapter->capabilities & ESP_CHECKSUM_ENABLED) {
 				payload_header->checksum =
-					cpu_to_le16(compute_checksum(tx_skb->data,
+					esp_wire_cpu_to_le16(compute_checksum(tx_skb->data,
 								(TEST_RAW_TP__BUF_SIZE + pad_len)));
 			}
 			if (!adapter->if_ops || !adapter->if_ops->write) {
@@ -185,7 +185,7 @@ void test_raw_tp_cleanup(void)
 		if (ret)
 			esp_err("Kthread stop error\n");
 
-		raw_tp_tx_thread = 0;
+		raw_tp_tx_thread = NULL;
 	}
 }
 

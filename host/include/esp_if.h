@@ -10,6 +10,8 @@
 
 #include "esp.h"
 
+extern volatile u8 host_sleep;
+
 struct esp_if_ops {
 	int (*init)(struct esp_adapter *adapter);
 	struct sk_buff* (*read)(struct esp_adapter *adapter);
