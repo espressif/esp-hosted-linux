@@ -1204,7 +1204,7 @@ int cmd_auth_request(struct esp_wifi_device *priv,
 
 	adapter = priv->adapter;
 
-	cmd_len = sizeof(struct cmd_sta_auth) + req->auth_data_len;
+	cmd_len = sizeof(struct cmd_sta_auth) + ESP_CFG80211_AUTH_DATA_LEN(req);
 
 	cmd_node = prepare_command_request(adapter, CMD_STA_AUTH, cmd_len);
 
@@ -1229,8 +1229,9 @@ int cmd_auth_request(struct esp_wifi_device *priv,
 	memcpy(cmd->ssid, ssid_eid, ssid_len);
 	memcpy(cmd->bssid, bss->bssid, MAC_ADDR_LEN);
 	cmd->channel = bss->channel->hw_value;
-	cmd->auth_data_len = req->auth_data_len;
-	memcpy(cmd->auth_data, req->auth_data, req->auth_data_len);
+	cmd->auth_data_len = ESP_CFG80211_AUTH_DATA_LEN(req);
+	memcpy(cmd->auth_data, ESP_CFG80211_AUTH_DATA(req),
+	       ESP_CFG80211_AUTH_DATA_LEN(req));
 
 	if (req->key_len) {
 		memcpy(cmd->key, req->key, req->key_len);
@@ -2253,12 +2254,14 @@ int cmd_add_station(struct esp_wifi_device *priv, const uint8_t *mac,
 		cmd_config->sta_param.vht_caps[1] = 12;
 		memcpy(&cmd_config->sta_param.vht_caps[2], rate_params->vht_capa, 12);
 	}
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0))
 	if (rate_params->he_capa) {
 		cmd_config->sta_param.he_caps[0] = WLAN_EID_EXTENSION;
 		cmd_config->sta_param.he_caps[1] = 25;
 		cmd_config->sta_param.he_caps[2] = WLAN_EID_EXT_HE_CAPABILITY;
 		memcpy(&cmd_config->sta_param.he_caps[3], rate_params->he_capa, 24);
 	}
+#endif
 
 	queue_cmd_node(priv->adapter, cmd_node, ESP_CMD_DFLT_PRIO);
 	queue_work(priv->adapter->cmd_wq, &priv->adapter->cmd_work);

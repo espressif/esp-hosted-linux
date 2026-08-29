@@ -564,7 +564,7 @@ int esp_start_ota(struct esp_adapter *adapter, char *ota_file)
 		goto done;
 	}
 
-	while ((nread = kernel_read(file, ota_chunk, OTA_CHUNK_SIZE, &file->f_pos)) > 0) {
+	while ((nread = esp_kernel_read(file, ota_chunk, OTA_CHUNK_SIZE, &file->f_pos)) > 0) {
 		if (cmd_process_ota_write(adapter->priv[ESP_STA_NW_IF], ota_chunk, nread) !=0) {
 			esp_err("OTA Write failed\n");
 			ret = EINVAL;

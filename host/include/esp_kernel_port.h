@@ -11,6 +11,8 @@
 #include "esp.h"
 #include <net/cfg80211.h>
 #include <linux/version.h>
+#include <linux/fs.h>
+#include <linux/timer.h>
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 13, 0))
     #define ESP_BT_SEND_FRAME_PROTOTYPE() \
@@ -138,6 +140,52 @@ static inline void *skb_put_data(struct sk_buff *skb, const void *data,
 
 	return tmp;
 }
+#endif
+
+/* kernel_read() argument order changed in 4.14: offset moved last and became in/out. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 14, 0)
+static inline ssize_t esp_kernel_read(struct file *file, void *buf,
+				      size_t count, loff_t *pos)
+{
+	ssize_t nread;
+
+	nread = kernel_read(file, *pos, buf, count);
+	if (nread > 0)
+		*pos += nread;
+
+	return nread;
+}
+#else
+#define esp_kernel_read kernel_read
+#endif
+
+/*
+ * timer_setup() replaced setup_timer() in 4.15. Some 4.9/4.14 LTS kernels
+ * backported it with from_timer(); 6.16+ dropped from_timer and made
+ * timer_setup() a macro. Only provide a shim when none of that exists.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0) && \
+	!defined(from_timer) && !defined(timer_setup)
+#define from_timer(var, callback_timer, timer_fieldname) \
+	container_of(callback_timer, typeof(*var), timer_fieldname)
+
+static inline void timer_setup(struct timer_list *timer,
+			       void (*callback)(struct timer_list *),
+			       unsigned int flags)
+{
+	setup_timer(timer, (void (*)(unsigned long))callback,
+		    (unsigned long)timer);
+	(void)flags;
+}
+#endif
+
+/* cfg80211 renamed sae_data to auth_data in 4.12. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
+#define ESP_CFG80211_AUTH_DATA(req)		((req)->auth_data)
+#define ESP_CFG80211_AUTH_DATA_LEN(req)		((req)->auth_data_len)
+#else
+#define ESP_CFG80211_AUTH_DATA(req)		((req)->sae_data)
+#define ESP_CFG80211_AUTH_DATA_LEN(req)		((req)->sae_data_len)
 #endif
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 17, 0))
