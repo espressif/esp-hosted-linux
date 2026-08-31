@@ -13,6 +13,7 @@
 #include <linux/mmc/card.h>
 #include <linux/mmc/host.h>
 #include <linux/module.h>
+#include <linux/err.h>
 #include "esp_if.h"
 #include "esp_sdio_api.h"
 #include "esp_api.h"
@@ -56,6 +57,18 @@ static int init_context(struct esp_sdio_context *context);
 static struct sk_buff *read_packet(struct esp_adapter *adapter);
 static int write_packet(struct esp_adapter *adapter, struct sk_buff *skb);
 /*int deinit_context(struct esp_adapter *adapter);*/
+
+static void purge_tx_queues(void)
+{
+	uint8_t prio_q_idx = 0;
+
+	for (prio_q_idx = 0; prio_q_idx < MAX_PRIORITY_QUEUES; prio_q_idx++) {
+		skb_queue_purge(&(sdio_context.tx_q[prio_q_idx]));
+		atomic_set(&queue_items[prio_q_idx], 0);
+	}
+
+	atomic_set(&tx_pending, 0);
+}
 
 #ifdef ESP_DEBUG_STATS
 #define H2E_HOST_STATS_INC(counter) atomic_inc(&(counter))
@@ -308,7 +321,6 @@ static void flush_sdio(struct esp_sdio_context *context)
 static void esp_remove(struct sdio_func *func)
 {
 	struct esp_sdio_context *context;
-	uint8_t prio_q_idx = 0;
 
 	context = sdio_get_drvdata(func);
 
@@ -316,15 +328,20 @@ static void esp_remove(struct sdio_func *func)
 		return;
 	}
 
-	if (context) {
-		for (prio_q_idx = 0; prio_q_idx < MAX_PRIORITY_QUEUES; prio_q_idx++)
-			skb_queue_purge(&(sdio_context.tx_q[prio_q_idx]));
-		skb_queue_purge(&(sdio_context.rx_q));
-		atomic_set(&tx_pending, 0);
+	if (context && context->adapter)
+		atomic_set(&context->adapter->state, ESP_CONTEXT_DISABLED);
+
+	if (tx_thread && !IS_ERR(tx_thread)) {
+		kthread_stop(tx_thread);
+		tx_thread = NULL;
+	} else if (IS_ERR(tx_thread)) {
+		tx_thread = NULL;
 	}
 
-	if (tx_thread)
-		kthread_stop(tx_thread);
+	if (context) {
+		purge_tx_queues();
+		skb_queue_purge(&(sdio_context.rx_q));
+	}
 
 	if (context) {
 		generate_slave_intr(context, BIT(ESP_CLOSE_DATA_PATH));
@@ -626,6 +643,16 @@ static int write_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 		}
 
 		return -EINVAL;
+	}
+
+	if (atomic_read(&adapter->state) < ESP_CONTEXT_READY ||
+	    test_bit(ESP_CLEANUP_IN_PROGRESS, &adapter->state_flags)) {
+		esp_err("Drop TX during shutdown: state=%d flags=0x%lx skb_len=%u if=%u pkt=%u\n",
+				atomic_read(&adapter->state), adapter->state_flags,
+				skb->len, payload_header->if_type,
+				payload_header->packet_type);
+		dev_kfree_skb(skb);
+		return -ENODEV;
 	}
 
 	if (skb->len > max_pkt_size) {
@@ -1027,8 +1054,17 @@ static int esp_probe(struct sdio_func *func,
 
 	tx_thread = kthread_run(tx_process, context->adapter, "esp_TX");
 
-	if (!tx_thread)
-		esp_err("Failed to create esp_sdio TX thread\n");
+	if (IS_ERR(tx_thread)) {
+		ret = PTR_ERR(tx_thread);
+		esp_err("Failed to create esp_sdio TX thread: %d\n", ret);
+		tx_thread = NULL;
+		deinit_sdio_func(func);
+		kfree(context->reg_buf);
+		kfree(context->rx_len_buf);
+		context->reg_buf = context->rx_len_buf = NULL;
+		context->func = NULL;
+		return ret;
+	}
 
 	context->adapter->dev = &func->dev;
 	atomic_set(&context->adapter->state, ESP_CONTEXT_RX_READY);

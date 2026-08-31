@@ -110,7 +110,8 @@ static int process_tx_packet(struct sk_buff *skb)
 	total_len = len + pad_len;
 
 	/* Align buffer length */
-	pad_len += SKB_DATA_ADDR_ALIGNMENT - (total_len % SKB_DATA_ADDR_ALIGNMENT);
+	pad_len += (SKB_DATA_ADDR_ALIGNMENT - (total_len % SKB_DATA_ADDR_ALIGNMENT)) %
+		SKB_DATA_ADDR_ALIGNMENT;
 
 	if (skb_headroom(skb) < pad_len) {
 		/* Headroom is not sufficient */
@@ -141,6 +142,7 @@ static int process_tx_packet(struct sk_buff *skb)
 		/* Populate new SKB */
 		skb_copy_from_linear_data(skb, pos, skb->len);
 		skb_put(new_skb, skb->len + pad_len);
+		((struct esp_skb_cb *)new_skb->cb)->priv = priv;
 
 		/* Replace old SKB */
 		dev_kfree_skb_any(skb);
@@ -695,12 +697,12 @@ int esp_remove_card(struct esp_adapter *adapter)
 
 	esp_stop_network_ifaces(adapter);
 	esp_cfg_cleanup(adapter);
-	/* BT may have been initialized after fw boot-up event, deinit it */
-	esp_deinit_bt(adapter);
 
 	if (adapter->if_rx_workqueue) {
 		flush_workqueue(adapter->if_rx_workqueue);
 	}
+	/* BT may have been initialized after fw boot-up event, deinit it */
+	esp_deinit_bt(adapter);
 	esp_commands_teardown(adapter);
 	esp_remove_network_ifaces(adapter);
 	esp_remove_wiphy(adapter);
@@ -848,6 +850,8 @@ static void process_rx_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 		} else if (payload_header->packet_type == PACKET_TYPE_EVENT) {
 			process_cmd_event(priv, skb);
 			dev_kfree_skb_any(skb);
+		} else {
+			dev_kfree_skb_any(skb);
 		}
 
 	} else if (payload_header->if_type == ESP_HCI_IF) {
@@ -866,6 +870,8 @@ static void process_rx_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 			} else {
 				esp_hci_update_rx_counter(hdev, *type, skb->len);
 			}
+		} else {
+			dev_kfree_skb_any(skb);
 		}
 	} else if (payload_header->if_type == ESP_INTERNAL_IF) {
 

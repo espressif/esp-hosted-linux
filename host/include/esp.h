@@ -82,7 +82,10 @@ struct command_node {
 	uint8_t cmd_code;
 	struct sk_buff *cmd_skb;
 	struct sk_buff *resp_skb;
+	struct esp_adapter *adapter;
 	bool in_cmd_queue;
+	bool active;
+	bool tx_failed;
 };
 
 struct esp_adapter {
@@ -107,6 +110,7 @@ struct esp_adapter {
 	struct work_struct      if_rx_work;
 
 	wait_queue_head_t       wait_for_cmd_resp;
+	wait_queue_head_t       wait_for_cmd_node;
 	uint8_t                 cmd_resp;
 
 	/* wpa supplicant commands structures */
@@ -117,6 +121,7 @@ struct esp_adapter {
 	spinlock_t              cmd_pending_queue_lock;
 
 	struct command_node     *cur_cmd;
+	atomic_t                cmd_node_ref_cnt;
 	spinlock_t              cmd_lock;
 
 	struct work_struct      mac_flter_work;

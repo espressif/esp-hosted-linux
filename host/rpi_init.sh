@@ -146,7 +146,7 @@ parse_arguments()
                 BT_INIT_SET="2"
                 ;;
             rawtp_host_to_esp)
-                echo "Test RAW TP ESP to HOST"
+                echo "Test RAW TP HOST to ESP"
                 RAW_TP_MODE="1"
                 ;;
             rawtp_esp_to_host)

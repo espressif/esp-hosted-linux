@@ -1968,7 +1968,7 @@ int process_set_mode(uint8_t if_type, uint8_t *payload, uint16_t payload_len)
     if (ret) {
         ESP_LOGE(TAG, "Failed to stop wifi\n");
     }
-    
+
     if (mode->mode == WIFI_MODE_AP  || mode->mode == WIFI_MODE_APSTA) {
         ESP_LOGI(TAG, "Setting APSTA mode");
         ESP_GOTO_ON_ERROR(esp_wifi_set_mac(WIFI_IF_STA, dummy_mac), send_err, TAG, "Setting MAC on STA failed");
@@ -2054,6 +2054,13 @@ static void mgmt_txcb(void *eb)
     uint32_t len = esp_wifi_get_eb_data_len(eb);
 
     ieee80211_tx_mgt_cb(eb);
+
+    if (!data || len < (ETH_ALEN + 4)) {
+        ESP_LOGE(TAG, "%s: invalid frame data=%p len=%lu",
+                 __func__, data, (unsigned long)len);
+        return;
+    }
+
     if (!IS_BROADCAST_ADDR(data + 4)) {
         send_mgmt_tx_done(cmd_status, WIFI_IF_AP, data, len);
     }
@@ -2163,10 +2170,14 @@ static int send_mgmt_tx_done(uint8_t cmd_status, wifi_interface_t wifi_if_type, 
     header->header.cmd_status = cmd_status;
     if (len > TX_DONE_PREFIX) {
         header->len = len - TX_DONE_PREFIX;
-        memcpy(header->buf, data + TX_DONE_PREFIX, header->len);
+        if (data && header->len) {
+            memcpy(header->buf, data + TX_DONE_PREFIX, header->len);
+        }
     } else {
         header->len = len;
-        memcpy(header->buf, data, header->len);
+        if (data && header->len) {
+            memcpy(header->buf, data, header->len);
+        }
     }
 
     buf_handle.priv_buffer_handle = buf_handle.payload;
@@ -2197,10 +2208,25 @@ int process_mgmt_tx(uint8_t if_type, uint8_t *payload, uint16_t payload_len)
     uint8_t cmd_status = CMD_RESPONSE_SUCCESS;
     struct cmd_mgmt_tx *mgmt_tx = (struct cmd_mgmt_tx *) payload;
 
+    if (!payload || payload_len < sizeof(struct cmd_mgmt_tx)) {
+        ESP_LOGE(TAG, "%s: invalid payload=%p payload_len=%u",
+                 __func__, payload, payload_len);
+        cmd_status = CMD_RESPONSE_INVALID;
+        goto send_resp;
+    }
+
     if (if_type != ESP_AP_IF || !softap_started) {
         ESP_LOGE(TAG, "%s: err on wrong interface=%d\n", __func__, if_type);
         cmd_status = CMD_RESPONSE_INVALID;
         wifi_if_type = ESP_STA_IF;
+        goto send_resp;
+    }
+
+    if (mgmt_tx->len < (ETH_ALEN + 4) ||
+        mgmt_tx->len > (payload_len - sizeof(struct cmd_mgmt_tx))) {
+        ESP_LOGE(TAG, "%s: invalid mgmt frame len=%lu payload_len=%u",
+                 __func__, (unsigned long)mgmt_tx->len, payload_len);
+        cmd_status = CMD_RESPONSE_INVALID;
         goto send_resp;
     }
 

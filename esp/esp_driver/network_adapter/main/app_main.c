@@ -556,6 +556,11 @@ void process_priv_commamd(uint8_t if_type, uint8_t *payload, uint16_t payload_le
 {
     struct command_header *header = (struct command_header *) payload;
 
+    if (!payload || payload_len < sizeof(struct command_header)) {
+        ESP_LOGE(TAG, "Invalid command: if=%u payload_len=%u", if_type, payload_len);
+        return;
+    }
+
     switch (header->cmd_code) {
 
     case CMD_INIT_INTERFACE:

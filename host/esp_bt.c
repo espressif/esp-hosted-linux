@@ -84,7 +84,8 @@ static ESP_BT_SEND_FRAME_PROTOTYPE()
 	total_len = len + sizeof(struct esp_payload_header);
 
 	/* Align buffer len */
-	pad_len += SKB_DATA_ADDR_ALIGNMENT - (total_len % SKB_DATA_ADDR_ALIGNMENT);
+	pad_len += (SKB_DATA_ADDR_ALIGNMENT - (total_len % SKB_DATA_ADDR_ALIGNMENT)) %
+		SKB_DATA_ADDR_ALIGNMENT;
 
 	pkt_type = hci_skb_pkt_type(skb);
 
@@ -175,12 +176,11 @@ int esp_deinit_bt(struct esp_adapter *adapter)
 		return 0;
 
 	hdev = adapter->hcidev;
+	adapter->hcidev = NULL;
 
 	hci_set_drvdata(hdev, NULL);
 	hci_unregister_dev(hdev);
 	hci_free_dev(hdev);
-
-	adapter->hcidev = NULL;
 
 	return 0;
 }

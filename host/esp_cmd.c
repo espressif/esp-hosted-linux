@@ -37,6 +37,13 @@ static struct command_node *get_free_cmd_node(struct esp_adapter *adapter)
 
 	spin_lock_bh(&adapter->cmd_free_queue_lock);
 
+	if (!test_bit(ESP_CMD_INIT_DONE, &adapter->state_flags) ||
+	    test_bit(ESP_CLEANUP_IN_PROGRESS, &adapter->state_flags)) {
+		spin_unlock_bh(&adapter->cmd_free_queue_lock);
+		esp_err("Command queue is not available\n");
+		return NULL;
+	}
+
 	if (list_empty(&adapter->cmd_free_queue)) {
 		spin_unlock_bh(&adapter->cmd_free_queue_lock);
 		esp_err("No free cmd node found\n");
@@ -45,6 +52,9 @@ static struct command_node *get_free_cmd_node(struct esp_adapter *adapter)
 	cmd_node = list_first_entry(&adapter->cmd_free_queue,
 				    struct command_node, list);
 	list_del(&cmd_node->list);
+	cmd_node->active = true;
+	cmd_node->adapter = adapter;
+	atomic_inc(&adapter->cmd_node_ref_cnt);
 	spin_unlock_bh(&adapter->cmd_free_queue_lock);
 
 	cmd_node->cmd_skb = esp_if_alloc_skb(adapter, ESP_SIZE_OF_CMD_NODE);
@@ -53,8 +63,6 @@ static struct command_node *get_free_cmd_node(struct esp_adapter *adapter)
 		recycle_cmd_node(adapter, cmd_node);
 		return NULL;
 	}
-
-	cmd_node->in_cmd_queue = true;
 
 	return cmd_node;
 }
@@ -67,9 +75,11 @@ static inline void reset_cmd_node(struct esp_adapter *adapter, struct command_no
 		esp_verbose("recycling command still in cmd queue\n");
 		spin_lock_bh(&adapter->cmd_pending_queue_lock);
 		list_del(&cmd_node->list);
+		cmd_node->in_cmd_queue = false;
 		spin_unlock_bh(&adapter->cmd_pending_queue_lock);
 	}
 	cmd_node->cmd_code = 0;
+	cmd_node->tx_failed = false;
 	if (cmd_node->cmd_skb) {
 		dev_kfree_skb_any(cmd_node->cmd_skb);
 		cmd_node->cmd_skb = NULL;
@@ -87,9 +97,10 @@ static void queue_cmd_node(struct esp_adapter *adapter,
 	spin_lock_bh(&adapter->cmd_pending_queue_lock);
 
 	if (flag_high_prio)
-		list_add_rcu(&cmd_node->list, &adapter->cmd_pending_queue);
+		list_add(&cmd_node->list, &adapter->cmd_pending_queue);
 	else
-		list_add_tail_rcu(&cmd_node->list, &adapter->cmd_pending_queue);
+		list_add_tail(&cmd_node->list, &adapter->cmd_pending_queue);
+	cmd_node->in_cmd_queue = true;
 
 	spin_unlock_bh(&adapter->cmd_pending_queue_lock);
 }
@@ -243,6 +254,17 @@ static void recycle_cmd_node(struct esp_adapter *adapter,
 	reset_cmd_node(adapter, cmd_node);
 
 	spin_lock_bh(&adapter->cmd_free_queue_lock);
+	if (cmd_node->active) {
+		cmd_node->active = false;
+		list_add_tail(&cmd_node->list, &adapter->cmd_free_queue);
+		if (atomic_dec_and_test(&adapter->cmd_node_ref_cnt)) {
+			spin_unlock_bh(&adapter->cmd_free_queue_lock);
+			wake_up(&adapter->wait_for_cmd_node);
+			return;
+		}
+		spin_unlock_bh(&adapter->cmd_free_queue_lock);
+		return;
+	}
 	list_add_tail(&cmd_node->list, &adapter->cmd_free_queue);
 	spin_unlock_bh(&adapter->cmd_free_queue_lock);
 }
@@ -256,9 +278,10 @@ static int wait_and_decode_cmd_resp(struct esp_wifi_device *priv,
 
 	if (!priv || !priv->adapter || !cmd_node) {
 		esp_info("Invalid params\n");
-		if (priv->adapter) {
-			adapter = priv->adapter;
-			if (adapter && cmd_node)
+		if (cmd_node) {
+			adapter = (priv && priv->adapter) ?
+					priv->adapter : cmd_node->adapter;
+			if (adapter)
 				recycle_cmd_node(adapter, cmd_node);
 		}
 		return -EINVAL;
@@ -266,16 +289,49 @@ static int wait_and_decode_cmd_resp(struct esp_wifi_device *priv,
 
 	adapter = priv->adapter;
 
-	/* wait for command response */
+	/* Wait for the response tied to THIS node (resp_skb) or an explicit
+	 * per-node failure. Keying off the node instead of the shared
+	 * adapter->cmd_resp avoids cross-waking another in-flight command
+	 * that happens to share the same cmd_code.
+	 */
 	ret = wait_event_interruptible_timeout(adapter->wait_for_cmd_resp,
-			adapter->cmd_resp == cmd_node->cmd_code, COMMAND_RESPONSE_TIMEOUT);
+			READ_ONCE(cmd_node->resp_skb) || READ_ONCE(cmd_node->tx_failed) ||
+			test_bit(ESP_CLEANUP_IN_PROGRESS, &adapter->state_flags) ||
+			!test_bit(ESP_CMD_INIT_DONE, &adapter->state_flags),
+			COMMAND_RESPONSE_TIMEOUT);
 
-	if (!test_bit(ESP_DRIVER_ACTIVE, &adapter->state_flags))
-		return 0;
+	if (test_bit(ESP_CLEANUP_IN_PROGRESS, &adapter->state_flags) ||
+	    !test_bit(ESP_CMD_INIT_DONE, &adapter->state_flags) ||
+	    !test_bit(ESP_DRIVER_ACTIVE, &adapter->state_flags)) {
+		/* Driver is going down: clear in-flight command state now to
+		 * avoid leaving stale cur_cmd/cmd_resp behind, and kick the
+		 * command work so any pending commands are drained.
+		 */
+		spin_lock_bh(&adapter->cmd_lock);
+		if (adapter->cur_cmd == cmd_node)
+			adapter->cur_cmd = NULL;
+		if (adapter->cmd_resp == cmd_node->cmd_code)
+			adapter->cmd_resp = 0;
+		spin_unlock_bh(&adapter->cmd_lock);
 
-	if (ret == 0) {
+		recycle_cmd_node(adapter, cmd_node);
+
+		if (test_bit(ESP_CMD_INIT_DONE, &adapter->state_flags) && adapter->cmd_wq)
+			queue_work(adapter->cmd_wq, &adapter->cmd_work);
+		return -ENODEV;
+	}
+
+	if (ret < 0) {
+		esp_err("Command[0x%X] wait interrupted: %d\n",
+				cmd_node->cmd_code, ret);
+		ret = -EINTR;
+	} else if (ret == 0) {
 		esp_err("Command[0x%X] timed out\n", cmd_node->cmd_code);
 		ret = -EINVAL;
+	} else if (cmd_node->tx_failed) {
+		esp_err("Command[0x%X] failed before transport send\n",
+				cmd_node->cmd_code);
+		ret = -EIO;
 	} else {
 		esp_verbose("Resp for command [0x%X]\n", cmd_node->cmd_code);
 		ret = 0;
@@ -353,6 +409,13 @@ static int wait_and_decode_cmd_resp(struct esp_wifi_device *priv,
 	}
 
 	recycle_cmd_node(adapter, cmd_node);
+
+	/* A command slot just freed up; kick the work in case commands are
+	 * pending, so the queue keeps draining instead of stalling.
+	 */
+	if (test_bit(ESP_CMD_INIT_DONE, &adapter->state_flags) && adapter->cmd_wq)
+		queue_work(adapter->cmd_wq, &adapter->cmd_work);
+
 	return ret;
 }
 
@@ -421,7 +484,10 @@ static void esp_cmd_work(struct work_struct *work)
 	if (!test_bit(ESP_DRIVER_ACTIVE, &adapter->state_flags))
 		return;
 
-	synchronize_rcu();
+	if (test_bit(ESP_CLEANUP_IN_PROGRESS, &adapter->state_flags) ||
+	    !test_bit(ESP_CMD_INIT_DONE, &adapter->state_flags))
+		return;
+
 	spin_lock_bh(&adapter->cmd_lock);
 	if (adapter->cur_cmd) {
 		/* Busy in another command */
@@ -432,6 +498,13 @@ static void esp_cmd_work(struct work_struct *work)
 	}
 
 	spin_lock_bh(&adapter->cmd_pending_queue_lock);
+
+	if (test_bit(ESP_CLEANUP_IN_PROGRESS, &adapter->state_flags) ||
+	    !test_bit(ESP_CMD_INIT_DONE, &adapter->state_flags)) {
+		spin_unlock_bh(&adapter->cmd_pending_queue_lock);
+		spin_unlock_bh(&adapter->cmd_lock);
+		return;
+	}
 
 	if (list_empty(&adapter->cmd_pending_queue)) {
 		/* No command to process */
@@ -457,9 +530,10 @@ static void esp_cmd_work(struct work_struct *work)
 	/* this should never happen */
 	if (!cmd_node->cmd_skb || !cmd_node->cmd_code) {
 		esp_warn("cmd_node->cmd_skb =%p , cmd_code=[0x%X]\n", cmd_node->cmd_skb, cmd_node->cmd_code);
+		cmd_node->tx_failed = true;
 		spin_unlock_bh(&adapter->cmd_pending_queue_lock);
 		spin_unlock_bh(&adapter->cmd_lock);
-		recycle_cmd_node(adapter, cmd_node);
+		wake_up_interruptible(&adapter->wait_for_cmd_resp);
 		return;
 	}
 
@@ -481,10 +555,15 @@ static void esp_cmd_work(struct work_struct *work)
 		esp_err("Failed to send command [0x%X]\n", cmd_node->cmd_code);
 		if (adapter->if_ops && adapter->if_ops->write)
 			cmd_node->cmd_skb = NULL;
+		cmd_node->tx_failed = true;
 		adapter->cur_cmd = NULL;
 		spin_unlock_bh(&adapter->cmd_pending_queue_lock);
 		spin_unlock_bh(&adapter->cmd_lock);
-		recycle_cmd_node(adapter, cmd_node);
+		wake_up_interruptible(&adapter->wait_for_cmd_resp);
+		if (test_bit(ESP_CMD_INIT_DONE, &adapter->state_flags) &&
+		    !test_bit(ESP_CLEANUP_IN_PROGRESS, &adapter->state_flags) &&
+		    adapter->cmd_wq)
+			queue_work(adapter->cmd_wq, &adapter->cmd_work);
 		return;
 	}
 
@@ -531,10 +610,16 @@ static struct command_node *prepare_command_request(struct esp_adapter *adapter,
 	struct command_header *cmd;
 	struct esp_payload_header *payload_header;
 	struct command_node *node = NULL;
-	struct esp_wifi_device *priv = adapter->priv[0];
+	struct esp_wifi_device *priv;
 
 	if (!adapter) {
 		esp_info("%u null adapter\n", __LINE__);
+		return NULL;
+	}
+
+	priv = adapter->priv[0];
+	if (!priv) {
+		esp_err("command interface is not available\n");
 		return NULL;
 	}
 
@@ -587,6 +672,8 @@ static struct command_node *prepare_command_request(struct esp_adapter *adapter,
 
 int process_cmd_resp(struct esp_adapter *adapter, struct sk_buff *skb)
 {
+	struct command_header *header;
+
 	if (!skb || !adapter) {
 		esp_err("CMD resp: invalid!\n");
 
@@ -603,10 +690,33 @@ int process_cmd_resp(struct esp_adapter *adapter, struct sk_buff *skb)
 		return -1;
 	}
 
+	if (skb->len < sizeof(*header)) {
+		esp_err("CMD resp: runt skb len=%u\n", skb->len);
+		dev_kfree_skb_any(skb);
+		return -1;
+	}
+
+	header = (struct command_header *) skb->data;
+
 	spin_lock_bh(&adapter->cmd_lock);
 	if (!adapter->cur_cmd) {
-		struct command_header *header = (struct command_header *) skb->data;
 		esp_err("Command response not expected=%d\n", header->cmd_code);
+		dev_kfree_skb_any(skb);
+		spin_unlock_bh(&adapter->cmd_lock);
+		return -1;
+	}
+
+	if (header->cmd_code != adapter->cur_cmd->cmd_code) {
+		esp_err("Command response mismatch: expected=%u got=%u\n",
+				adapter->cur_cmd->cmd_code, header->cmd_code);
+		dev_kfree_skb_any(skb);
+		spin_unlock_bh(&adapter->cmd_lock);
+		return -1;
+	}
+
+	if (adapter->cur_cmd->resp_skb) {
+		esp_warn("Duplicate cmd response for [0x%X], dropping\n",
+				header->cmd_code);
 		dev_kfree_skb_any(skb);
 		spin_unlock_bh(&adapter->cmd_lock);
 		return -1;
@@ -1143,6 +1253,7 @@ int cmd_assoc_request(struct esp_wifi_device *priv,
 
 	if (!priv->assoc_req_ie) {
 		esp_err("Failed to allocate buffer for assoc request IEs\n");
+		recycle_cmd_node(adapter, cmd_node);
 		return -ENOMEM;
 	}
 
@@ -1949,6 +2060,11 @@ int cmd_set_mac(struct esp_wifi_device *priv, uint8_t *mac_addr)
 
 	cmd_node = prepare_command_request(priv->adapter, CMD_SET_MAC, cmd_len);
 
+	if (!cmd_node) {
+		esp_err("Failed to get command node\n");
+		return -ENOMEM;
+	}
+
 	cmd = (struct cmd_config_mac_address *) (cmd_node->cmd_skb->data +
 				sizeof(struct esp_payload_header));
 
@@ -2099,7 +2215,23 @@ int esp_commands_teardown(struct esp_adapter *adapter)
 
 	set_bit(ESP_CLEANUP_IN_PROGRESS, &adapter->state_flags);
 	clear_bit(ESP_CMD_INIT_DONE, &adapter->state_flags);
+
+	spin_lock_bh(&adapter->cmd_lock);
+	adapter->cur_cmd = NULL;
+	adapter->cmd_resp = 0;
+	spin_unlock_bh(&adapter->cmd_lock);
+	wake_up_interruptible_all(&adapter->wait_for_cmd_resp);
+
 	destroy_cmd_wq(adapter);
+
+	if (!wait_event_timeout(adapter->wait_for_cmd_node,
+			atomic_read(&adapter->cmd_node_ref_cnt) == 0,
+			COMMAND_RESPONSE_TIMEOUT)) {
+		esp_err("Command teardown timed out with %d active command nodes; keeping cmd_pool allocated\n",
+				atomic_read(&adapter->cmd_node_ref_cnt));
+		return -EBUSY;
+	}
+
 	free_esp_cmd_pool(adapter);
 
 	return 0;
@@ -2112,9 +2244,21 @@ int esp_commands_setup(struct esp_adapter *adapter)
 		return -EINVAL;
 	}
 
+	if (adapter->cmd_pool) {
+		if (atomic_read(&adapter->cmd_node_ref_cnt)) {
+			esp_err("Cannot setup command queue with %d active command nodes\n",
+					atomic_read(&adapter->cmd_node_ref_cnt));
+			return -EBUSY;
+		}
+
+		free_esp_cmd_pool(adapter);
+	}
+
 	init_waitqueue_head(&adapter->wait_for_cmd_resp);
+	init_waitqueue_head(&adapter->wait_for_cmd_node);
 
 	spin_lock_init(&adapter->cmd_lock);
+	atomic_set(&adapter->cmd_node_ref_cnt, 0);
 
 	INIT_LIST_HEAD(&adapter->cmd_pending_queue);
 	INIT_LIST_HEAD(&adapter->cmd_free_queue);

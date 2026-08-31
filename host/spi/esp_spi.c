@@ -252,8 +252,10 @@ static int process_rx_buf(struct sk_buff *skb)
 	if (len == 0) {
 		return -EINVAL;
 	}
-	if (len > SPI_BUF_SIZE || !ESP_OFFSET_VALID(offset)) {
-		esp_err("Drop invalid pkt: len=%d offset=%d\n", len, offset);
+	if (len > SPI_BUF_SIZE || !ESP_OFFSET_VALID(offset) ||
+	    offset > skb->len || len > (skb->len - offset)) {
+		esp_err("Drop invalid pkt: len=%d offset=%d skb_len=%u\n",
+			len, offset, skb->len);
 		return -EINVAL;
 	}
 

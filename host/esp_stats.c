@@ -54,7 +54,8 @@ static int raw_tp_tx_process(void *data)
 
 	pad_len = sizeof(struct esp_payload_header);
 	total_len = TEST_RAW_TP__BUF_SIZE + pad_len;
-	pad_len += SKB_DATA_ADDR_ALIGNMENT - (total_len % SKB_DATA_ADDR_ALIGNMENT);
+	pad_len += (SKB_DATA_ADDR_ALIGNMENT - (total_len % SKB_DATA_ADDR_ALIGNMENT)) %
+		SKB_DATA_ADDR_ALIGNMENT;
 	total_len = TEST_RAW_TP__BUF_SIZE + pad_len;
 
 	msleep(2000);
