@@ -33,3 +33,9 @@ ci_resolve_diff_base() {
     }
     printf '%s\n' "$resolved"
 }
+
+ci_wifi_lib_archives_changed() {
+    local base="$1"
+    local head="$2"
+    git diff --name-only "$base" "$head" | grep -Eq '^esp/esp_driver/lib/.+\.a$'
+}

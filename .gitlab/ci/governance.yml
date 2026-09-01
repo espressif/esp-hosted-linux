@@ -30,7 +30,29 @@ mr:release-notes:
   script:
     - .gitlab/ci/scripts/check-mr-release-notes.sh
 
+mr:vnc-lib:
+  extends: .mr_governance
+  script:
+    - .gitlab/ci/scripts/check-mr-vnc.sh
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - esp/esp_driver/lib/**/*
+    - when: never
+
 mr:commit-policy:
   extends: .mr_governance
   script:
     - .gitlab/ci/scripts/check-mr-commits.sh
+
+# Parenthetical VNC SHA lives in the lib-updating commit subject.
+# The VNC MR number lives in the GitLab MR description (mr:vnc-lib).
+mr:wifi-lib-revision:
+  extends: .mr_governance
+  script:
+    - .gitlab/ci/scripts/check-wifi-lib-revision.sh
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - esp/esp_driver/lib/**/*
+    - when: never

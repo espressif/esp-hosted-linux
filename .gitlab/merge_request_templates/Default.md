@@ -77,6 +77,15 @@ Release notes:
 <!-- Required when Release notes decision is "not required". -->
 Skip reason:
 
+## VNC Wi-Fi lib
+
+<!--
+Keep this section in every MR. CI checks VNC MR: only when
+esp/esp_driver/lib/*.a changes. Example: VNC MR: 4267
+-->
+
+VNC MR:
+
 ## Checklist
 
 - [ ] I reviewed my own changes.
