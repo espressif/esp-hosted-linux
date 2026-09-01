@@ -108,7 +108,7 @@ fi
 git config user.name "ESP-Hosted Linux Version Bot"
 git config user.email "esp-hosted-linux-version-bot@espressif.com"
 git add "$FW_VERSION" "$HOST_VERSION"
-git commit -m "ci: bump firmware version ${old_version} -> ${new_version}"
+git commit -m "ci: bump version ${old_version} -> ${new_version}"
 
 push_url="${CI_SERVER_URL/\/\//\/\/oauth2:${VERSION_BOT_TOKEN}@}/${CI_PROJECT_PATH}.git"
 # Never echo push_url: it contains the token.

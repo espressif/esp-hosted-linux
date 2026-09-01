@@ -17,6 +17,9 @@
   interruptible: true
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - host/**/*
+        - esp/**/*
     - when: never
 
 mr:release-notes:

@@ -57,6 +57,35 @@ for sha in "${commits[@]}"; do
         fail=1
     fi
 
+    # CI-generated firmware version bumps are mechanical commits and do not
+    # require a DCO sign-off. Keep this exemption deliberately narrow.
+    if [[ "${author_email}" == "esp-hosted-linux-version-bot@espressif.com" &&
+          "${subject}" =~ ^ci:\ bump\ firmware\ version\  ]]; then
+
+        mapfile -t changed_files < <(
+            git diff-tree --no-commit-id --name-only -r "${sha}" | sort
+        )
+
+        allowed_files=(
+            "esp/esp_driver/network_adapter/main/include/esp_fw_version.h"
+            "host/include/esp_fw_version.h"
+        )
+
+        mapfile -t allowed_files_sorted < <(
+            printf '%s\n' "${allowed_files[@]}" | sort
+        )
+
+        if [[ "$(printf '%s\n' "${changed_files[@]}")" != \
+              "$(printf '%s\n' "${allowed_files_sorted[@]}")" ]]; then
+            echo "ERROR: version-bot commit modifies unexpected files:" >&2
+            printf '       %s\n' "${changed_files[@]}" >&2
+            fail=1
+        else
+            echo "Automated firmware version bump: sign-off not required"
+        fi
+
+        continue
+    fi
     expected="Signed-off-by: ${author_name} <${author_email}>"
     message="$(git show -s --format='%B' "${sha}")"
 
