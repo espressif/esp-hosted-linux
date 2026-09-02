@@ -128,8 +128,6 @@ if [ $UPDATE_IDF -eq 1 ]; then
     cd ..
 
     ESP_IDF_CORRECT=1
-    echo "###### Setup Done ######"
-    exit 0
 fi
 
 echo "ESP hosted: replacing wireless libraries"
