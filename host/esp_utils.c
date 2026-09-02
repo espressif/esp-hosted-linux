@@ -48,6 +48,8 @@ char * esp_chipname_from_id(int chipset_id)
 		return "ESP32-C61";
 	if (chipset_id == ESP_FIRMWARE_CHIP_ESP32C5)
 		return "ESP32-C5";
+	if (chipset_id == ESP_FIRMWARE_CHIP_ESP32S31)
+		return "ESP32-S31";
 
 	return "Unknown Chip";
 }
