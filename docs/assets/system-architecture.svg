@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="560" viewBox="0 0 1120 560" role="img" aria-labelledby="title desc">
+  <title id="title">ESP-Hosted-Linux system architecture</title>
+  <desc id="desc">Linux applications use standard networking, cfg80211 nl80211, and Bluetooth HCI interfaces. ESP-Hosted-Linux bridges those kernel paths over SDIO or SPI to ESP-Hosted firmware, which connects to the ESP Wi-Fi and Bluetooth controller.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto-start-reverse" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#555"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto-start-reverse" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#e7352c"/>
+    </marker>
+    <style>
+      .box{fill:#f7f8fa;stroke:#4b5563;stroke-width:2;rx:12;ry:12}
+      .group{fill:#ffffff;stroke:#9ca3af;stroke-width:2;stroke-dasharray:7 5;rx:16;ry:16}
+      .espGroup{fill:#fffafa;stroke:#e7352c}
+      .hosted{fill:#fff4f3;stroke:#e7352c}
+      .label{font:600 18px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#111827;text-anchor:middle}
+      .small{font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#374151;text-anchor:middle}
+      .groupLabel{font:700 20px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#111827}
+      .espTitle{fill:#c92f27}
+      .bi{stroke:#555;stroke-width:2.2;fill:none;marker-end:url(#arrow);marker-start:url(#arrow)}
+      .transport{stroke:#e7352c;stroke-width:2.8;fill:none;marker-end:url(#arrowRed);marker-start:url(#arrowRed)}
+    </style>
+  </defs>
+
+  <rect class="group" x="25" y="25" width="650" height="510"/>
+  <text class="groupLabel" x="50" y="60">Linux host</text>
+
+  <rect class="box" x="150" y="85" width="400" height="80"/>
+  <text class="label" x="350" y="118">User space</text>
+  <text class="small" x="350" y="143">applications · wpa_supplicant · hostapd · iw · BlueZ</text>
+
+  <rect class="box" x="120" y="205" width="460" height="90"/>
+  <text class="label" x="350" y="238">Linux networking and Bluetooth</text>
+  <text class="small" x="350" y="265">network stack · cfg80211 / nl80211 · HCI</text>
+
+  <rect class="box hosted" x="145" y="335" width="410" height="85"/>
+  <text class="label" x="350" y="368">ESP-Hosted-Linux host driver</text>
+  <text class="small" x="350" y="394">WLAN netdev · Wi-Fi control · hosted HCI</text>
+
+  <rect class="box" x="225" y="455" width="250" height="60"/>
+  <text class="label" x="350" y="493">Host SDIO / SPI</text>
+
+  <path class="bi" d="M350 165 V205"/>
+  <path class="bi" d="M350 295 V335"/>
+  <path class="bi" d="M350 420 V455"/>
+
+  <rect class="group espGroup" x="735" y="25" width="360" height="510"/>
+  <text class="groupLabel espTitle" x="760" y="60">ESP device</text>
+
+  <rect class="box" x="790" y="95" width="250" height="85"/>
+  <text class="label" x="915" y="128">Wi-Fi / Bluetooth</text>
+  <text class="small" x="915" y="154">ESP-IDF radio / controller</text>
+
+  <rect class="box hosted" x="790" y="235" width="250" height="90"/>
+  <text class="label" x="915" y="270">ESP-Hosted firmware</text>
+  <text class="small" x="915" y="296">commands · events · data / HCI forwarding</text>
+
+  <rect class="box" x="790" y="455" width="250" height="60"/>
+  <text class="label" x="915" y="493">ESP SDIO / SPI peripheral</text>
+
+  <path class="bi" d="M915 180 V235"/>
+  <path class="bi" d="M915 325 V455"/>
+  <path class="transport" d="M475 485 H790"/>
+</svg>

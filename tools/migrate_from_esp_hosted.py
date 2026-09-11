@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Espressif Systems (Shanghai) PTE LTD
 """
-ESP-Hosted to ESP-HOSTED-Linux Migration & Compatibility Tool.
+ESP-Hosted repository migration and compatibility tool.
 
-This tool helps developers migrating from the legacy monolithic `esp_hosted` repository
-to the standalone `esp-hosted-linux` repository:
+This tool helps developers move work from the legacy monolithic `esp_hosted`
+repository to the standalone `esp-hosted-linux` repository:
 1. Identifies the current commit / branch / tag in the old repo and maps it to the equivalent commit in `esp-hosted-linux`.
 2. Exports and ports uncommitted modifications and untracked files in `esp_hosted_ng/`.
 3. Ports custom commits or feature branches from `esp_hosted` into `esp-hosted-linux`.
@@ -134,7 +134,7 @@ def generate_remapped_patch(raw_diff):
 
 def command_info(old_repo, new_repo):
     print("=" * 65)
-    print(" ESP-Hosted -> ESP-HOSTED-Linux Repository Migration Status")
+    print(" ESP-Hosted -> ESP-Hosted-Linux Repository Migration Status")
     print("=" * 65)
     print(f"Old Repository Path: {old_repo}")
     print(f"New Repository Path: {new_repo}\n")
@@ -291,7 +291,6 @@ def main():
         candidates = [
             os.path.abspath(os.path.join(args.new_repo, "..", "esp_hosted")),
             os.path.abspath(os.path.join(args.new_repo, "..", "..", "esp_hosted")),
-            "/Users/kapilgupta/test/esp_hosted"
         ]
         for c in candidates:
             if is_git_repo(c):
@@ -299,7 +298,7 @@ def main():
                 break
 
     if not old_repo or not is_git_repo(old_repo):
-        print(f"Error: Could not locate valid old `esp_hosted` repository. Please specify with `--old-repo <path>`.")
+        print("Error: Could not locate a valid old `esp_hosted` repository. Specify it with `--old-repo <path>`.")
         sys.exit(1)
 
     if not is_git_repo(args.new_repo):

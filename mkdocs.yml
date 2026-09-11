@@ -1,0 +1,48 @@
+site_name: ESP-Hosted-Linux
+site_description: Linux host driver and ESP firmware documentation for ESP-Hosted-Linux
+repo_name: GitHub
+repo_url: https://github.com/espressif/esp-hosted-linux
+strict: true
+use_directory_urls: false
+docs_dir: docs
+site_dir: docs-html
+
+theme:
+  name: mkdocs
+  custom_dir: docs-theme
+  nav_style: light
+  color_mode: auto
+  user_color_mode_toggle: true
+
+extra_css:
+  - stylesheets/esp-hosted.css
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Quick start: getting-started/quick-start.md
+      - Hardware setup: getting-started/hardware-setup.md
+      - Build, flash, and load: getting-started/build-and-flash.md
+  - Guides:
+      - Wi-Fi station: guides/wifi-station.md
+      - Wi-Fi access point: guides/wifi-access-point.md
+      - Bluetooth: guides/bluetooth.md
+      - Host sleep: guides/host-sleep.md
+      - OTA firmware update: guides/ota.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - SDIO transport: architecture/sdio.md
+      - SPI transport: architecture/spi.md
+  - Reference:
+      - Supported hardware: reference/supported-hardware.md
+      - Performance: reference/performance.md
+      - Repository layout: reference/repository-layout.md
+      - Raspberry Pi reference setup: reference/raspberry-pi.md
+  - Porting: porting.md
+  - Troubleshooting: troubleshooting.md
+  - Migration: migration.md
+
+markdown_extensions:
+  - admonition
+  - tables
+  - md_in_html
