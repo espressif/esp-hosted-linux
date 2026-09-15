@@ -13,12 +13,14 @@
 #include <linux/version.h>
 #include <linux/fs.h>
 #include <linux/timer.h>
+#include <linux/mutex.h>
 
 /*
  * adapter.h is shared with the ESP firmware and therefore uses portable
- * uint16_t/uint32_t fields for on-wire values instead of Linux __le16/__le32
- * annotations. Keep the shared ABI unchanged and make the Linux endian/type
- * boundary explicit here so sparse can validate all protocol accesses.
+ * uint16_t/uint32_t/uint64_t fields for on-wire values instead of Linux
+ * __le16/__le32/__le64 annotations. Keep the shared ABI portable and make
+ * the Linux endian/type boundary explicit here so sparse can validate all
+ * protocol accesses.
  */
 static inline u16 esp_wire_cpu_to_le16(u16 value)
 {
@@ -30,9 +32,24 @@ static inline u16 esp_wire_le16_to_cpu(u16 value)
 	return le16_to_cpu((__force __le16)value);
 }
 
+static inline u32 esp_wire_cpu_to_le32(u32 value)
+{
+	return (__force u32)cpu_to_le32(value);
+}
+
 static inline u32 esp_wire_le32_to_cpu(u32 value)
 {
 	return le32_to_cpu((__force __le32)value);
+}
+
+static inline u64 esp_wire_cpu_to_le64(u64 value)
+{
+	return (__force u64)cpu_to_le64(value);
+}
+
+static inline u64 esp_wire_le64_to_cpu(u64 value)
+{
+	return le64_to_cpu((__force __le64)value);
 }
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 13, 0))
@@ -119,37 +136,30 @@ enum ieee80211_privacy {
 #endif
 
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 8, 0)
+static inline struct cfg80211_scan_request *
+esp_mark_scan_done(struct esp_wifi_device *priv, bool abort)
+{
+	struct cfg80211_scan_request *req;
 
-    #define ESP_MARK_SCAN_DONE(PrIv, abort) do {                               \
-									       \
-	if (PrIv->request) {                                                   \
-	    cfg80211_scan_done(PrIv->request, abort);                          \
-	    PrIv->request = NULL;                                              \
-	}                                                                      \
-									       \
-	PrIv->scan_in_progress = false;                                        \
-									       \
-    } while (0);
+	if (!priv)
+		return NULL;
 
+	req = xchg(&priv->request, NULL);
+	priv->scan_in_progress = false;
+	if (req) {
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 8, 0))
+		cfg80211_scan_done(req, abort);
 #else
-
-    #define ESP_MARK_SCAN_DONE(PrIv, abort) do {                               \
-									       \
-	struct cfg80211_scan_info info = {                                     \
-	    .aborted = abort,                                                  \
-	};                                                                     \
-									       \
-	if (PrIv->request) {                                                   \
-	    cfg80211_scan_done(PrIv->request, &info);                          \
-	    PrIv->request = NULL;                                              \
-	}                                                                      \
-									       \
-	PrIv->scan_in_progress = false;                                        \
-									       \
-    } while (0);
-
+		struct cfg80211_scan_info info = {
+			.aborted = abort,
+		};
+		cfg80211_scan_done(req, &info);
 #endif
+	}
+	return req;
+}
+
+#define ESP_MARK_SCAN_DONE(PrIv, abort) esp_mark_scan_done(PrIv, abort)
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 13, 0)
 static inline void *skb_put_data(struct sk_buff *skb, const void *data,
@@ -161,7 +171,43 @@ static inline void *skb_put_data(struct sk_buff *skb, const void *data,
 
 	return tmp;
 }
+
+static inline void *skb_put_zero(struct sk_buff *skb,
+				 unsigned int len)
+{
+	void *tmp = skb_put(skb, len);
+
+	memset(tmp, 0, len);
+
+	return tmp;
+}
 #endif
+
+/* esp_kernel_read() is currently used only by the OTA transaction. A local
+ * read error after START has succeeded is still an ownership failure: the
+ * firmware may hold a begun/partially-written OTA handle and there is no abort
+ * command in the established ABI. Force a fresh firmware incarnation before
+ * esp_start_ota() clears ESP_OTA_IN_PROGRESS. */
+struct esp_adapter *esp_get_adapter(void);
+void esp_schedule_fw_reset_recovery(struct esp_adapter *adapter);
+void esp_request_firmware_restart(struct esp_adapter *adapter);
+
+static inline void esp_ota_host_read_failed(ssize_t nread)
+{
+	struct esp_adapter *adapter;
+
+	if (nread >= 0)
+		return;
+	adapter = esp_get_adapter();
+	if (!adapter || !test_bit(ESP_OTA_IN_PROGRESS, &adapter->state_flags) ||
+	    test_bit(ESP_DRIVER_UNLOADING, &adapter->state_flags) ||
+	    test_bit(ESP_TRANSPORT_REMOVING, &adapter->state_flags))
+		return;
+	if (!test_bit(ESP_FW_RESET_EXPECTED, &adapter->state_flags)) {
+		esp_schedule_fw_reset_recovery(adapter);
+		esp_request_firmware_restart(adapter);
+	}
+}
 
 /* kernel_read() argument order changed in 4.14: offset moved last and became in/out. */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 14, 0)
@@ -173,11 +219,18 @@ static inline ssize_t esp_kernel_read(struct file *file, void *buf,
 	nread = kernel_read(file, *pos, buf, count);
 	if (nread > 0)
 		*pos += nread;
-
+	esp_ota_host_read_failed(nread);
 	return nread;
 }
 #else
-#define esp_kernel_read kernel_read
+static inline ssize_t esp_kernel_read(struct file *file, void *buf,
+				      size_t count, loff_t *pos)
+{
+	ssize_t nread = kernel_read(file, buf, count, pos);
+
+	esp_ota_host_read_failed(nread);
+	return nread;
+}
 #endif
 
 /*
@@ -218,6 +271,16 @@ static inline void timer_setup(struct timer_list *timer,
 #else
 #define NETIF_RX_NI(skb)	netif_rx_ni(skb)
 #endif
+
+static inline void esp_wdev_lock(struct wireless_dev *wdev)
+{
+	mutex_lock(&wdev->mtx);
+}
+
+static inline void esp_wdev_unlock(struct wireless_dev *wdev)
+{
+	mutex_unlock(&wdev->mtx);
+}
 
 static inline
 void CFG80211_RX_ASSOC_RESP(struct net_device *dev,
@@ -293,7 +356,7 @@ static inline bool wireless_dev_current_bss_exists(struct wireless_dev *wdev)
 
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
-  #define del_timer timer_delete_sync
+  #define del_timer timer_delete
 #endif
 
 #endif

@@ -9,6 +9,8 @@
 #define _ESP_DECL_H_
 
 #include <linux/wait.h>
+#include <linux/workqueue.h>
+#include <linux/spinlock.h>
 #include "esp.h"
 
 /* Interrupt Status */
@@ -46,6 +48,7 @@
 #define ESP_SLAVE_INT_RAW_REG          (ESP_SLAVE_SLCHOST_BASE + 0x50)
 #define ESP_SLAVE_INT_ST_REG           (ESP_SLAVE_SLCHOST_BASE + 0x58)
 #define ESP_SLAVE_INT_CLR_REG          (ESP_SLAVE_SLCHOST_BASE + 0xD4)
+#define ESP_SLAVE_INT_ENA_REG          (ESP_SLAVE_SLCHOST_BASE + 0xEC)
 
 /* Data path registers*/
 #define ESP_SLAVE_PACKET_LEN_REG       (ESP_SLAVE_SLCHOST_BASE + 0x60)
@@ -53,6 +56,8 @@
 
 /* Scratch registers*/
 #define ESP_SLAVE_SCRATCH_REG_0        (ESP_SLAVE_SLCHOST_BASE + 0x6C)
+#define ESP_SDIO_RESET_GEN_REG         ESP_SLAVE_SCRATCH_REG_0
+#define ESP_SDIO_RESET_DONE_REG        (ESP_SLAVE_SCRATCH_REG_0 + 1)
 #define ESP_SLAVE_SCRATCH_REG_1        (ESP_SLAVE_SLCHOST_BASE + 0x70)
 #define ESP_SLAVE_SCRATCH_REG_2        (ESP_SLAVE_SLCHOST_BASE + 0x74)
 #define ESP_SLAVE_SCRATCH_REG_3        (ESP_SLAVE_SLCHOST_BASE + 0x78)
@@ -84,20 +89,34 @@ struct esp_sdio_context {
 	struct sk_buff_head    rx_q;
 	u32                    rx_byte_count;
 	u32                    tx_buffer_count;
+	/* Bumped at each incarnation/recovery boundary. TX captures this before
+	 * CMD53 and rechecks after claiming the MMC host so an old aggregate
+	 * cannot commit after counters are rebased. */
+	atomic_t               tx_epoch;
+	bool                   irq_claimed;
 	u32			sdio_clk_mhz;
 	/* TX kthread wakeup: enqueuing a skb wakes tx_process instead of
 	 * relying on its 10-20ms usleep poll. Driven by wake_up()/wait_event. */
 	wait_queue_head_t      tx_waitq;
-	/* Combined reg read: the ISR reads INT_ST..PACKET_LEN in one CMD53 and
-	 * stashes the raw length here so the first read_packet skips its own
-	 * PACKET_LEN read. Set in ISR, consumed once in esp_get_len_from_slave. */
-	bool                   prefetch_len_valid;
-	u32                    prefetch_len_raw;
-	/* DMA-safe SDIO reg buffers allocated once at probe (not per IRQ/packet):
-	 * reg_buf = ISR INT_ST..PACKET_LEN read (3 words); rx_len_buf = per-packet
-	 * PACKET_LEN read (1 word). */
+	atomic_t               tx_aggr_has_hci;
+	wait_queue_head_t      tx_aggr_waitq;
+	/* DMA-safe SDIO buffers allocated once at probe (not per IRQ/packet):
+	 * reg_buf = ISR INT_ST / INT_CLR (1 word);
+	 * rx_len_buf = PACKET_LEN only (1 word);
+	 * token_buf = TOKEN_RDATA only (1 word);
+	 * tx_aggr_buf = Host→ESP CMD53 aggregate (ESP_TX_AGGR_SIZE_MAX).
+	 * bcm2835-mmc DMA-maps CMD53 sg lists. GFP_DMA32 is the 32-bit DMA zone on
+	 * 64-bit hosts; GFP_DMA is ZONE_DMA (needed on 32-bit Raspberry Pi). Do not
+	 * use GFP_DMA on x86_64 — that is the ISA 16MB zone and the 15872-byte
+	 * aggregate can fail probe. */
 	u32                    *reg_buf;
 	u32                    *rx_len_buf;
+	u32                    *token_buf;
+	u8                     *tx_aggr_buf;
+	atomic_t               rx_pending;
+	/* Re-arm NEW_PACKET when PACKET_LEN has not settled after ISR ACK. */
+	struct delayed_work    rx_len_retry_work;
+	u8                     rx_len_retry_count;
 };
 
 #endif

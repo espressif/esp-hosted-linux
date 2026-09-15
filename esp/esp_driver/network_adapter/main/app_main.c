@@ -16,6 +16,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <inttypes.h>
 #include <string.h>
 #include "esp_log.h"
 #include "sys/queue.h"
@@ -65,6 +66,7 @@ static const char TAG_TX[] = "S -> H";
 volatile uint8_t datapath = 0;
 volatile uint8_t association_ongoing = 0;
 volatile uint8_t station_connected = 0;
+volatile uint8_t station_authorized = 0;
 volatile uint8_t softap_started = 0;
 volatile uint8_t ota_ongoing = 0;
 volatile uint8_t power_save_on = 0;
@@ -362,9 +364,32 @@ DONE:
 
 void process_tx_pkt(interface_buffer_handle_t *buf_handle)
 {
+    int32_t ret = ESP_FAIL;
+    bool raw_tp_frame = buf_handle && buf_handle->if_type == ESP_TEST_IF;
+    bool cmd_response = false;
+    uint8_t cmd_code = 0;
+    uint16_t cmd_seq = 0;
+
+    if (buf_handle && buf_handle->pkt_type == PACKET_TYPE_COMMAND_RESPONSE &&
+        buf_handle->payload &&
+        buf_handle->payload_len >= sizeof(struct command_header)) {
+        const struct command_header *cmd =
+            (const struct command_header *)buf_handle->payload;
+
+        cmd_response = true;
+        cmd_code = cmd->cmd_code;
+        cmd_seq = le16toh(cmd->seq_num);
+        ESP_LOGD(TAG, "CMD_RESP_DEQUEUE code=%u seq=%u len=%u",
+                 cmd_code, cmd_seq, buf_handle->payload_len);
+    }
+
     /* Check if data path is not yet open */
     if (!datapath) {
-        ESP_LOGD(TAG, "Data path stopped");
+        ESP_LOGE(TAG, "E2H_DROP_DATAPATH_CLOSED if=%u pkt=%u len=%u cmd=%u/%u",
+                 buf_handle ? buf_handle->if_type : 0,
+                 buf_handle ? buf_handle->pkt_type : 0,
+                 buf_handle ? buf_handle->payload_len : 0,
+                 cmd_code, cmd_seq);
         /* Post processing */
         if (buf_handle->free_buf_handle && buf_handle->priv_buffer_handle) {
             buf_handle->free_buf_handle(buf_handle->priv_buffer_handle);
@@ -374,7 +399,47 @@ void process_tx_pkt(interface_buffer_handle_t *buf_handle)
         return;
     }
     if (if_context && if_context->if_ops && if_context->if_ops->write) {
-        if_context->if_ops->write(if_handle, buf_handle);
+        if (raw_tp_frame) {
+            if (!debug_raw_tp_is_run_active(buf_handle->raw_tp_run_id)) {
+                if (buf_handle->free_buf_handle && buf_handle->priv_buffer_handle) {
+                    buf_handle->free_buf_handle(buf_handle->priv_buffer_handle);
+                    buf_handle->priv_buffer_handle = NULL;
+                }
+                return;
+            }
+            buf_handle->raw_tp_seq = debug_raw_tp_tx_seq_get();
+        }
+        ret = if_context->if_ops->write(if_handle, buf_handle);
+        if (ret <= 0 && !raw_tp_frame) {
+            ESP_LOGE(TAG, "E2H_TRANSPORT_WRITE_FAILED if=%u pkt=%u len=%u ret=%"PRId32,
+                     buf_handle->if_type, buf_handle->pkt_type,
+                     buf_handle->payload_len, ret);
+        } else if (ret > 0 && cmd_response) {
+            ESP_LOGD(TAG, "CMD_RESP_TRANSPORT_OK code=%u seq=%u bytes=%"PRId32,
+                     cmd_code, cmd_seq, ret);
+        }
+#if !CONFIG_ESP_SPI_HOST_INTERFACE
+        if (raw_tp_frame) {
+            if (ret == (int32_t)buf_handle->payload_len) {
+                debug_raw_tp_tx_complete(1);
+            } else {
+                ESP_LOGE(TAG, "RAW_TP_TX_FAILED: seq=%"PRIu32
+                         " transport_ret=%"PRId32,
+                         buf_handle->raw_tp_seq, ret);
+                debug_raw_tp_tx_failed(1);
+            }
+        }
+#endif
+    } else {
+        ESP_LOGE(TAG, "E2H_TRANSPORT_UNAVAILABLE if=%u pkt=%u len=%u cmd=%u/%u",
+                 buf_handle ? buf_handle->if_type : 0,
+                 buf_handle ? buf_handle->pkt_type : 0,
+                 buf_handle ? buf_handle->payload_len : 0,
+                 cmd_code, cmd_seq);
+        if (raw_tp_frame) {
+            ESP_LOGE(TAG, "RAW_TP_TX_FAILED: transport write unavailable");
+            debug_raw_tp_tx_failed(1);
+        }
     }
     /* Post processing */
     if (buf_handle->free_buf_handle && buf_handle->priv_buffer_handle) {
@@ -382,6 +447,14 @@ void process_tx_pkt(interface_buffer_handle_t *buf_handle)
         buf_handle->priv_buffer_handle = NULL;
     }
 }
+
+
+#ifdef CONFIG_ESP_SDIO_HOST_INTERFACE
+/* send_task is the sole LOW-priority consumer. Keep one not-yet-aggregated
+ * item in consumer-owned storage rather than dequeueing and racing producers
+ * to put it back into a potentially full FreeRTOS queue. */
+static interface_buffer_handle_t low_prio_deferred;
+static bool low_prio_deferred_valid;
 
 static void free_tx_buf_handle(interface_buffer_handle_t *buf_handle)
 {
@@ -391,18 +464,24 @@ static void free_tx_buf_handle(interface_buffer_handle_t *buf_handle)
     }
 }
 
-#ifdef CONFIG_ESP_SDIO_HOST_INTERFACE
 static void process_low_prio_tx_packets(uint16_t queued, uint8_t *aggr_buf)
 {
     interface_buffer_handle_t buf_handle = {0};
     uint16_t aggr_len = 0;
+    uint16_t raw_tp_frames = 0;
     bool flush_after_pkt = false;
 
-    if (!queued) {
+    if (!queued && !low_prio_deferred_valid) {
         return;
     }
 
     if (!datapath) {
+        if (low_prio_deferred_valid) {
+            buf_handle = low_prio_deferred;
+            memset(&low_prio_deferred, 0, sizeof(low_prio_deferred));
+            low_prio_deferred_valid = false;
+            process_tx_pkt(&buf_handle);
+        }
         while (queued--) {
             if (xQueueReceive(to_host_queue[PRIO_Q_LOW], &buf_handle, portMAX_DELAY)) {
                 process_tx_pkt(&buf_handle);
@@ -412,24 +491,36 @@ static void process_low_prio_tx_packets(uint16_t queued, uint8_t *aggr_buf)
     }
 
     if (!aggr_buf) {
-        if (xQueueReceive(to_host_queue[PRIO_Q_LOW], &buf_handle, portMAX_DELAY)) {
+        if (low_prio_deferred_valid) {
+            buf_handle = low_prio_deferred;
+            memset(&low_prio_deferred, 0, sizeof(low_prio_deferred));
+            low_prio_deferred_valid = false;
+            process_tx_pkt(&buf_handle);
+        } else if (xQueueReceive(to_host_queue[PRIO_Q_LOW], &buf_handle, portMAX_DELAY)) {
             process_tx_pkt(&buf_handle);
         }
         return;
     }
 
-    while (queued || uxQueueMessagesWaiting(to_host_queue[PRIO_Q_LOW])) {
+    while (low_prio_deferred_valid || queued ||
+           uxQueueMessagesWaiting(to_host_queue[PRIO_Q_LOW])) {
         struct esp_payload_header *header = NULL;
         uint16_t frame_len = 0;
         uint16_t aligned_len = 0;
         uint16_t offset = sizeof(struct esp_payload_header);
         TickType_t wait = queued ? portMAX_DELAY : 0;
 
-        if (!xQueueReceive(to_host_queue[PRIO_Q_LOW], &buf_handle, wait)) {
-            break;
-        }
-        if (queued) {
-            queued--;
+        if (low_prio_deferred_valid) {
+            buf_handle = low_prio_deferred;
+            memset(&low_prio_deferred, 0, sizeof(low_prio_deferred));
+            low_prio_deferred_valid = false;
+        } else {
+            if (!xQueueReceive(to_host_queue[PRIO_Q_LOW], &buf_handle, wait)) {
+                break;
+            }
+            if (queued) {
+                queued--;
+            }
         }
 
         if (!buf_handle.payload || !buf_handle.payload_len ||
@@ -438,15 +529,20 @@ static void process_low_prio_tx_packets(uint16_t queued, uint8_t *aggr_buf)
             continue;
         }
 
+        if (buf_handle.if_type == ESP_TEST_IF &&
+            !debug_raw_tp_is_run_active(buf_handle.raw_tp_run_id)) {
+            free_tx_buf_handle(&buf_handle);
+            continue;
+        }
+
         frame_len = buf_handle.payload_len + offset;
         aligned_len = (frame_len + 3) & ~3;
         flush_after_pkt = buf_handle.payload_len <= SDIO_TX_LATENCY_BYPASS_SIZE;
-        if (aggr_len && flush_after_pkt) {
-            xQueueSendToFront(to_host_queue[PRIO_Q_LOW], &buf_handle, 0);
-            break;
-        }
-        if (aggr_len && aggr_len + aligned_len > SDIO_TX_AGGR_SIZE) {
-            xQueueSendToFront(to_host_queue[PRIO_Q_LOW], &buf_handle, 0);
+        if (aggr_len && (flush_after_pkt ||
+                         aggr_len + aligned_len > SDIO_TX_AGGR_SIZE)) {
+            low_prio_deferred = buf_handle;
+            low_prio_deferred_valid = true;
+            memset(&buf_handle, 0, sizeof(buf_handle));
             break;
         }
 
@@ -466,6 +562,14 @@ static void process_low_prio_tx_packets(uint16_t queued, uint8_t *aggr_buf)
         header->reserved2 = buf_handle.flag;
         header->offset = htole16(offset);
         header->packet_type = buf_handle.pkt_type;
+        if (header->if_type == ESP_TEST_IF) {
+            /* Reserve a contiguous range locally. The global sequence is
+             * committed only if this complete aggregate reaches SDIO TX
+             * completion. */
+            debug_raw_tp_set_seq(header, debug_raw_tp_tx_seq_get() +
+                                         raw_tp_frames);
+            raw_tp_frames++;
+        }
         memcpy(aggr_buf + aggr_len + offset, buf_handle.payload,
                buf_handle.payload_len);
         if (aligned_len > frame_len) {
@@ -485,19 +589,48 @@ static void process_low_prio_tx_packets(uint16_t queued, uint8_t *aggr_buf)
 
     if (aggr_len) {
         if (if_context && if_context->if_ops && if_context->if_ops->write) {
-            sdio_write_aggr(if_handle, aggr_buf, aggr_len);
+            int32_t ret = sdio_write_aggr(if_handle, aggr_buf, aggr_len);
+
+            if (raw_tp_frames) {
+                if (ret == (int32_t)aggr_len) {
+                    debug_raw_tp_tx_complete(raw_tp_frames);
+                } else {
+                    ESP_LOGE(TAG, "RAW_TP_TX_FAILED: first_seq=%"PRIu32
+                             " frames=%u transport_ret=%"PRId32,
+                             debug_raw_tp_tx_seq_get(), raw_tp_frames, ret);
+                    debug_raw_tp_tx_failed(raw_tp_frames);
+                }
+            }
+        } else if (raw_tp_frames) {
+            ESP_LOGE(TAG, "RAW_TP_TX_FAILED: first_seq=%"PRIu32
+                     " frames=%u transport write unavailable",
+                     debug_raw_tp_tx_seq_get(), raw_tp_frames);
+            debug_raw_tp_tx_failed(raw_tp_frames);
         }
     }
 
 }
 #endif
 
-esp_err_t send_to_host(uint8_t prio_q_idx, interface_buffer_handle_t *buf_handle)
+esp_err_t send_to_host_timeout(uint8_t prio_q_idx, interface_buffer_handle_t *buf_handle, TickType_t wait_ticks)
 {
-    esp_err_t ret = xQueueSend(to_host_queue[prio_q_idx], buf_handle, portMAX_DELAY);
+    BaseType_t ret;
+
+    if (prio_q_idx >= MAX_PRIORITY_QUEUES || !buf_handle ||
+        !to_host_queue[prio_q_idx]) {
+        ESP_LOGE(TAG, "E2H_QUEUE_INVALID prio=%u buf=%p", prio_q_idx, buf_handle);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ret = xQueueSend(to_host_queue[prio_q_idx], buf_handle, wait_ticks);
     if (ret == pdTRUE && send_task_handle)
         xTaskNotifyGive(send_task_handle);
     return ret;
+}
+
+esp_err_t send_to_host(uint8_t prio_q_idx, interface_buffer_handle_t *buf_handle)
+{
+    return send_to_host_timeout(prio_q_idx, buf_handle, portMAX_DELAY);
 }
 
 /* Send data to host */
@@ -535,7 +668,11 @@ void send_task(void* pvParameters)
             if (xQueueReceive(to_host_queue[PRIO_Q_MID], &buf_handle, portMAX_DELAY)) {
                 process_tx_pkt(&buf_handle);
             }
-        } else if (low_prio_pkt_waiting) {
+        } else if (low_prio_pkt_waiting
+#if CONFIG_ESP_SDIO_HOST_INTERFACE
+                   || low_prio_deferred_valid
+#endif
+                  ) {
 #if CONFIG_ESP_SDIO_HOST_INTERFACE
             process_low_prio_tx_packets(low_prio_pkt_waiting, sdio_aggr_buf);
 #else
@@ -554,174 +691,19 @@ void send_task(void* pvParameters)
 
 void process_priv_commamd(uint8_t if_type, uint8_t *payload, uint16_t payload_len)
 {
-    struct command_header *header = (struct command_header *) payload;
-
-    if (!payload || payload_len < sizeof(struct command_header)) {
-        ESP_LOGE(TAG, "Invalid command: if=%u payload_len=%u", if_type, payload_len);
-        return;
-    }
-
-    switch (header->cmd_code) {
-
-    case CMD_INIT_INTERFACE:
-        ESP_LOGI(TAG, "INIT Interface command");
-        process_init_interface(if_type, payload, payload_len);
-        break;
-
-    case CMD_DEINIT_INTERFACE:
-        ESP_LOGI(TAG, "DEINIT Interface command");
-        process_deinit_interface(if_type, payload, payload_len);
-        break;
-
-    case CMD_GET_MAC:
-        ESP_LOGI(TAG, "Get MAC command");
-        process_get_mac(if_type);
-        break;
-
-    case CMD_SET_MAC:
-        ESP_LOGI(TAG, "Set MAC command");
-        process_set_mac(if_type, payload, payload_len);
-        break;
-
-    case CMD_SCAN_REQUEST:
-        ESP_LOGI(TAG, "Scan request");
-        process_start_scan(if_type, payload, payload_len);
-        break;
-
-    case CMD_STA_AUTH:
-        ESP_LOGI(TAG, "Auth request");
-        process_auth_request(if_type, payload, payload_len);
-        break;
-
-    case CMD_STA_ASSOC:
-        ESP_LOGI(TAG, "Assoc request");
-        process_assoc_request(if_type, payload, payload_len);
-        break;
-
-    case CMD_STA_CONNECT:
-        ESP_LOGI(TAG, "STA connect request");
-        process_sta_connect(if_type, payload, payload_len);
-        break;
-
-    case CMD_DISCONNECT:
-        ESP_LOGI(TAG, "disconnect request");
-        process_disconnect(if_type, payload, payload_len);
-        break;
-
-    case CMD_ADD_KEY:
-        ESP_LOGI(TAG, "Add key request");
-        process_add_key(if_type, payload, payload_len);
-        break;
-
-    case CMD_DEL_KEY:
-        /* ESP_LOGI(TAG, "Delete key request\n"); */
-        process_del_key(if_type, payload, payload_len);
-        break;
-
-    case CMD_SET_DEFAULT_KEY:
-        ESP_LOGI(TAG, "Set default key request");
-        process_set_default_key(if_type, payload, payload_len);
-        break;
-
-    case CMD_SET_IP_ADDR:
-        ESP_LOGI(TAG, "Set IP Address");
-        process_set_ip(if_type, payload, payload_len);
-        break;
-
-    case CMD_SET_MCAST_MAC_ADDR:
-        ESP_LOGI(TAG, "Set multicast mac address list");
-        process_set_mcast_mac_list(if_type, payload, payload_len);
-        break;
-
-    case CMD_GET_TXPOWER:
-    case CMD_SET_TXPOWER:
-        ESP_LOGI(TAG, "%s Tx power command", header->cmd_code == CMD_GET_TXPOWER ? "Get" : "Set");
-        process_tx_power(if_type, payload, payload_len, header->cmd_code);
-        break;
-
-    case CMD_STA_RSSI:
-        ESP_LOGI(TAG, "RSSI command");
-        process_rssi(if_type, payload, payload_len);
-        break;
-
-    case CMD_SET_MODE:
-        ESP_LOGI(TAG, "Set MODE command");
-        process_set_mode(if_type, payload, payload_len);
-        break;
-
-    case CMD_SET_IE:
-        ESP_LOGI(TAG, "Set IE command");
-        process_set_ie(if_type, payload, payload_len);
-        break;
-
-    case CMD_AP_CONFIG:
-        ESP_LOGI(TAG, "Set AP config command");
-        process_set_ap_config(if_type, payload, payload_len);
-        break;
-
-    case CMD_MGMT_TX:
-        //ESP_LOGI(TAG, "Send mgmt tx command");
-        process_mgmt_tx(if_type, payload, payload_len);
-        break;
-
-    case CMD_AP_STATION:
-        ESP_LOGI(TAG, "AP station command");
-        process_ap_station(if_type, payload, payload_len);
-        break;
-
-    case CMD_SET_REG_DOMAIN:
-        ESP_LOGI(TAG, "REG set command");
-        process_reg_set(if_type, payload, payload_len);
-        break;
-
-    case CMD_SET_WOW_CONFIG:
-        ESP_LOGI(TAG, "WoW set command");
-        process_wow_set(if_type, payload, payload_len);
-        break;
-
-    case CMD_GET_REG_DOMAIN:
-        ESP_LOGI(TAG, "REG get command");
-        process_reg_get(if_type, payload, payload_len);
-        break;
-    case CMD_RAW_TP_ESP_TO_HOST:
-    case CMD_RAW_TP_HOST_TO_ESP:
-        ESP_LOGI(TAG, "RAW TP init command %s", CMD_RAW_TP_ESP_TO_HOST ? "slave to host" : "host to slave");
-        process_raw_tp(if_type, payload, payload_len);
-        break;
-    case CMD_START_OTA_UPDATE:
-        ESP_LOGI(TAG, "OTA update command");
-        process_ota_start(if_type, payload, payload_len);
-        break;
-
-    case CMD_START_OTA_WRITE:
-        process_ota_write(if_type, payload, payload_len);
-        break;
-
-    case CMD_START_OTA_END:
-        ESP_LOGI(TAG, "OTA end command");
-        process_ota_end(if_type, payload, payload_len);
-        break;
-
-    case CMD_SET_TIME:
-        ESP_LOGI(TAG, "Set time command");
-        process_set_time(if_type, payload, payload_len);
-        break;
-
-    default:
-        ESP_LOGI(TAG, "Unsupported cmd[0x%x] received", header->cmd_code);
-        break;
-    }
+    esp_cmd_dispatch(if_type, payload, payload_len);
 }
 
 void process_rx_pkt(interface_buffer_handle_t *buf_handle)
 {
+    static const struct esp_payload_header zero_padding_header;
     struct esp_payload_header *header = NULL;
     uint8_t *payload = NULL;
     uint16_t payload_len = 0;
     uint16_t offset = 0;
-    uint16_t frame_len = 0;
-    uint16_t aligned_len = 0;
-    uint16_t pos = 0;
+    uint32_t frame_len = 0;
+    uint32_t aligned_len = 0;
+    uint32_t pos = 0;
 #if CONFIG_ESP_SDIO_CHECKSUM
     uint16_t rx_checksum = 0;
     uint16_t checksum = 0;
@@ -733,11 +715,28 @@ void process_rx_pkt(interface_buffer_handle_t *buf_handle)
         payload_len = le16toh(header->len);
 
         if (payload_len == 0) {
+            /* Linux pads each SDIO CMD53 write to a 512-byte block. Once the
+             * last real aggregate frame is consumed, an all-zero header is
+             * therefore the normal end-of-aggregate marker. */
+            if (pos > 0 &&
+                memcmp(header, &zero_padding_header, sizeof(*header)) == 0) {
+                break;
+            }
+            H2E_STATS_INC(h2e_drop_invalid);
+            ESP_LOGE(TAG, "H2E_AGGR_ERROR: non-padding zero payload length "
+                     "pos=%u total=%u if=%u type=%u offset=%u flags=0x%02x "
+                     "checksum=0x%04x",
+                     pos, buf_handle->payload_len, header->if_type,
+                     header->packet_type, offset, header->flags,
+                     le16toh(header->checksum));
             break;
         }
         if (!ESP_OFFSET_VALID(offset)) {
             H2E_STATS_INC(h2e_drop_invalid);
-            ESP_LOGE(TAG, "Drop invalid pkt: len=%d offset=%d", payload_len, offset);
+            ESP_LOGE(TAG, "H2E_AGGR_ERROR: invalid offset pos=%u total=%u "
+                     "len=%u offset=%u if=%u type=%u",
+                     pos, buf_handle->payload_len, payload_len, offset,
+                     header->if_type, header->packet_type);
             break;
         }
 
@@ -745,8 +744,11 @@ void process_rx_pkt(interface_buffer_handle_t *buf_handle)
         aligned_len = (frame_len + 3) & ~3;
         if (frame_len > RX_BUF_SIZE || pos + frame_len > buf_handle->payload_len) {
             H2E_STATS_INC(h2e_drop_invalid);
-            ESP_LOGE(TAG, "Drop invalid aggregate pkt: pos=%d len=%d offset=%d total=%d",
-                     pos, payload_len, offset, buf_handle->payload_len);
+            ESP_LOGE(TAG, "H2E_AGGR_ERROR: frame out of bounds pos=%u "
+                     "total=%u len=%u offset=%u frame=%u max=%u if=%u type=%u",
+                     pos, buf_handle->payload_len, payload_len, offset,
+                     frame_len, RX_BUF_SIZE, header->if_type,
+                     header->packet_type);
             break;
         }
 
@@ -757,7 +759,11 @@ void process_rx_pkt(interface_buffer_handle_t *buf_handle)
         header->checksum = htole16(rx_checksum);
         if (checksum != rx_checksum) {
             H2E_STATS_INC(h2e_drop_checksum);
-            ESP_LOGD(TAG, "checksum mismatch");
+            ESP_LOGE(TAG, "H2E_CHECKSUM_ERROR: pos=%u total=%u len=%u "
+                     "offset=%u if=%u type=%u expected=0x%04x got=0x%04x",
+                     pos, buf_handle->payload_len, payload_len, offset,
+                     header->if_type, header->packet_type, checksum,
+                     rx_checksum);
             break;
         }
 #endif
@@ -775,7 +781,8 @@ void process_rx_pkt(interface_buffer_handle_t *buf_handle)
             /*ESP_LOG_BUFFER_HEXDUMP("Rx Cmd", payload, payload_len, ESP_LOG_INFO);*/
             process_priv_commamd(header->if_type, payload, payload_len);
 
-        } else if (header->packet_type == PACKET_TYPE_DATA) {
+        } else if (header->packet_type == PACKET_TYPE_DATA ||
+                   header->packet_type == PACKET_TYPE_EAPOL) {
 
             /* ESP_LOGI(TAG, "Data packet on iface=%d", header->if_type); */
             /* Data Path */
@@ -783,7 +790,8 @@ void process_rx_pkt(interface_buffer_handle_t *buf_handle)
                 /*ESP_LOGI(TAG, "Station IF");*/
 
                 /* Forward packet over station interface */
-                if (station_connected || association_ongoing) {
+                if ((station_connected || association_ongoing) &&
+                    (station_authorized || header->packet_type == PACKET_TYPE_EAPOL)) {
                     int ret = 0;
                     /*ESP_LOGI(TAG, "Send wlan\n");*/
                     ret = wifi_tx_with_retry(ESP_IF_WIFI_STA, payload, payload_len);
@@ -795,6 +803,9 @@ void process_rx_pkt(interface_buffer_handle_t *buf_handle)
                     }
                 } else {
                     H2E_STATS_INC(h2e_drop_not_ready);
+                    ESP_LOGD(TAG, "H2E_DROP_READY pkt=%u connected=%u assoc=%u authorized=%u",
+                             header->packet_type, station_connected,
+                             association_ongoing, station_authorized);
                 }
 
             } else if (header->if_type == ESP_AP_IF && softap_started) {
@@ -816,7 +827,7 @@ void process_rx_pkt(interface_buffer_handle_t *buf_handle)
             }
 #endif
             else if (header->if_type == ESP_TEST_IF) {
-                debug_update_raw_tp_rx_count(payload_len);
+                debug_update_raw_tp_rx_count(header, payload_len);
             }
         }
 

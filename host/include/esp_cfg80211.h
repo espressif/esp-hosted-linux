@@ -15,6 +15,7 @@ struct wireless_dev *esp_cfg80211_add_iface(struct wiphy *wiphy,
 			      unsigned char name_assign_type,
 			      enum nl80211_iftype type,
 			      struct vif_params *params);
+int esp_cfg80211_register_iface(struct esp_wifi_device *priv);
 int esp_add_wiphy(struct esp_adapter *adapter);
 int esp_remove_wiphy(struct esp_adapter *adapter);
 int esp_mark_disconnect(struct esp_wifi_device *priv, uint16_t reason,

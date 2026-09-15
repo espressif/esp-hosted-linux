@@ -63,6 +63,8 @@ struct esp_adapter;
 #define INTERFACE_HEADER_PADDING (SKB_DATA_ADDR_ALIGNMENT*3)
 
 #define MAX_COUNTRY_LEN 3
+#define ESP_TX_AGGR_SIZE_MAX       15872U
+#define ESP_TX_AGGR_SIZE_ALIGN       512U
 
 enum adapter_flags_e {
 	ESP_CLEANUP_IN_PROGRESS,    /* Driver unloading or ESP reset */
@@ -70,7 +72,20 @@ enum adapter_flags_e {
 	ESP_DRIVER_ACTIVE,          /* kernel module __exit is not yet invoked */
 	ESP_INIT_DONE,              /* Driver init done */
 	ESP_OTA_IN_PROGRESS,        /* Firmware OTA in progress */
+	ESP_DRIVER_UNLOADING,       /* module exit owns teardown; reject boot/reprobe */
+	ESP_ALLOW_DEINIT,           /* admit only the final module-exit deinit cmd */
+	ESP_ALLOW_RECONSTRUCT,      /* admit init/get-mac/OTA/deinit during card rebuild */
+	ESP_FW_RECOVERY_PENDING,    /* quarantine current incarnation while recovery owns it */
+	ESP_FW_RESET_EXPECTED,      /* known or observed firmware reincarnation */
+	ESP_TRANSPORT_REMOVING,     /* physical transport removal: reject new work/recovery */
+	ESP_SKIP_FW_DEINIT,         /* scoped local-only netdev teardown */
+	ESP_FW_RESTART_NEEDED,      /* firmware restart requested but not yet confirmed sent */
 };
+
+#define ESP_FW_RECOVERY_QUIET_MS        500
+#define ESP_FW_RECOVERY_WATCHDOG_MS     3000
+#define ESP_FW_RECOVERY_BACKOFF_MAX_MS  5000
+#define ESP_OTA_RECOVERY_DELAY_MS       2000
 
 enum priv_flags_e {
 	ESP_NETWORK_UP,
@@ -80,12 +95,21 @@ enum priv_flags_e {
 struct command_node {
 	struct list_head list;
 	uint8_t cmd_code;
+	uint16_t cmd_seq;
 	struct sk_buff *cmd_skb;
 	struct sk_buff *resp_skb;
-	struct esp_adapter *adapter;
-	bool in_cmd_queue;
-	bool active;
-	bool tx_failed;
+	/* True only while list is linked in adapter->cmd_pending_queue. */
+	bool in_pending_queue;
+	/* True from removal from cmd_free_queue until recycle_cmd_node(). */
+	bool in_use;
+	bool completed;
+	int result;
+	unsigned long queued_at;
+	unsigned long sent_at;
+	u64 cookie;
+	u8 *mgmt_frame;
+	u32 mgmt_frame_len;
+	bool mgmt_dont_wait_for_ack;
 };
 
 struct esp_adapter {
@@ -110,18 +134,19 @@ struct esp_adapter {
 	struct work_struct      if_rx_work;
 
 	wait_queue_head_t       wait_for_cmd_resp;
-	wait_queue_head_t       wait_for_cmd_node;
 	uint8_t                 cmd_resp;
+	uint16_t                cmd_resp_seq;
+	uint16_t                next_cmd_seq;
 
 	/* wpa supplicant commands structures */
 	struct command_node     *cmd_pool;
+	atomic_t                cmd_nodes_in_use;
 	struct list_head        cmd_free_queue;
 	spinlock_t              cmd_free_queue_lock;
 	struct list_head        cmd_pending_queue;
 	spinlock_t              cmd_pending_queue_lock;
 
 	struct command_node     *cur_cmd;
-	atomic_t                cmd_node_ref_cnt;
 	spinlock_t              cmd_lock;
 
 	struct work_struct      mac_flter_work;
@@ -132,6 +157,13 @@ struct esp_adapter {
 	struct sk_buff_head     events_skb_q;
 	struct workqueue_struct *events_wq;
 	struct work_struct      events_work;
+
+	/* In-place reopen after firmware flash/reset while the driver stays bound. */
+	struct delayed_work     fw_recovery_work;
+	spinlock_t              fw_recovery_lock;
+	unsigned int            fw_recovery_backoff_ms;
+	atomic_t                fw_recovery_gen;
+	u32                     fw_reconstruct_gen;
 
 	unsigned long           state_flags;
 	int                     chipset;
@@ -161,6 +193,7 @@ struct esp_wifi_device {
 	/* This is needed to notify scan completion*/
 	struct cfg80211_scan_request *request;
 	struct cfg80211_bss     *bss;
+	spinlock_t              bss_lock;
 	uint8_t                 *assoc_req_ie;
 	size_t                  assoc_req_ie_len;
 
@@ -179,10 +212,44 @@ struct esp_wifi_device {
 	struct notifier_block   nb;
 	uint8_t                 tx_pwr_type;
 	uint8_t                 tx_pwr;
-	uint32_t                rssi;
+	int8_t                  rssi;
 	bool                    local_disconnect_req;
-};
+	bool                    assoc_cmd_pending;
+	u8                      assoc_bssid[MAC_ADDR_LEN];
+	u16                     assoc_cmd_seq;
+	bool                    assoc_control_port;
+	u8                      auth_bssid[MAC_ADDR_LEN];
+	u16                     auth_cmd_seq;
+	u8                      disconnect_bssid[MAC_ADDR_LEN];
+	u16                     disconnect_cmd_seq;
+	u16                     conn_generation;
+	u64                     mgmt_tx_cookie;
+	u64                     mgmt_tx_id;
+	u64                     pending_mgmt_id;
+	u64                     pending_mgmt_cookie;
+	bool                    pending_mgmt_active;
+	unsigned long           pending_mgmt_sent_at;
 
+	/* cfg80211 MLME ops hold wdev->mtx across wait_and_decode_cmd_resp().
+	 * Stage AUTH/ASSOC/DISCONNECT events until that wait returns, then
+	 * notify under the same mutex. Late events run on mlme_work. */
+	struct work_struct      mlme_work;
+	struct delayed_work     mlme_timeout_work;
+	struct delayed_work     scan_timeout_work;
+	struct sk_buff_head     staged_auth_q;
+	struct sk_buff          *staged_assoc_skb;
+	struct sk_buff          *staged_disconnect_skb;
+	u16                     staged_assoc_seq;
+	u8                      *ap_ie_buf[5];
+	u16                     ap_ie_len[5];
+	bool                    mlme_wdev_held;
+	bool                    auth_cmd_pending;
+	bool                    disconnect_cmd_pending;
+	bool                    assoc_awaiting_mlme;
+	bool                    auth_awaiting_mlme;
+	bool                    disconnect_awaiting_mlme;
+	bool                    assoc_mlme_notified;
+};
 
 struct esp_skb_cb {
 	struct esp_wifi_device      *priv;

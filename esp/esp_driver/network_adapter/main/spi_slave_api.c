@@ -171,10 +171,22 @@ static uint8_t gpio_data_ready = CONFIG_ESP_SPI_GPIO_DATA_READY;
 static QueueHandle_t spi_rx_queue[MAX_PRIORITY_QUEUES] = {NULL};
 static QueueHandle_t spi_tx_queue[MAX_PRIORITY_QUEUES] = {NULL};
 
+#define SPI_SLOT_NUM            3
+#define SPI_RX_POOL_SIZE        (SPI_SLOT_NUM + SPI_RX_QUEUE_SIZE + 2)
+
 typedef struct {
-    void (*free_buf_handle)(void *priv);
-    void *priv_buffer_handle;
-} spi_trans_ctx_t;
+    spi_slave_transaction_t trans;
+    uint8_t *dma_tx;
+    bool in_use;
+    bool is_raw_tp;
+    uint32_t raw_tp_run_id;
+} spi_slot_t;
+
+static spi_slot_t s_slots[SPI_SLOT_NUM];
+static QueueHandle_t s_rx_buf_pool = NULL;
+static uint8_t *s_emergency_rx_buf = NULL;
+static bool s_emergency_rx_in_use = false;
+static TaskHandle_t s_spi_post_process_task_hdl = NULL;
 
 #if HS_DEASSERT_ON_CS
 static SemaphoreHandle_t wait_cs_deassert_sem;
@@ -364,53 +376,40 @@ static void IRAM_ATTR spi_post_trans_cb(spi_slave_transaction_t *trans)
 static bool get_next_tx_buffer(interface_buffer_handle_t *buf_handle)
 {
     esp_err_t ret = ESP_OK;
-    uint8_t *sendbuf = NULL;
-    struct esp_payload_header *header = NULL;
 
     if (!buf_handle) {
         return false;
     }
 
-    memset(buf_handle, 0, sizeof(*buf_handle));
+    while (1) {
+        memset(buf_handle, 0, sizeof(*buf_handle));
 
-    /* Get buffer from SPI Tx queue */
-    if (uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_HIGH])) {
-        ret = xQueueReceive(spi_tx_queue[PRIO_Q_HIGH], buf_handle, portMAX_DELAY);
-    } else if (uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_MID])) {
-        ret = xQueueReceive(spi_tx_queue[PRIO_Q_MID], buf_handle, portMAX_DELAY);
-    } else if (uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_LOW])) {
-        ret = xQueueReceive(spi_tx_queue[PRIO_Q_LOW], buf_handle, portMAX_DELAY);
-    } else {
-        ret = pdFALSE;
+        /* Get buffer from SPI Tx queue */
+        if (uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_HIGH])) {
+            ret = xQueueReceive(spi_tx_queue[PRIO_Q_HIGH], buf_handle, 0);
+        } else if (uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_MID])) {
+            ret = xQueueReceive(spi_tx_queue[PRIO_Q_MID], buf_handle, 0);
+        } else if (uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_LOW])) {
+            ret = xQueueReceive(spi_tx_queue[PRIO_Q_LOW], buf_handle, 0);
+        } else {
+            ret = pdFALSE;
+        }
+
+        if (ret == pdTRUE && buf_handle->payload) {
+            if (buf_handle->if_type == ESP_TEST_IF &&
+                !debug_raw_tp_is_run_active(buf_handle->raw_tp_run_id)) {
+                if (buf_handle->free_buf_handle && buf_handle->priv_buffer_handle) {
+                    buf_handle->free_buf_handle(buf_handle->priv_buffer_handle);
+                    buf_handle->priv_buffer_handle = NULL;
+                }
+                continue;
+            }
+            return true;
+        }
+        break;
     }
 
-    if (ret == pdTRUE && buf_handle->payload) {
-        return true;
-    }
-
-    /* No real data pending, clear ready line and indicate host an idle state */
-    WRITE_PERI_REG(GPIO_OUT_W1TC_REG, (1ULL << gpio_data_ready));
-
-    /* Create empty dummy buffer */
-    sendbuf = heap_caps_malloc(RX_BUF_SIZE, MALLOC_CAP_DMA);
-    if (!sendbuf) {
-        ESP_LOGE(TAG, "Failed to allocate memory for dummy transaction");
-        return false;
-    }
-
-    memset(sendbuf, 0, RX_BUF_SIZE);
-
-    header = (struct esp_payload_header *) sendbuf;
-    header->if_type = 0xF;
-    header->if_num  = 0xF;
-    header->len     = 0;
-
-    buf_handle->payload            = sendbuf;
-    buf_handle->payload_len        = 0;
-    buf_handle->priv_buffer_handle = sendbuf;
-    buf_handle->free_buf_handle    = heap_caps_free;
-
-    return true;
+    return false;
 }
 
 static int process_spi_rx(interface_buffer_handle_t *buf_handle)
@@ -480,73 +479,106 @@ static int process_spi_rx(interface_buffer_handle_t *buf_handle)
     return 0;
 }
 
+static inline void recycle_spi_rx_buf(uint8_t *rx_buf)
+{
+    if (!rx_buf) {
+        return;
+    }
+    if (rx_buf == s_emergency_rx_buf) {
+        s_emergency_rx_in_use = false;
+    } else if (!s_rx_buf_pool || xQueueSend(s_rx_buf_pool, &rx_buf, 0) != pdTRUE) {
+        free(rx_buf);
+    }
+}
+
 static void queue_next_transaction(void)
 {
-    spi_slave_transaction_t *spi_trans = NULL;
-    spi_trans_ctx_t *ctx = NULL;
     esp_err_t ret = ESP_OK;
+    spi_slot_t *slot = NULL;
     interface_buffer_handle_t buf_handle = {0};
+    uint8_t *rx_buf = NULL;
+    bool has_tx = false;
+    int i = 0;
 
-    if (!get_next_tx_buffer(&buf_handle)) {
-        ESP_LOGE(TAG, "Failed to queue new transaction\r\n");
+    /* 1. Find an idle slot */
+    for (i = 0; i < SPI_SLOT_NUM; i++) {
+        if (!s_slots[i].in_use) {
+            slot = &s_slots[i];
+            break;
+        }
+    }
+    if (!slot) {
+        ESP_LOGE(TAG, "FATAL: No free SPI transaction slot, restarting\n");
+        esp_restart();
         return;
     }
 
-    spi_trans = heap_caps_malloc(sizeof(spi_slave_transaction_t), MALLOC_CAP_DMA);
-    if (!spi_trans) {
-        ESP_LOGE(TAG, "Failed to allocate spi_trans");
+    /* 2. Acquire RX buffer: pool -> emergency buffer -> emergency allocation */
+    if (s_rx_buf_pool && xQueueReceive(s_rx_buf_pool, &rx_buf, 0) == pdTRUE && rx_buf) {
+        /* acquired from pool */
+    } else if (!s_emergency_rx_in_use && s_emergency_rx_buf) {
+        rx_buf = s_emergency_rx_buf;
+        s_emergency_rx_in_use = true;
+    } else {
+        rx_buf = heap_caps_malloc(RX_BUF_SIZE, MALLOC_CAP_DMA);
+        if (!rx_buf) {
+            ESP_LOGE(TAG, "FATAL: No RX buffer available for SPI transaction, restarting\n");
+            esp_restart();
+            return;
+        }
+    }
+
+    /* 3. Mark slot in use BEFORE dequeuing TX buffer, guaranteeing resources are held */
+    slot->in_use = true;
+    slot->is_raw_tp = false;
+    slot->raw_tp_run_id = 0;
+
+    /* 4. Dequeue next TX buffer if available */
+    has_tx = get_next_tx_buffer(&buf_handle);
+
+    if (has_tx) {
+        slot->is_raw_tp = (buf_handle.if_type == ESP_TEST_IF);
+        slot->raw_tp_run_id = buf_handle.raw_tp_run_id;
+
+        memcpy(slot->dma_tx, buf_handle.payload, buf_handle.payload_len);
+        if (buf_handle.payload_len < RX_BUF_SIZE) {
+            memset(slot->dma_tx + buf_handle.payload_len, 0, RX_BUF_SIZE - buf_handle.payload_len);
+        }
         if (buf_handle.free_buf_handle) {
             buf_handle.free_buf_handle(buf_handle.priv_buffer_handle);
+            buf_handle.free_buf_handle = NULL;
         }
-        return;
+    } else {
+        /* No pending frame: prepare dummy header */
+        memset(slot->dma_tx, 0, RX_BUF_SIZE);
+        struct esp_payload_header *dummy_hdr = (struct esp_payload_header *)slot->dma_tx;
+        dummy_hdr->if_type = 0xF;
+        dummy_hdr->if_num  = 0xF;
+        dummy_hdr->len     = 0;
     }
 
-    ctx = malloc(sizeof(spi_trans_ctx_t));
-    if (!ctx) {
-        ESP_LOGE(TAG, "Failed to allocate ctx");
-        if (buf_handle.free_buf_handle) {
-            buf_handle.free_buf_handle(buf_handle.priv_buffer_handle);
-        }
-        free(spi_trans);
-        return;
+    /* If no more frames waiting in TX queues, clear data_ready */
+    if (!uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_HIGH]) &&
+        !uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_MID]) &&
+        !uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_LOW])) {
+        WRITE_PERI_REG(GPIO_OUT_W1TC_REG, (1ULL << gpio_data_ready));
     }
 
-    memset(spi_trans, 0, sizeof(spi_slave_transaction_t));
-    ctx->free_buf_handle = buf_handle.free_buf_handle;
-    ctx->priv_buffer_handle = buf_handle.priv_buffer_handle;
+    /* 5. Set up transaction */
+    memset(&slot->trans, 0, sizeof(spi_slave_transaction_t));
+    memset(rx_buf, 0, RX_BUF_SIZE);
+    slot->trans.rx_buffer = rx_buf;
+    slot->trans.tx_buffer = slot->dma_tx;
+    slot->trans.user = slot;
+    slot->trans.length = RX_BUF_SIZE * SPI_BITS_PER_WORD;
 
-    /* Attach Rx Buffer */
-    spi_trans->rx_buffer = heap_caps_malloc(RX_BUF_SIZE, MALLOC_CAP_DMA);
-    if (!spi_trans->rx_buffer) {
-        ESP_LOGE(TAG, "Failed to allocate RX buffer");
-        if (buf_handle.free_buf_handle) {
-            buf_handle.free_buf_handle(buf_handle.priv_buffer_handle);
-        }
-        free(ctx);
-        free(spi_trans);
-        return;
-    }
-    memset(spi_trans->rx_buffer, 0, RX_BUF_SIZE);
-
-    /* Attach Tx Buffer */
-    spi_trans->tx_buffer = buf_handle.payload;
-    spi_trans->user = ctx;
-
-    /* Transaction len */
-    spi_trans->length = RX_BUF_SIZE * SPI_BITS_PER_WORD;
-
-    ret = spi_slave_queue_trans(ESP_SPI_CONTROLLER, spi_trans, portMAX_DELAY);
-
+    ret = spi_slave_queue_trans(ESP_SPI_CONTROLLER, &slot->trans, portMAX_DELAY);
     if (ret != ESP_OK) {
-        ESP_LOGI(TAG, "Failed to queue next SPI transfer\n");
-        free(spi_trans->rx_buffer);
-        spi_trans->rx_buffer = NULL;
-        if (ctx->free_buf_handle) {
-             ctx->free_buf_handle(ctx->priv_buffer_handle);
-        }
-        spi_trans->tx_buffer = NULL;
-        free(ctx);
-        free(spi_trans);
+        /* Invariant: Once a real E2H state/control frame is dequeued, either that exact frame
+         * becomes an armed SPI transaction or the firmware incarnation is invalidated.
+         */
+        ESP_LOGE(TAG, "FATAL: Failed to queue next SPI transfer (0x%x), restarting\n", ret);
+        esp_restart();
         return;
     }
 }
@@ -555,7 +587,7 @@ static void spi_transaction_post_process_task(void* pvParameters)
 {
     esp_err_t ret = ESP_OK;
     spi_slave_transaction_t *spi_trans = NULL;
-    spi_trans_ctx_t *ctx = NULL;
+    spi_slot_t *slot = NULL;
     interface_buffer_handle_t rx_buf_handle = {0};
 
     for (;;) {
@@ -584,6 +616,16 @@ static void spi_transaction_post_process_task(void* pvParameters)
 
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "spi transmit error, ret : 0x%x\r\n", ret);
+            if (spi_trans && spi_trans->user) {
+                slot = (spi_slot_t *)spi_trans->user;
+                if (slot->is_raw_tp) {
+                    debug_raw_tp_tx_failed(1);
+                }
+                if (spi_trans->rx_buffer) {
+                    recycle_spi_rx_buf((uint8_t *)spi_trans->rx_buffer);
+                }
+                slot->in_use = false;
+            }
             continue;
         }
 
@@ -592,34 +634,26 @@ static void spi_transaction_post_process_task(void* pvParameters)
             continue;
         }
 
-        ctx = (spi_trans_ctx_t *)spi_trans->user;
+        slot = (spi_slot_t *)spi_trans->user;
 
-        /*ESP_LOG_BUFFER_HEXDUMP(TAG, spi_trans->tx_buffer, 32, ESP_LOG_INFO);*/
-
-        /* Free any tx buffer, data is not relevant anymore */
-        if (ctx && ctx->free_buf_handle) {
-            ctx->free_buf_handle(ctx->priv_buffer_handle);
-            spi_trans->tx_buffer = NULL;
+        if (slot && slot->is_raw_tp) {
+            debug_raw_tp_tx_complete(1);
         }
 
         if (spi_trans->rx_buffer) {
             rx_buf_handle.payload = spi_trans->rx_buffer;
             ret = process_spi_rx(&rx_buf_handle);
 
-            /* free rx_buffer if process_spi_rx returns an error
-             * In success case it will be freed later */
+            /* free rx_buffer if process_spi_rx returns an error or dummy.
+             * In success case it will be freed later via esp_spi_read_done */
             if (ret != ESP_OK) {
-                free((void *)spi_trans->rx_buffer);
-                spi_trans->rx_buffer = NULL;
+                recycle_spi_rx_buf((uint8_t *)spi_trans->rx_buffer);
             }
         }
 
-        if (ctx) {
-            free(ctx);
+        if (slot) {
+            slot->in_use = false;
         }
-
-        free(spi_trans);
-        spi_trans = NULL;
     }
 }
 
@@ -715,8 +749,31 @@ static interface_handle_t * esp_spi_init(void)
         assert(spi_tx_queue[prio_q_idx] != NULL);
     }
 
+    for (int i = 0; i < SPI_SLOT_NUM; i++) {
+        s_slots[i].dma_tx = heap_caps_malloc(RX_BUF_SIZE, MALLOC_CAP_DMA);
+        assert(s_slots[i].dma_tx != NULL);
+        s_slots[i].in_use = false;
+        s_slots[i].is_raw_tp = false;
+        s_slots[i].raw_tp_run_id = 0;
+    }
+
+    s_emergency_rx_buf = heap_caps_malloc(RX_BUF_SIZE, MALLOC_CAP_DMA);
+    assert(s_emergency_rx_buf != NULL);
+    s_emergency_rx_in_use = false;
+
+    s_rx_buf_pool = xQueueCreate(SPI_RX_POOL_SIZE, sizeof(uint8_t *));
+    assert(s_rx_buf_pool != NULL);
+
+    for (int i = 0; i < SPI_RX_POOL_SIZE; i++) {
+        uint8_t *rx_buf = heap_caps_malloc(RX_BUF_SIZE, MALLOC_CAP_DMA);
+        assert(rx_buf != NULL);
+        BaseType_t qret = xQueueSend(s_rx_buf_pool, &rx_buf, 0);
+        assert(qret == pdTRUE);
+    }
+
     assert(xTaskCreate(spi_transaction_post_process_task, "spi_post_process_task",
-                       TASK_DEFAULT_STACK_SIZE, NULL, TASK_DEFAULT_PRIO, NULL) == pdTRUE);
+                       TASK_DEFAULT_STACK_SIZE, NULL, TASK_DEFAULT_PRIO,
+                       &s_spi_post_process_task_hdl) == pdTRUE);
 
     usleep(500);
 
@@ -750,6 +807,9 @@ static int32_t esp_spi_write(interface_handle_t *handle, interface_buffer_handle
 
     if (total_len > RX_BUF_SIZE) {
         ESP_LOGE(TAG, "Max frame length exceeded %ld.. drop it\n", total_len);
+        if (buf_handle->if_type == ESP_TEST_IF) {
+            debug_raw_tp_tx_failed(1);
+        }
         return ESP_FAIL;
     }
 
@@ -758,6 +818,7 @@ static int32_t esp_spi_write(interface_handle_t *handle, interface_buffer_handle
     tx_buf_handle.if_type = buf_handle->if_type;
     tx_buf_handle.if_num = buf_handle->if_num;
     tx_buf_handle.payload_len = total_len;
+    tx_buf_handle.raw_tp_run_id = buf_handle->raw_tp_run_id;
 
     uint32_t align_padding = 0;
     offset = sizeof(struct esp_payload_header);
@@ -776,6 +837,9 @@ static int32_t esp_spi_write(interface_handle_t *handle, interface_buffer_handle
     } else {
         tx_buf_handle.payload = heap_caps_malloc(buf_handle->payload_len + offset, MALLOC_CAP_DMA);
         if (!tx_buf_handle.payload) {
+            if (buf_handle->if_type == ESP_TEST_IF) {
+                debug_raw_tp_tx_failed(1);
+            }
             return ESP_ERR_NO_MEM;
         }
 
@@ -797,6 +861,9 @@ static int32_t esp_spi_write(interface_handle_t *handle, interface_buffer_handle
     header->offset = htole16(sizeof(struct esp_payload_header) + align_padding);
     header->flags = buf_handle->flag;
     header->packet_type = buf_handle->pkt_type;
+    if (header->if_type == ESP_TEST_IF) {
+        debug_raw_tp_set_seq(header, buf_handle->raw_tp_seq);
+    }
 
 #if CONFIG_ESP_SPI_CHECKSUM
     header->checksum = htole16(compute_checksum(tx_buf_handle.payload,
@@ -817,6 +884,9 @@ static int32_t esp_spi_write(interface_handle_t *handle, interface_buffer_handle
                 tx_buf_handle.free_buf_handle(tx_buf_handle.priv_buffer_handle);
             }
         }
+        if (buf_handle->if_type == ESP_TEST_IF) {
+            debug_raw_tp_tx_failed(1);
+        }
         return ESP_FAIL;
     }
 
@@ -829,8 +899,7 @@ static int32_t esp_spi_write(interface_handle_t *handle, interface_buffer_handle
 static void IRAM_ATTR esp_spi_read_done(void *handle)
 {
     if (handle) {
-        free(handle);
-        handle = NULL;
+        recycle_spi_rx_buf((uint8_t *)handle);
     }
 }
 
@@ -878,6 +947,11 @@ static void esp_spi_deinit(interface_handle_t *handle)
 {
     esp_err_t ret = ESP_OK;
 
+    if (s_spi_post_process_task_hdl) {
+        vTaskDelete(s_spi_post_process_task_hdl);
+        s_spi_post_process_task_hdl = NULL;
+    }
+
     ret = spi_slave_free(ESP_SPI_CONTROLLER);
     if (ESP_OK != ret) {
         ESP_LOGE(TAG, "spi slave bus free failed\n");
@@ -888,5 +962,30 @@ static void esp_spi_deinit(interface_handle_t *handle)
     if (ESP_OK != ret) {
         ESP_LOGE(TAG, "spi all bus free failed\n");
         return;
+    }
+
+    for (int i = 0; i < SPI_SLOT_NUM; i++) {
+        if (s_slots[i].dma_tx) {
+            free(s_slots[i].dma_tx);
+            s_slots[i].dma_tx = NULL;
+        }
+        s_slots[i].in_use = false;
+    }
+
+    if (s_emergency_rx_buf) {
+        free(s_emergency_rx_buf);
+        s_emergency_rx_buf = NULL;
+        s_emergency_rx_in_use = false;
+    }
+
+    if (s_rx_buf_pool) {
+        uint8_t *rx_buf = NULL;
+        while (xQueueReceive(s_rx_buf_pool, &rx_buf, 0) == pdTRUE) {
+            if (rx_buf) {
+                free(rx_buf);
+            }
+        }
+        vQueueDelete(s_rx_buf_pool);
+        s_rx_buf_pool = NULL;
     }
 }

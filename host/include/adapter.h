@@ -63,6 +63,10 @@ struct ieee_mgmt_header {
 	uint16_t   seq_ctrl;
 } __packed;
 
+#ifndef IEEE_HEADER_SIZE
+#define IEEE_HEADER_SIZE                24
+#endif
+
 enum ESP_INTERFACE_TYPE {
 	ESP_STA_IF,
 	ESP_AP_IF,
@@ -158,6 +162,7 @@ enum COMMAND_CODE {
 	CMD_START_OTA_UPDATE = 29,
 	CMD_START_OTA_WRITE = 30,
 	CMD_START_OTA_END = 31,
+	CMD_STA_SET_AUTHORIZED = 32,
 	CMD_MAX,
 };
 
@@ -275,7 +280,29 @@ struct cmd_sta_auth {
 	uint8_t    auth_data[];
 } __packed;
 
+struct raw_tp_packet {
+	uint32_t   seq;
+	uint32_t   run_id;
+} __packed;
+
+struct cmd_raw_tp {
+	struct command_header header;
+	uint32_t   run_id;
+} __packed;
+
 struct cmd_mgmt_tx {
+        struct     command_header header;
+        uint8_t    channel;
+        uint8_t    offchan;
+        uint32_t   wait;
+        uint8_t    no_cck;
+        uint8_t    dont_wait_for_ack;
+        uint64_t   mgmt_tx_id;
+        uint32_t   len;
+        uint8_t    buf[];
+} __packed;
+
+struct cmd_mgmt_tx_unmarked {
         struct     command_header header;
         uint8_t    channel;
         uint8_t    offchan;
@@ -289,8 +316,17 @@ struct cmd_mgmt_tx {
 struct cmd_sta_assoc {
 	struct     command_header header;
 	uint8_t    assoc_ie_len;
-	uint8_t    pad[3];
+	uint8_t    is_reassoc;
+	uint8_t    control_port;
+	uint8_t    pad[1];
 	uint8_t    assoc_ie[];
+} __packed;
+
+struct cmd_sta_set_authorized {
+	struct     command_header header;
+	uint8_t    bssid[MAC_ADDR_LEN];
+	uint8_t    authorized;
+	uint8_t    pad;
 } __packed;
 
 struct cmd_sta_connect {
@@ -303,6 +339,10 @@ struct cmd_sta_connect {
 	uint8_t    assoc_ie_len;
 	uint8_t    assoc_ie[];
 } __packed;
+
+#define DISCONNECT_TYPE_DEAUTH   0
+#define DISCONNECT_TYPE_DISASSOC 1
+#define DISCONNECT_TYPE_LOCAL    2
 
 struct cmd_disconnect {
 	struct     command_header header;
@@ -384,7 +424,7 @@ struct auth_event {
 	uint32_t   rssi;
 	uint64_t   tsf;
 	uint16_t   frame_len;
-	uint8_t    pad[2];
+	uint16_t   auth_seq;
 	uint8_t    frame[0];
 } __packed;
 
@@ -394,7 +434,8 @@ struct assoc_event {
 	uint8_t    frame_type;
 	uint8_t    channel;
 	char       ssid[MAX_SSID_LEN+1];
-	uint8_t    pad[1];
+	uint8_t    pad;
+	uint16_t   assoc_seq;
 	uint16_t   frame_len;
 	uint32_t   rssi;
 	uint64_t   tsf;
@@ -415,6 +456,7 @@ struct disconnect_event {
 	uint8_t    bssid[MAC_ADDR_LEN];
 	char       ssid[MAX_SSID_LEN+1];
 	uint8_t    reason;
+	uint16_t   disconnect_seq;
 } __packed;
 
 struct cmd_config_mode {

@@ -1,5 +1,6 @@
 #include "utils.h"
 #include <linux/debugfs.h>
+#include <linux/err.h>
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/uaccess.h>
@@ -197,50 +198,54 @@ static const struct file_operations version_ops = {
 int debugfs_init(void)
 {
 	struct esp32_debugfs *debugfs = &drv_debugfs;
-	int ret = -ENODEV;
-	// Create debugfs directory
-	debugfs->debugfs_dir = debugfs_create_dir(DEBUGFS_DIR_NAME, NULL);
 
-	if (!debugfs->debugfs_dir) {
-		esp_err("Failed to create debugfs %s directory\n", DEBUGFS_DIR_NAME);
-		goto cleanup;
+	debugfs->debugfs_dir = debugfs_create_dir(DEBUGFS_DIR_NAME, NULL);
+	if (IS_ERR_OR_NULL(debugfs->debugfs_dir)) {
+		esp_warn("Failed to create debugfs %s directory\n", DEBUGFS_DIR_NAME);
+		debugfs->debugfs_dir = NULL;
+		return 0;
 	}
 
-	// Create debugfs file
 	debugfs->log_level_file = debugfs_create_file(LOG_LEVEL, 0644, debugfs->debugfs_dir, NULL, &log_level_ops);
-	if (!debugfs->log_level_file) {
-		esp_err("Failed to create debugfs %s file\n", LOG_LEVEL);
+	if (IS_ERR_OR_NULL(debugfs->log_level_file)) {
+		esp_warn("Failed to create debugfs %s file\n", LOG_LEVEL);
+		debugfs->log_level_file = NULL;
 		goto cleanup;
 	}
 
 	debugfs->version = debugfs_create_file(VERSION, 0644, debugfs->debugfs_dir, NULL, &version_ops);
-	if (!debugfs->version) {
-		esp_err("Failed to create debugfs %s file\n", VERSION);
+	if (IS_ERR_OR_NULL(debugfs->version)) {
+		esp_warn("Failed to create debugfs %s file\n", VERSION);
+		debugfs->version = NULL;
 		goto cleanup;
 	}
 
 #if DEBUGFS_TODO
 	debugfs->host_log_level_file = debugfs_create_file(DEBUGFS_LOG_LEVEL, 0644, debugfs_dir, NULL, &debugfs_log_level_ops);
-	if (!debugfs->debugfs_log_level_file) {
-		esp_err("Failed to create debugfs %s file\n", DEBUGFS_LOG_LEVEL);
+	if (IS_ERR_OR_NULL(debugfs->host_log_level_file)) {
+		esp_warn("Failed to create debugfs %s file\n", DEBUGFS_LOG_LEVEL);
+		debugfs->host_log_level_file = NULL;
 		goto cleanup;
 	}
 
 	debugfs->host_log_file = debugfs_create_file(HOST_LOGS, 0644, debugfs_dir, NULL, &debugfs_log_output_ops);
-	if (!debugfs->host_log_file) {
-		esp_err("Failed to create debugfs %s file\n", HOST_LOGS);
+	if (IS_ERR_OR_NULL(debugfs->host_log_file)) {
+		esp_warn("Failed to create debugfs %s file\n", HOST_LOGS);
+		debugfs->host_log_file = NULL;
 		goto cleanup;
 	}
 
 	debugfs->fw_log_file = debugfs_create_file(FW_LOGS, 0644, debugfs_dir, NULL, &debugfs_fw_log_output_ops);
-	if (!debugfs->fw_log_file) {
-		esp_err("Failed to create debugfs %s file\n", FW_LOGS);
+	if (IS_ERR_OR_NULL(debugfs->fw_log_file)) {
+		esp_warn("Failed to create debugfs %s file\n", FW_LOGS);
+		debugfs->fw_log_file = NULL;
 		goto cleanup;
 	}
 
 	debugfs->fw_log_level_file = debugfs_create_file(FW_LOGS_LEVEL, 0644, debugfs_dir, NULL, &debugfs_fw_log_output_ops);
-	if (!debugfs->fw_log_level_file) {
-		esp_err("Failed to create debugfs %s file\n", FW_LOGS_LEVEL);
+	if (IS_ERR_OR_NULL(debugfs->fw_log_level_file)) {
+		esp_warn("Failed to create debugfs %s file\n", FW_LOGS_LEVEL);
+		debugfs->fw_log_level_file = NULL;
 		goto cleanup;
 	}
 
@@ -248,7 +253,7 @@ int debugfs_init(void)
 	return 0;
 cleanup:
 	debugfs_exit();
-	return ret;
+	return 0;
 }
 
 void debugfs_exit(void)
@@ -265,15 +270,15 @@ void debugfs_exit(void)
 	if (debugfs->host_log_level_file)
 		debugfs_remove(debugfs->host_log_level_file);
 #endif
-	if (debugfs->log_level_file) {
+	if (debugfs->log_level_file && !IS_ERR(debugfs->log_level_file)) {
 		debugfs_remove(debugfs->log_level_file);
 		debugfs->log_level_file = NULL;
 	}
-	if (debugfs->version) {
+	if (debugfs->version && !IS_ERR(debugfs->version)) {
 		debugfs_remove(debugfs->version);
 		debugfs->version = NULL;
 	}
-	if (debugfs->debugfs_dir) {
+	if (debugfs->debugfs_dir && !IS_ERR(debugfs->debugfs_dir)) {
 		debugfs_remove(debugfs->debugfs_dir);
 		debugfs->debugfs_dir = NULL;
 	}

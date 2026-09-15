@@ -111,7 +111,8 @@ void process_hci_rx_pkt(uint8_t *payload, uint16_t payload_len)
         if (xSemaphoreTake(vhci_send_sem, VHCI_MAX_TIMEOUT_MS) == pdTRUE) {
             esp_vhci_host_send_packet(payload, payload_len);
         } else {
-            ESP_LOGI(BT_TAG, "VHCI sem timeout");
+            ESP_LOGE(BT_TAG, "VHCI sem timeout, restarting firmware for HCI recovery");
+            esp_restart();
         }
     }
 #endif

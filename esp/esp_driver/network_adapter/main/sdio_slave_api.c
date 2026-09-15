@@ -17,8 +17,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/task.h"
 #include "driver/gpio.h"
 #include <rom/rtc.h>
 #include "esp_log.h"
@@ -31,6 +33,8 @@
 #include "freertos/semphr.h"
 #include "stats.h"
 #include "soc/gpio_reg.h"
+#include "soc/soc.h"
+#include "soc/sdio_slc_host_reg.h"
 #include "esp_fw_version.h"
 #include "esp_heap_caps.h"
 #include "esp_memory_utils.h"
@@ -59,6 +63,26 @@ static uint8_t gpio_oob = CONFIG_HOST_WAKEUP_GPIO;
 extern volatile uint8_t power_save_on;
 extern SemaphoreHandle_t wakeup_sem;
 
+/*
+ * Host-event bits arrive in sdio_intr_host() ISR context. The ISR only
+ * records them and notifies this task; OPEN/CLOSE/PS/RESET all run here.
+ *
+ * TX admission is separate from physical completion: sdio_slave_transmit()
+ * waits in send_get_finished() until the host consumes the transfer, so a
+ * mutex held across that wait deadlocks the E2H-fail -> ESP_RESET path.
+ * Reset blocks new submissions, lets IDF send_flush_data() unwind the
+ * in-flight transmitter, then drains leftover tokens.
+ */
+static volatile uint32_t s_sdio_host_events;
+static portMUX_TYPE s_sdio_evt_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool s_sdio_ctrl_stop;
+static volatile TaskHandle_t s_sdio_ctrl_task;
+static portMUX_TYPE s_sdio_tx_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool s_sdio_tx_blocked;
+static volatile int s_sdio_tx_inflight;
+static volatile bool s_sdio_tx_wait_idle;
+static SemaphoreHandle_t s_sdio_tx_idle;
+
 static if_ops_t if_ops = {
     .init = sdio_init,
     .write = sdio_write,
@@ -85,29 +109,283 @@ int interface_remove_driver()
     return 0;
 }
 
+static bool sdio_tx_try_admit(void)
+{
+    bool ok;
+
+    portENTER_CRITICAL(&s_sdio_tx_mux);
+    ok = !s_sdio_tx_blocked && !s_sdio_ctrl_stop;
+    if (ok)
+        s_sdio_tx_inflight++;
+    portEXIT_CRITICAL(&s_sdio_tx_mux);
+    return ok;
+}
+
+static void sdio_tx_release(void)
+{
+    bool wake = false;
+
+    portENTER_CRITICAL(&s_sdio_tx_mux);
+    if (s_sdio_tx_inflight > 0)
+        s_sdio_tx_inflight--;
+    if (s_sdio_tx_inflight == 0 && s_sdio_tx_wait_idle)
+        wake = true;
+    portEXIT_CRITICAL(&s_sdio_tx_mux);
+    if (wake && s_sdio_tx_idle)
+        xSemaphoreGive(s_sdio_tx_idle);
+}
+
+static esp_err_t sdio_transmit_admitted(uint8_t *addr, size_t len)
+{
+    esp_err_t ret;
+
+    if (!sdio_tx_try_admit())
+        return ESP_ERR_INVALID_STATE;
+    ret = sdio_slave_transmit(addr, len);
+    sdio_tx_release();
+    return ret;
+}
+
+static esp_err_t sdio_reset_hw(void)
+{
+    uint8_t gen;
+    void *arg;
+    esp_err_t ret;
+    int inflight;
+    int pass;
+
+    gen = sdio_slave_read_reg(0);
+
+    portENTER_CRITICAL(&s_sdio_tx_mux);
+    s_sdio_tx_blocked = true;
+    portEXIT_CRITICAL(&s_sdio_tx_mux);
+
+    sdio_slave_stop();
+    ret = sdio_slave_reset();
+    if (ret != ESP_OK)
+        goto fail;
+
+    /* Flush unblocks a transmitter already inside sdio_slave_transmit().
+     * A transmitter that admitted but has not queued yet can race this
+     * first flush; retry rather than wait behind host completion. */
+    for (pass = 0; pass < 4; pass++) {
+        portENTER_CRITICAL(&s_sdio_tx_mux);
+        inflight = s_sdio_tx_inflight;
+        s_sdio_tx_wait_idle = (inflight > 0);
+        portEXIT_CRITICAL(&s_sdio_tx_mux);
+
+        if (!inflight)
+            break;
+
+        if (s_sdio_tx_idle &&
+            xSemaphoreTake(s_sdio_tx_idle, pdMS_TO_TICKS(250)) == pdTRUE)
+            continue;
+
+        sdio_slave_stop();
+        ret = sdio_slave_reset();
+        if (ret != ESP_OK)
+            goto fail;
+    }
+
+    portENTER_CRITICAL(&s_sdio_tx_mux);
+    inflight = s_sdio_tx_inflight;
+    s_sdio_tx_wait_idle = false;
+    portEXIT_CRITICAL(&s_sdio_tx_mux);
+    if (inflight) {
+        ret = ESP_ERR_TIMEOUT;
+        goto fail;
+    }
+
+    /* No transmitter is waiting; leftover flush tokens indicate dropped E2H state. */
+    bool dropped_e2h_tokens = false;
+    while (sdio_slave_send_get_finished(&arg, 0) == ESP_OK) {
+        dropped_e2h_tokens = true;
+        (void)arg;
+    }
+
+    ret = sdio_slave_start();
+    if (ret != ESP_OK)
+        goto fail;
+
+    ret = sdio_slave_write_reg(1, gen);
+    if (ret != ESP_OK)
+        goto fail;
+
+    portENTER_CRITICAL(&s_sdio_tx_mux);
+    s_sdio_tx_blocked = false;
+    portEXIT_CRITICAL(&s_sdio_tx_mux);
+
+    if (dropped_e2h_tokens) {
+        ESP_LOGE(TAG, "SDIO reset dropped committed E2H tokens; restarting firmware to ensure state agreement");
+        esp_restart();
+    }
+
+    return ESP_OK;
+
+fail:
+    portENTER_CRITICAL(&s_sdio_tx_mux);
+    s_sdio_tx_wait_idle = false;
+    portEXIT_CRITICAL(&s_sdio_tx_mux);
+    ESP_LOGE(TAG, "SDIO reset failed ret=0x%x gen=%u", ret, gen);
+    return ret;
+}
+
+static void sdio_process_host_bits(uint32_t bits)
+{
+    if (bits & (1u << ESP_CLOSE_DATA_PATH)) {
+        if (context.event_handler)
+            context.event_handler(ESP_CLOSE_DATA_PATH);
+    }
+
+    if (bits & (1u << ESP_RESET)) {
+        (void)sdio_reset_hw();
+        ESP_LOGI(TAG, "ESP_RESET received; restarting firmware to guarantee clean application state");
+        esp_restart();
+    }
+
+    if (bits & (1u << ESP_POWER_SAVE_ON)) {
+        if (context.event_handler)
+            context.event_handler(ESP_POWER_SAVE_ON);
+        (void)sdio_reset_hw();
+    }
+
+    if (bits & (1u << ESP_POWER_SAVE_OFF)) {
+        if (context.event_handler)
+            context.event_handler(ESP_POWER_SAVE_OFF);
+        (void)sdio_reset_hw();
+    }
+
+    if (bits & (1u << ESP_OPEN_DATA_PATH)) {
+        if (context.event_handler)
+            context.event_handler(ESP_OPEN_DATA_PATH);
+    }
+}
+
+static void sdio_ctrl_worker(void *arg)
+{
+    (void)arg;
+
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if (s_sdio_ctrl_stop)
+            break;
+
+        for (;;) {
+            uint32_t bits;
+
+            portENTER_CRITICAL(&s_sdio_evt_mux);
+            bits = s_sdio_host_events;
+            s_sdio_host_events = 0;
+            portEXIT_CRITICAL(&s_sdio_evt_mux);
+            if (!bits)
+                break;
+            sdio_process_host_bits(bits);
+            if (s_sdio_ctrl_stop)
+                break;
+        }
+        if (s_sdio_ctrl_stop)
+            break;
+    }
+
+    s_sdio_ctrl_task = NULL;
+    vTaskDelete(NULL);
+}
+
+/* Invoked from sdio_intr_host() ISR. Must not block or call event_handler. */
 IRAM_ATTR static void event_cb(uint8_t val)
 {
-    if (val == ESP_RESET) {
-        sdio_reset(&if_handle_g);
+    BaseType_t hp_task = pdFALSE;
+    TaskHandle_t task;
+
+    if (val >= 32)
         return;
+
+    portENTER_CRITICAL_ISR(&s_sdio_evt_mux);
+    s_sdio_host_events |= (1u << val);
+    portEXIT_CRITICAL_ISR(&s_sdio_evt_mux);
+
+    task = s_sdio_ctrl_task;
+    if (task)
+        vTaskNotifyGiveFromISR(task, &hp_task);
+    portYIELD_FROM_ISR(hp_task);
+}
+
+static void sdio_free_rx_buffers(void)
+{
+    for (int i = 0; i < RX_BUF_NUM; i++) {
+        if (sdio_slave_rx_buffer[i]) {
+            free(sdio_slave_rx_buffer[i]);
+            sdio_slave_rx_buffer[i] = NULL;
+        }
+    }
+}
+
+static void sdio_ctrl_stop_worker(void)
+{
+    int i;
+
+    s_sdio_ctrl_stop = true;
+    portENTER_CRITICAL(&s_sdio_tx_mux);
+    s_sdio_tx_blocked = true;
+    portEXIT_CRITICAL(&s_sdio_tx_mux);
+
+    if (wakeup_sem)
+        xSemaphoreGive(wakeup_sem);
+
+    if (s_sdio_ctrl_task) {
+        TaskHandle_t task = s_sdio_ctrl_task;
+
+        xTaskNotifyGive(task);
+        for (i = 0; i < 200 && s_sdio_ctrl_task; i++)
+            vTaskDelay(pdMS_TO_TICKS(10));
+        if (s_sdio_ctrl_task) {
+            vTaskDelete(s_sdio_ctrl_task);
+            s_sdio_ctrl_task = NULL;
+        }
+    }
+}
+
+static void sdio_ctrl_wait_tx_idle(void)
+{
+    int i;
+
+    for (i = 0; i < 50 && s_sdio_tx_inflight; i++)
+        vTaskDelay(pdMS_TO_TICKS(10));
+}
+
+static void sdio_ctrl_delete_sync(void)
+{
+    if (s_sdio_tx_idle) {
+        vSemaphoreDelete(s_sdio_tx_idle);
+        s_sdio_tx_idle = NULL;
     }
 
-    if (val == ESP_POWER_SAVE_OFF) {
-        sdio_reset(&if_handle_g);
+    if (wakeup_sem) {
+        vSemaphoreDelete(wakeup_sem);
+        wakeup_sem = NULL;
     }
+}
 
-    if (context.event_handler) {
-        context.event_handler(val);
-    }
-
-    if (val == ESP_POWER_SAVE_ON) {
-        sdio_reset(&if_handle_g);
-    }
+static void sdio_ctrl_teardown(void)
+{
+    sdio_ctrl_stop_worker();
+    sdio_ctrl_delete_sync();
 }
 
 static void sdio_read_done(void *handle)
 {
-    sdio_slave_recv_load_buf((sdio_slave_buf_handle_t) handle);
+    esp_err_t ret;
+
+    if (!handle) {
+        ESP_LOGE(TAG, "SDIO_H2E_RELOAD_ERROR: null RX buffer handle");
+        return;
+    }
+
+    ret = sdio_slave_recv_load_buf((sdio_slave_buf_handle_t) handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "SDIO_H2E_RELOAD_ERROR: handle=%p ret=0x%x",
+                 handle, ret);
+    }
 }
 
 static interface_handle_t * sdio_init(void)
@@ -177,6 +455,12 @@ static interface_handle_t * sdio_init(void)
         .pin_bit_mask = (1 << gpio_oob)
     };
 
+    s_sdio_ctrl_stop = false;
+    s_sdio_tx_blocked = false;
+    s_sdio_tx_inflight = 0;
+    s_sdio_tx_wait_idle = false;
+    s_sdio_host_events = 0;
+
     wakeup_sem = xSemaphoreCreateBinary();
     if (wakeup_sem == NULL) {
         ESP_LOGE(TAG, "Failed to create semaphore\n");
@@ -185,8 +469,27 @@ static interface_handle_t * sdio_init(void)
 
     xSemaphoreGive(wakeup_sem);
 
+    s_sdio_tx_idle = xSemaphoreCreateBinary();
+    if (!s_sdio_tx_idle) {
+        ESP_LOGE(TAG, "Failed to create SDIO TX idle semaphore");
+        sdio_ctrl_teardown();
+        return NULL;
+    }
+    {
+        TaskHandle_t ctrl_task = NULL;
+
+        if (xTaskCreate(sdio_ctrl_worker, "sdio_ctrl", TASK_DEFAULT_STACK_SIZE, NULL,
+                        TASK_DEFAULT_PRIO + 1, &ctrl_task) != pdTRUE) {
+            ESP_LOGE(TAG, "Failed to create SDIO control task");
+            sdio_ctrl_teardown();
+            return NULL;
+        }
+        s_sdio_ctrl_task = ctrl_task;
+    }
+
     ret = sdio_slave_initialize(&config);
     if (ret != ESP_OK) {
+        sdio_ctrl_teardown();
         return NULL;
     }
 
@@ -200,7 +503,10 @@ static interface_handle_t * sdio_init(void)
 
         ret = sdio_slave_recv_load_buf(handle);
         if (ret != ESP_OK) {
+            sdio_ctrl_stop_worker();
             sdio_slave_deinit();
+            sdio_free_rx_buffers();
+            sdio_ctrl_delete_sync();
             return NULL;
         }
     }
@@ -217,7 +523,10 @@ static interface_handle_t * sdio_init(void)
 
     ret = sdio_slave_start();
     if (ret != ESP_OK) {
+        sdio_ctrl_stop_worker();
         sdio_slave_deinit();
+        sdio_free_rx_buffers();
+        sdio_ctrl_delete_sync();
         return NULL;
     }
 
@@ -342,13 +651,16 @@ static int32_t sdio_write(interface_handle_t *handle, interface_buffer_handle_t 
     header->reserved2 = buf_handle->flag;
     header->offset = htole16(sizeof(struct esp_payload_header) + align_padding);
     header->packet_type = buf_handle->pkt_type;
+    if (header->if_type == ESP_TEST_IF) {
+        debug_raw_tp_set_seq(header, buf_handle->raw_tp_seq);
+    }
 
 #if CONFIG_ESP_SDIO_CHECKSUM
     header->checksum = htole16(compute_checksum(sendbuf,
                                                 total_len));
 #endif
 
-    ret = sdio_slave_transmit(sendbuf, total_len);
+    ret = sdio_transmit_admitted(sendbuf, total_len);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "sdio slave transmit error, ret : 0x%x\r\n", ret);
         if (free_sendbuf) {
@@ -382,7 +694,7 @@ int32_t sdio_write_aggr(interface_handle_t *handle, uint8_t *payload,
         return ESP_FAIL;
     }
 
-    ret = sdio_slave_transmit(payload, payload_len);
+    ret = sdio_transmit_admitted(payload, payload_len);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "sdio slave aggregate transmit error, ret: 0x%x\r\n", ret);
         return ret;
@@ -470,7 +782,7 @@ esp_err_t send_bootup_event_to_host(uint8_t cap)
     header->checksum = htole16(compute_checksum(buf_handle.payload, buf_handle.payload_len));
 #endif
 
-    ret = sdio_slave_transmit(buf_handle.payload, buf_handle.payload_len);
+    ret = sdio_transmit_admitted(buf_handle.payload, buf_handle.payload_len);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "sdio slave tx error, ret : 0x%x\r\n", ret);
         free(buf_handle.payload);
@@ -483,9 +795,10 @@ esp_err_t send_bootup_event_to_host(uint8_t cap)
 
 static int sdio_read(interface_handle_t *if_handle, interface_buffer_handle_t *buf_handle)
 {
+    esp_err_t ret;
     size_t sdio_read_len = 0;
 
-    if (!if_handle) {
+    if (!if_handle || !buf_handle) {
         ESP_LOGE(TAG, "Invalid arguments to sdio_read");
         return ESP_FAIL;
     }
@@ -494,8 +807,31 @@ static int sdio_read(interface_handle_t *if_handle, interface_buffer_handle_t *b
         return ESP_FAIL;
     }
 
-    sdio_slave_recv(&(buf_handle->sdio_buf_handle), &(buf_handle->payload),
-                    &(sdio_read_len), portMAX_DELAY);
+    buf_handle->sdio_buf_handle = NULL;
+    buf_handle->payload = NULL;
+    buf_handle->payload_len = 0;
+    ret = sdio_slave_recv(&(buf_handle->sdio_buf_handle),
+                          &(buf_handle->payload), &(sdio_read_len),
+                          portMAX_DELAY);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "SDIO_H2E_RECV_ERROR: ret=0x%x len=%u handle=%p payload=%p",
+                 ret, (unsigned int)sdio_read_len,
+                 buf_handle->sdio_buf_handle, buf_handle->payload);
+        return ESP_FAIL;
+    }
+    if (!buf_handle->sdio_buf_handle || !buf_handle->payload ||
+        !sdio_read_len) {
+        ESP_LOGE(TAG, "SDIO_H2E_RECV_ERROR: invalid completion len=%u "
+                 "handle=%p payload=%p",
+                 (unsigned int)sdio_read_len,
+                 buf_handle->sdio_buf_handle, buf_handle->payload);
+        if (buf_handle->sdio_buf_handle) {
+            sdio_read_done(buf_handle->sdio_buf_handle);
+            buf_handle->sdio_buf_handle = NULL;
+            buf_handle->payload = NULL;
+        }
+        return ESP_FAIL;
+    }
     buf_handle->payload_len = sdio_read_len & 0xFFFF;
 
     buf_handle->free_buf_handle = sdio_read_done;
@@ -508,53 +844,18 @@ static int sdio_read(interface_handle_t *if_handle, interface_buffer_handle_t *b
 
 static esp_err_t sdio_reset(interface_handle_t *handle)
 {
-    esp_err_t ret = ESP_OK;
-
-    sdio_slave_stop();
-
-    ret = sdio_slave_reset();
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    ret = sdio_slave_start();
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    while (1) {
-        sdio_slave_buf_handle_t handle = NULL;
-
-        /* Return buffers to driver */
-        ret = sdio_slave_send_get_finished(&handle, 0);
-        if (ret != ESP_OK) {
-            break;
-        }
-
-        if (handle) {
-            ret = sdio_slave_recv_load_buf(handle);
-            ESP_ERROR_CHECK(ret);
-        }
-    }
-
-    return ESP_OK;
+    (void)handle;
+    return sdio_reset_hw();
 }
 
 static void sdio_deinit(interface_handle_t *handle)
 {
-    if (wakeup_sem) {
-        /* Dummy take and give sema before deleting it */
-        xSemaphoreTake(wakeup_sem, portMAX_DELAY);
-        xSemaphoreGive(wakeup_sem);
-        vSemaphoreDelete(wakeup_sem);
-        wakeup_sem = NULL;
-    }
+    (void)handle;
+
+    sdio_ctrl_stop_worker();
     sdio_slave_stop();
     sdio_slave_reset();
-    for (int i = 0; i < RX_BUF_NUM; i++) {
-        if (sdio_slave_rx_buffer[i]) {
-            free(sdio_slave_rx_buffer[i]);
-            sdio_slave_rx_buffer[i] = NULL;
-        }
-    }
+    sdio_ctrl_wait_tx_idle();
+    sdio_free_rx_buffers();
+    sdio_ctrl_delete_sync();
 }

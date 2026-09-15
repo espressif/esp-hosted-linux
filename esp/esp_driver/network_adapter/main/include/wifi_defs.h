@@ -22,7 +22,9 @@
 
 #define WLAN_FC_STYPE_ACTION        13
 
+#ifndef IEEE_HEADER_SIZE
 #define IEEE_HEADER_SIZE            24
+#endif
 
 #define DEFAULT_SCAN_LIST_SIZE      1
 

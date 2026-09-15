@@ -86,6 +86,9 @@ typedef struct {
     uint8_t flag;
     uint16_t payload_len;
     uint16_t seq_num;
+    /* Test-only sequence copied into the ESP_TEST_IF transport header. */
+    uint32_t raw_tp_seq;
+    uint32_t raw_tp_run_id;
     uint8_t  pkt_type;
 
     void (*free_buf_handle)(void *buf_handle);
@@ -122,5 +125,6 @@ int32_t sdio_write_aggr(interface_handle_t *handle, uint8_t *payload,
                         uint16_t payload_len);
 #endif
 esp_err_t send_to_host(uint8_t prio_q_idx, interface_buffer_handle_t *buf_handle);
+esp_err_t send_to_host_timeout(uint8_t prio_q_idx, interface_buffer_handle_t *buf_handle, TickType_t wait_ticks);
 esp_err_t send_bootup_event_to_host(uint8_t cap);
 #endif

@@ -33,10 +33,14 @@ struct macfilter_list {
 #define ETH_P_PAE 0x8E88 /* Port Access Entity (IEEE 802.1X) */
 #define ETH_P_EAPOL ETH_P_PAE
 
+int esp_cmd_dispatch(uint8_t if_type, uint8_t *payload, uint16_t payload_len);
+
 int process_init_interface(uint8_t if_type, uint8_t *payload, uint16_t payload_len);
 int process_deinit_interface(uint8_t if_type, uint8_t *payload, uint16_t payload_len);
 int process_start_scan(uint8_t if_type, uint8_t *payload, uint16_t payload_len);
-int process_get_mac(uint8_t if_type);
+int process_get_mac(uint8_t if_type, uint8_t *payload, uint16_t payload_len);
+int process_get_tx_power(uint8_t if_type, uint8_t *payload, uint16_t payload_len);
+int process_set_tx_power(uint8_t if_type, uint8_t *payload, uint16_t payload_len);
 int process_set_mac(uint8_t if_type, uint8_t *payload, uint16_t payload_len);
 int process_sta_connect(uint8_t if_type, uint8_t *payload, uint16_t payload_len);
 int process_disconnect(uint8_t if_type, uint8_t *payload, uint16_t payload_len);
@@ -45,6 +49,7 @@ int process_del_key(uint8_t if_type, uint8_t *payload, uint16_t payload_len);
 int process_set_default_key(uint8_t if_type, uint8_t *payload, uint16_t payload_len);
 int process_auth_request(uint8_t if_type, uint8_t *payload, uint16_t payload_len);
 int process_assoc_request(uint8_t if_type, uint8_t *payload, uint16_t payload_len);
+int process_sta_set_authorized(uint8_t if_type, uint8_t *payload, uint16_t payload_len);
 int process_set_ip(uint8_t if_type, uint8_t *payload, uint16_t payload_len);
 int process_set_mcast_mac_list(uint8_t if_type, uint8_t *payload, uint16_t payload_len);
 int process_tx_power(uint8_t if_type, uint8_t *payload, uint16_t payload_len, uint8_t cmd_code);

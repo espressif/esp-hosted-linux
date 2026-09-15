@@ -267,6 +267,7 @@ struct wireless_dev *esp_cfg80211_add_iface(struct wiphy *wiphy,
 	struct net_device *ndev;
 	struct esp_wifi_device *esp_wdev;
 	uint8_t esp_nw_if_num = 0;
+	bool fw_initialized = false;
 
 	if (!wiphy || !name) {
 		esp_info("%u invalid input\n", __LINE__);
@@ -314,6 +315,8 @@ struct wireless_dev *esp_cfg80211_add_iface(struct wiphy *wiphy,
 	esp_wdev->wdev.iftype = type;
 
 	init_waitqueue_head(&esp_wdev->wait_for_scan_completion);
+	spin_lock_init(&esp_wdev->bss_lock);
+	esp_mlme_init(esp_wdev);
 	esp_wdev->stop_data = 1;
 	esp_wdev->port_open = 0;
 
@@ -324,6 +327,8 @@ struct wireless_dev *esp_cfg80211_add_iface(struct wiphy *wiphy,
 
 	if (cmd_init_interface(esp_wdev))
 		goto free_and_return;
+	fw_initialized = true;
+	set_bit(ESP_INTERFACE_INITIALIZED, &esp_wdev->priv_flags);
 
 	if (cmd_get_mac(esp_wdev))
 		goto free_and_return;
@@ -332,26 +337,44 @@ struct wireless_dev *esp_cfg80211_add_iface(struct wiphy *wiphy,
 
 	esp_init_priv(ndev);
 
-	if (register_netdevice(ndev))
-		goto free_and_return;
-
-
-	set_bit(ESP_NETWORK_UP, &esp_wdev->priv_flags);
-	set_bit(ESP_INTERFACE_INITIALIZED, &esp_wdev->priv_flags);
-
-	esp_wdev->nb.notifier_call = esp_inetaddr_event;
-	register_inetaddr_notifier(&esp_wdev->nb);
+	/* Do not publish wlan0 while reconstruction still rejects ordinary
+	 * cfg80211 commands. Boot/reload registers after INIT_DONE. */
+	if (!test_bit(ESP_ALLOW_RECONSTRUCT, &esp_dev->adapter->state_flags)) {
+		if (esp_cfg80211_register_iface(esp_wdev))
+			goto free_and_return;
+	}
 
 	return &esp_wdev->wdev;
 
 free_and_return:
+	if (fw_initialized)
+		cmd_deinit_interface(esp_wdev);
+	if (esp_wdev->adapter->priv[esp_nw_if_num] == esp_wdev)
+		esp_wdev->adapter->priv[esp_nw_if_num] = NULL;
 	clear_bit(ESP_DRIVER_ACTIVE, &esp_wdev->adapter->state_flags);
+	esp_mlme_cancel(esp_wdev);
 	dev_net_set(ndev, NULL);
 	free_netdev(ndev);
-	esp_wdev->ndev = NULL;
-	esp_wdev->wdev.netdev = NULL;
-	ndev = NULL;
 	return NULL;
+}
+
+int esp_cfg80211_register_iface(struct esp_wifi_device *priv)
+{
+	struct net_device *ndev;
+
+	if (!priv || !priv->ndev)
+		return -EINVAL;
+	if (test_bit(ESP_NETWORK_UP, &priv->priv_flags))
+		return 0;
+
+	ndev = priv->ndev;
+	if (register_netdevice(ndev))
+		return -EIO;
+
+	set_bit(ESP_NETWORK_UP, &priv->priv_flags);
+	priv->nb.notifier_call = esp_inetaddr_event;
+	register_inetaddr_notifier(&priv->nb);
+	return 0;
 }
 
 #if 0
@@ -428,8 +451,6 @@ static int esp_cfg80211_change_iface(struct wiphy *wiphy,
 	}
 
 	esp_info("wdev iftype=%d, ret=%d\n", priv->wdev.iftype, ret);
-	if (esp_if_type == ESP_AP_IF)
-		esp_port_open(priv);
 
 	return ret;
 }
@@ -495,10 +516,10 @@ static int esp_cfg80211_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 
 	if (!priv) {
 		esp_err("empty priv\n");
-		return 0;
+		return -EINVAL;
 	}
 
-	return cmd_mgmt_request(priv, params);
+	return cmd_mgmt_request(priv, params, cookie);
 }
 
 static int esp_cfg80211_set_ap_chanwidth(struct wiphy *wiphy,
@@ -509,7 +530,7 @@ static int esp_cfg80211_set_ap_chanwidth(struct wiphy *wiphy,
 					 struct cfg80211_chan_def *chandef)
 {
 	esp_info("%u \n", __LINE__);
-	return 0;
+	return -EOPNOTSUPP;
 }
 
 static int esp_cfg80211_set_default_key(struct wiphy *wiphy,
@@ -550,7 +571,21 @@ static int esp_cfg80211_del_key(struct wiphy *wiphy, struct net_device *dev,
 				INT_LINK_ID u8 key_index, bool pairwise,
 				const u8 *mac_addr)
 {
-	return 0;
+	struct esp_wifi_device *priv = NULL;
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0))
+	if (!wdev || !wdev->netdev)
+		return -EINVAL;
+	priv = netdev_priv(wdev->netdev);
+#else
+	if (!dev)
+		return -EINVAL;
+	priv = netdev_priv(dev);
+#endif
+	if (!priv)
+		return -EINVAL;
+
+	return cmd_del_key(priv, key_index, pairwise, mac_addr);
 }
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0))
@@ -607,7 +642,53 @@ static int esp_cfg80211_disconnect(struct wiphy *wiphy,
 	}
 	esp_dbg("\n");
 
-	return cmd_disconnect_request(priv, reason_code, NULL);
+	return cmd_disconnect_request(priv, reason_code, NULL, DISCONNECT_TYPE_DEAUTH);
+}
+
+static void esp_retire_stale_disconnect_generation(struct esp_wifi_device *priv)
+{
+	struct sk_buff *staged_assoc = NULL;
+	struct sk_buff *staged_disc = NULL;
+
+	if (!priv)
+		return;
+
+	/* A successful local disconnect may be followed by a lost async event.
+	 * Once cfg80211 starts a new AUTH/ASSOC generation, that old local marker
+	 * must no longer be able to classify a later remote disconnect as local.
+	 * Do not disturb a disconnect command that is still synchronously pending.
+	 * If a staged remote disconnect from the established connection is pending,
+	 * deliver it rather than discarding it. */
+	spin_lock_bh(&priv->bss_lock);
+	if (!priv->disconnect_cmd_pending) {
+		staged_disc = priv->staged_disconnect_skb;
+		priv->staged_disconnect_skb = NULL;
+	}
+	if (!priv->assoc_cmd_pending) {
+		priv->staged_assoc_seq = 0;
+		priv->assoc_awaiting_mlme = false;
+		staged_assoc = priv->staged_assoc_skb;
+		priv->staged_assoc_skb = NULL;
+	}
+	spin_unlock_bh(&priv->bss_lock);
+
+	if (staged_disc) {
+		esp_deliver_disconnect_from_skb(priv, staged_disc);
+		kfree_skb(staged_disc);
+	}
+
+	spin_lock_bh(&priv->bss_lock);
+	if (!priv->disconnect_cmd_pending) {
+		priv->local_disconnect_req = false;
+		priv->disconnect_awaiting_mlme = false;
+		priv->disconnect_cmd_seq = 0;
+		if (!wireless_dev_current_bss_exists(&priv->wdev))
+			priv->conn_generation = 0;
+		memset(priv->disconnect_bssid, 0, MAC_ADDR_LEN);
+	}
+	spin_unlock_bh(&priv->bss_lock);
+
+	kfree_skb(staged_assoc);
 }
 
 static int esp_cfg80211_authenticate(struct wiphy *wiphy, struct net_device *dev,
@@ -629,6 +710,9 @@ static int esp_cfg80211_authenticate(struct wiphy *wiphy, struct net_device *dev
 		return 0;
 	}
 
+	if (priv->if_type == ESP_STA_IF)
+		esp_retire_stale_disconnect_generation(priv);
+
 	return cmd_auth_request(priv, req);
 }
 
@@ -649,8 +733,11 @@ static int esp_cfg80211_associate(struct wiphy *wiphy, struct net_device *dev,
 
 	if (!priv) {
 		esp_err("Empty priv\n");
-		return 0;
+		return -EINVAL;
 	}
+
+	if (priv->if_type == ESP_STA_IF)
+		esp_retire_stale_disconnect_generation(priv);
 
 	return cmd_assoc_request(priv, req);
 }
@@ -673,13 +760,24 @@ static int esp_cfg80211_deauth(struct wiphy *wiphy, struct net_device *dev,
 		return 0;
 	}
 
-	return cmd_disconnect_request(priv, req->reason_code, req->bssid);
+	if (req->ie_len > 0) {
+		esp_err("Deauth IEs not supported\n");
+		return -EOPNOTSUPP;
+	}
+
+	if (req->local_state_change) {
+		esp_err("Local state change deauth not supported\n");
+		return -EOPNOTSUPP;
+	}
+
+	return cmd_disconnect_request(priv, req->reason_code, req->bssid, DISCONNECT_TYPE_DEAUTH);
 }
 
 static int esp_cfg80211_disassoc(struct wiphy *wiphy, struct net_device *dev,
 		struct cfg80211_disassoc_request *req)
 {
 	struct esp_wifi_device *priv = NULL;
+	const u8 *bssid = NULL;
 
 	if (!wiphy || !dev || !req) {
 		esp_info("%u invalid input\n", __LINE__);
@@ -694,11 +792,24 @@ static int esp_cfg80211_disassoc(struct wiphy *wiphy, struct net_device *dev,
 		return 0;
 	}
 
+	if (req->ie_len > 0) {
+		esp_err("Disassoc IEs not supported\n");
+		return -EOPNOTSUPP;
+	}
+
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0))
-	return cmd_disconnect_request(priv, req->reason_code, req->ap_addr);
+	bssid = req->ap_addr;
 #else
-	return cmd_disconnect_request(priv, req->reason_code, req->bss->bssid);
+	if (req->bss)
+		bssid = req->bss->bssid;
 #endif
+
+	if (req->local_state_change) {
+		esp_err("Local state change disassoc not supported\n");
+		return -EOPNOTSUPP;
+	}
+
+	return cmd_disconnect_request(priv, req->reason_code, bssid, DISCONNECT_TYPE_DISASSOC);
 }
 
 static int esp_cfg80211_suspend(struct wiphy *wiphy,
@@ -766,6 +877,9 @@ static int esp_cfg80211_set_tx_power(struct wiphy *wiphy,
 {
 	struct esp_adapter *adapter = esp_get_adapter();
 	struct esp_wifi_device *priv = NULL;
+	enum nl80211_tx_power_setting new_type;
+	int new_pwr;
+	int ret;
 
 	if (!wiphy || !adapter) {
 		esp_info("%u invalid input %p %p \n", __LINE__, wiphy, wdev);
@@ -782,25 +896,30 @@ static int esp_cfg80211_set_tx_power(struct wiphy *wiphy,
 
         switch (type) {
         case NL80211_TX_POWER_AUTOMATIC:
-                priv->tx_pwr_type = NL80211_TX_POWER_AUTOMATIC;
-                priv->tx_pwr = mbm_to_esp_pwr(MAX_TX_POWER_MBM);
+                new_type = NL80211_TX_POWER_AUTOMATIC;
+                new_pwr = mbm_to_esp_pwr(MAX_TX_POWER_MBM);
                 break;
         case NL80211_TX_POWER_LIMITED:
                 if (!is_txpwr_valid(mbm)) {
                         esp_warn("mbm:%d not support\n", mbm);
 			return -EINVAL;
                 }
-                priv->tx_pwr_type = NL80211_TX_POWER_LIMITED;
-                priv->tx_pwr = mbm_to_esp_pwr(mbm);
+                new_type = NL80211_TX_POWER_LIMITED;
+                new_pwr = mbm_to_esp_pwr(mbm);
                 break;
         case NL80211_TX_POWER_FIXED:
 		return -EOPNOTSUPP;
                 break;
         default:
                 esp_warn("unknown type:%d\n", type);
+		return -EINVAL;
         }
 
-	return cmd_set_tx_power(priv, priv->tx_pwr);
+	ret = cmd_set_tx_power(priv, new_pwr);
+	if (ret == 0) {
+		priv->tx_pwr_type = new_type;
+	}
+	return ret;
 }
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0))
@@ -856,6 +975,8 @@ static int esp_cfg80211_get_tx_power(struct wiphy *wiphy,
 {
 	struct esp_wifi_device *priv = NULL;
 
+	int ret;
+
 	if (!wiphy || !wdev || !dbm || !wdev->netdev) {
 		esp_info("%u invalid input\n", __LINE__);
 		return -EINVAL;
@@ -864,12 +985,25 @@ static int esp_cfg80211_get_tx_power(struct wiphy *wiphy,
 	esp_dbg("\n");
 	priv = netdev_priv(wdev->netdev);
 
-	if (!priv) {
+	if (!priv || !priv->adapter) {
 		esp_err("Empty priv\n");
 		return -EINVAL;
 	}
+
+	/* cfg80211 may query TX power while unregistering the wdev.  The
+	 * interface has already been deinitialized at that point, so return the
+	 * last value instead of queueing a command into a tearing-down driver. */
+	if (!test_bit(ESP_INTERFACE_INITIALIZED, &priv->priv_flags) ||
+	    !test_bit(ESP_INIT_DONE, &priv->adapter->state_flags) ||
+	    test_bit(ESP_ALLOW_RECONSTRUCT, &priv->adapter->state_flags) ||
+	    test_bit(ESP_CLEANUP_IN_PROGRESS, &priv->adapter->state_flags)) {
+		*dbm = esp_pwr_to_dbm(priv->tx_pwr);
+		return 0;
+	}
 	/* Update Tx power from firmware */
-	cmd_get_tx_power(priv);
+	ret = cmd_get_tx_power(priv);
+	if (ret)
+		return ret;
 
 	*dbm = esp_pwr_to_dbm(priv->tx_pwr);
 
@@ -893,150 +1027,403 @@ static int esp_cfg80211_set_txq_params(struct wiphy *wiphy, struct net_device *n
 	return 0;
 }
 
+
 static int esp_set_ies(struct esp_wifi_device *priv, struct cfg80211_beacon_data *info)
 {
+	const u8 *new_buf[5] = {NULL};
+	u16 new_len[5] = {0};
+	bool update[5] = {false};
+	u8 *prep_buf[5] = {NULL};
 	int ret = 0;
+	int i, j;
+
+	if (!priv || !info)
+		return -EINVAL;
 
 #define FIXED_PARAM_LEN 34
 
-	if (info->head_len > FIXED_PARAM_LEN)
-		ret = cmd_set_ie(priv, IE_BEACON_PROBE_HEAD, info->head + FIXED_PARAM_LEN, info->head_len - FIXED_PARAM_LEN);
+	if (info->head && info->head_len > FIXED_PARAM_LEN) {
+		update[0] = true;
+		new_buf[0] = info->head + FIXED_PARAM_LEN;
+		new_len[0] = info->head_len - FIXED_PARAM_LEN;
+	}
+	if (info->tail && info->tail_len) {
+		update[1] = true;
+		new_buf[1] = info->tail;
+		new_len[1] = info->tail_len;
+	}
+	if (info->beacon_ies && info->beacon_ies_len) {
+		update[2] = true;
+		new_buf[2] = info->beacon_ies;
+		new_len[2] = info->beacon_ies_len;
+	}
+	if (info->proberesp_ies && info->proberesp_ies_len) {
+		update[3] = true;
+		new_buf[3] = info->proberesp_ies;
+		new_len[3] = info->proberesp_ies_len;
+	}
+	if (info->assocresp_ies && info->assocresp_ies_len) {
+		update[4] = true;
+		new_buf[4] = info->assocresp_ies;
+		new_len[4] = info->assocresp_ies_len;
+	}
 
-	if (!ret)
-		ret = cmd_set_ie(priv, IE_BEACON_PROBE_TAIL, info->tail, info->tail_len);
+	/* Allocate all cache buffers upfront before modifying firmware */
+	for (i = 0; i < 5; i++) {
+		if (!update[i] || !new_len[i])
+			continue;
+		prep_buf[i] = kmemdup(new_buf[i], new_len[i], GFP_KERNEL);
+		if (!prep_buf[i]) {
+			while (--i >= 0)
+				kfree(prep_buf[i]);
+			return -ENOMEM;
+		}
+	}
 
-	if (!ret)
-		ret = cmd_set_ie(priv, IE_BEACON, info->beacon_ies, info->beacon_ies_len);
+	for (i = 0; i < 5; i++) {
+		if (!update[i])
+			continue;
+		ret = cmd_set_ie(priv, i, new_buf[i], new_len[i]);
+		if (ret) {
+			esp_err("esp_set_ies failed for type %d (ret=%d)\n", i, ret);
+			for (j = 0; j < 5; j++)
+				kfree(prep_buf[j]);
+			return ret;
+		}
+	}
 
-	if (!ret)
-		ret = cmd_set_ie(priv, IE_PROBE_RESP, info->proberesp_ies, info->proberesp_ies_len);
+	for (i = 0; i < 5; i++) {
+		if (update[i]) {
+			kfree(priv->ap_ie_buf[i]);
+			priv->ap_ie_buf[i] = prep_buf[i];
+			priv->ap_ie_len[i] = new_len[i];
+		}
+	}
 
-	if (!ret)
-		ret = cmd_set_ie(priv, IE_ASSOC_RESP, info->assocresp_ies, info->assocresp_ies_len);
+	return 0;
+}
 
-	return ret;
+#define ESP_BEACON_PROBE_HEAD_FIXED_LEN 34
+
+static int esp_change_ap_ies(struct esp_wifi_device *priv,
+			     struct cfg80211_beacon_data *info)
+{
+	static const u8 empty_ie;
+	const u8 *new_buf[5] = {NULL};
+	u16 new_len[5] = {0};
+	bool update[5] = {false};
+	bool committed[5] = {false};
+	u8 *prep_buf[5] = {NULL};
+	int ret = 0;
+	int i, j;
+
+	if (!priv || !info)
+		return -EINVAL;
+
+	/* Validate all parameters before executing any command */
+	if (info->head) {
+		if (info->head_len < ESP_BEACON_PROBE_HEAD_FIXED_LEN)
+			return -EINVAL;
+		update[0] = true;
+		if (info->head_len > ESP_BEACON_PROBE_HEAD_FIXED_LEN) {
+			new_buf[0] = info->head + ESP_BEACON_PROBE_HEAD_FIXED_LEN;
+			new_len[0] = info->head_len - ESP_BEACON_PROBE_HEAD_FIXED_LEN;
+		}
+	} else if (info->head_len) {
+		return -EINVAL;
+	}
+
+	if (info->tail) {
+		update[1] = true;
+		new_buf[1] = info->tail;
+		new_len[1] = info->tail_len;
+	} else if (info->tail_len) {
+		return -EINVAL;
+	}
+
+	if (info->beacon_ies) {
+		update[2] = true;
+		new_buf[2] = info->beacon_ies;
+		new_len[2] = info->beacon_ies_len;
+	} else if (info->beacon_ies_len) {
+		return -EINVAL;
+	}
+
+	if (info->proberesp_ies) {
+		update[3] = true;
+		new_buf[3] = info->proberesp_ies;
+		new_len[3] = info->proberesp_ies_len;
+	} else if (info->proberesp_ies_len) {
+		return -EINVAL;
+	}
+
+	if (info->assocresp_ies) {
+		update[4] = true;
+		new_buf[4] = info->assocresp_ies;
+		new_len[4] = info->assocresp_ies_len;
+	} else if (info->assocresp_ies_len) {
+		return -EINVAL;
+	}
+
+	/* Allocate all cache buffers upfront before modifying firmware */
+	for (i = 0; i < 5; i++) {
+		if (!update[i] || !new_len[i])
+			continue;
+		prep_buf[i] = kmemdup(new_buf[i], new_len[i], GFP_KERNEL);
+		if (!prep_buf[i]) {
+			while (--i >= 0)
+				kfree(prep_buf[i]);
+			return -ENOMEM;
+		}
+	}
+
+	/* Execute updates sequentially with checked rollback on failure */
+	for (i = 0; i < 5; i++) {
+		if (!update[i])
+			continue;
+		ret = cmd_set_ie(priv, i, new_len[i] ? new_buf[i] : &empty_ie, new_len[i]);
+		if (ret) {
+			esp_err("Failed to set AP IE type %d ret=%d, rolling back\n", i, ret);
+			while (--i >= 0) {
+				int rb_ret;
+				if (!committed[i])
+					continue;
+				rb_ret = cmd_set_ie(priv, i,
+						    priv->ap_ie_len[i] ? priv->ap_ie_buf[i] : &empty_ie,
+						    priv->ap_ie_len[i]);
+				if (rb_ret) {
+					esp_err("change_beacon rollback failed for type %d (ret=%d), scheduling recovery\n", i, rb_ret);
+					if (priv->adapter) {
+						esp_schedule_fw_reset_recovery(priv->adapter);
+						esp_request_firmware_restart(priv->adapter);
+					}
+				}
+			}
+			for (j = 0; j < 5; j++)
+				kfree(prep_buf[j]);
+			return ret;
+		}
+		committed[i] = true;
+	}
+
+	/* Commit new IEs to local cache upon full success */
+	for (i = 0; i < 5; i++) {
+		if (update[i]) {
+			kfree(priv->ap_ie_buf[i]);
+			priv->ap_ie_buf[i] = prep_buf[i];
+			priv->ap_ie_len[i] = new_len[i];
+		}
+	}
+	return 0;
 }
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0))
 static int esp_cfg80211_change_beacon(struct wiphy *wiphy, struct net_device *ndev,
-				   struct  cfg80211_ap_update *params)
+				      struct cfg80211_ap_update *params)
 {
-	struct cfg80211_beacon_data *info = &params->beacon;
+	struct cfg80211_beacon_data *info;
 #else
 static int esp_cfg80211_change_beacon(struct wiphy *wiphy, struct net_device *ndev,
-				   struct cfg80211_beacon_data *info)
+				      struct cfg80211_beacon_data *info)
 {
 #endif
-	struct esp_wifi_device *priv = NULL;
+	struct esp_wifi_device *priv;
 
-	if (!wiphy || !ndev) {
-		esp_err("%u invalid params\n", __LINE__);
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0))
+	if (!params)
 		return -EINVAL;
-	}
-
+	info = &params->beacon;
+#endif
+	if (!wiphy || !ndev || !info)
+		return -EINVAL;
 	priv = netdev_priv(ndev);
-	if (!priv) {
-		esp_err("empty priv\n");
+	if (!priv || priv->if_type != ESP_AP_IF)
 		return -EINVAL;
+
+	return esp_change_ap_ies(priv, info);
+}
+
+static int esp_clear_ap_ies(struct esp_wifi_device *priv)
+{
+	/* Never pass NULL to memcpy(), even for a zero-length SET_IE. The firmware
+	 * interprets zero length as removal. All slots are part of AP transaction
+	 * state: record the first failure but attempt every cleanup so a retry has
+	 * the smallest possible stale-state surface. */
+	static const u8 empty_ie;
+	int first = 0;
+	int ret;
+	int i;
+
+	for (i = 0; i < 5; i++) {
+		kfree(priv->ap_ie_buf[i]);
+		priv->ap_ie_buf[i] = NULL;
+		priv->ap_ie_len[i] = 0;
 	}
 
-	if (priv->if_type != ESP_AP_IF) {
-		esp_err("Interface type is not AP\n");
-		return -EINVAL;
-	}
+#define ESP_CLEAR_AP_IE(_type) do { \
+	ret = cmd_set_ie(priv, (_type), &empty_ie, 0); \
+	if (ret && !first) \
+		first = ret; \
+} while (0)
 
-	return esp_set_ies(priv, info);
+	ESP_CLEAR_AP_IE(IE_BEACON_PROBE_HEAD);
+	ESP_CLEAR_AP_IE(IE_BEACON_PROBE_TAIL);
+	ESP_CLEAR_AP_IE(IE_BEACON);
+	ESP_CLEAR_AP_IE(IE_PROBE_RESP);
+	ESP_CLEAR_AP_IE(IE_ASSOC_RESP);
+
+#undef ESP_CLEAR_AP_IE
+	return first;
 }
 
 static int esp_cfg80211_start_ap(struct wiphy *wiphy, struct net_device *dev,
 				 struct cfg80211_ap_settings *info)
 {
-	struct esp_wifi_device *priv = NULL;
+	struct esp_wifi_device *priv;
 	struct ieee80211_mgmt *mgmt;
-	u8 *ies;
 	struct esp_ap_config ap_config = {0};
-	int res;
+	u8 *ies;
+	int ret;
+	int cleanup_ret = 0;
+	int stop_ret = 0;
 	int i;
 
-	if (!wiphy || !dev) {
-		esp_err("%u invalid params\n", __LINE__);
+	if (!wiphy || !dev || !info)
 		return -EINVAL;
-	}
 
 	priv = netdev_priv(dev);
-	if (!priv) {
-		esp_err("empty priv\n");
+	if (!priv || priv->if_type != ESP_AP_IF)
 		return -EINVAL;
+
+	/* stop_ap() leaves firmware in STA mode. A subsequent start_ap() on the
+	 * same cfg80211 interface does not run change_iface(), so restore APSTA
+	 * before touching AP application IEs. */
+	ret = cmd_set_mode(priv, esp_get_mode_from_iface_type(priv->if_type));
+	if (ret) {
+		esp_err("AP start: mode restore failed: %d\n", ret);
+		return ret;
 	}
 
-	if (priv->if_type != ESP_AP_IF) {
-		esp_err("Interface type is not AP\n");
-		return -EINVAL;
+	/* Stale application IEs from an earlier AP incarnation are part of the
+	 * transaction. In particular esp_set_ies() does not rewrite HEAD when the
+	 * new beacon has no variable head IEs, so a failed clear cannot be ignored. */
+	ret = esp_clear_ap_ies(priv);
+	if (ret) {
+		esp_err("AP start: previous IE cleanup failed: %d\n", ret);
+		goto rollback;
 	}
 
-	esp_dbg("\n");
-
-	res = esp_set_ies(priv, &info->beacon);
+	/* IE staging is part of AP creation, not a best-effort side effect. */
+	ret = esp_set_ies(priv, &info->beacon);
+	if (ret) {
+		esp_err("AP start: IE staging failed: %d\n", ret);
+		goto rollback;
+	}
 
 	ap_config.beacon_interval = info->beacon_interval;
-	//ap_config.dtim_period = info->dtim_period;
 
-	if (info->beacon.head == NULL)
-		return -EINVAL;
-	mgmt = (struct ieee80211_mgmt *) info->beacon.head;
+	if (!info->beacon.head ||
+	    info->beacon.head_len < offsetof(struct ieee80211_mgmt,
+					       u.beacon.variable)) {
+		ret = -EINVAL;
+		goto rollback;
+	}
+	mgmt = (struct ieee80211_mgmt *)info->beacon.head;
 	ies = mgmt->u.beacon.variable;
-	if (ies > info->beacon.head + info->beacon.head_len)
-		return -EINVAL;
+	if (ies > info->beacon.head + info->beacon.head_len) {
+		ret = -EINVAL;
+		goto rollback;
+	}
 
-	if (info->ssid == NULL)
-		return -EINVAL;
+	if (!info->ssid || !info->ssid_len ||
+	    info->ssid_len > sizeof(ap_config.ssid)) {
+		ret = -EINVAL;
+		goto rollback;
+	}
 	memcpy(ap_config.ssid, info->ssid, info->ssid_len);
 	ap_config.ssid_len = info->ssid_len;
 	if (info->hidden_ssid != NL80211_HIDDEN_SSID_NOT_IN_USE)
 		ap_config.ssid_hidden = 1;
 
-	if (info->inactivity_timeout) {
+	if (info->inactivity_timeout)
 		ap_config.inactivity_timeout = info->inactivity_timeout;
-	}
 
 	if (info->chandef.chan) {
 		for (i = 0; i < ARRAY_SIZE(esp_channels_2ghz); i++) {
-			if (esp_channels_2ghz[i].center_freq == info->chandef.chan->center_freq) {
+			if (esp_channels_2ghz[i].center_freq ==
+			    info->chandef.chan->center_freq) {
 				ap_config.channel = esp_channels_2ghz[i].hw_value;
 				break;
 			}
 		}
-		if (!ap_config.channel && (wiphy->bands[NL80211_BAND_5GHZ] != NULL)) {
-				for (i = 0; i < ARRAY_SIZE(esp_channels_5ghz); i++) {
-					if (esp_channels_5ghz[i].center_freq == info->chandef.chan->center_freq) {
-						ap_config.channel = esp_channels_5ghz[i].hw_value;
-						break;
-					}
+		if (!ap_config.channel && wiphy->bands[NL80211_BAND_5GHZ]) {
+			for (i = 0; i < ARRAY_SIZE(esp_channels_5ghz); i++) {
+				if (esp_channels_5ghz[i].center_freq ==
+				    info->chandef.chan->center_freq) {
+					ap_config.channel = esp_channels_5ghz[i].hw_value;
+					break;
 				}
+			}
 		}
 	}
 	if (!ap_config.channel)
 		ap_config.channel = 6;
 
 	ap_config.privacy = info->privacy;
-	res = cmd_set_ap_config(priv, &ap_config);
-	if (res < 0)
-		return res;
+	ret = cmd_set_ap_config(priv, &ap_config);
+	if (ret)
+		goto rollback;
 
+	esp_port_open(priv);
 	return 0;
+
+rollback:
+	esp_err("AP start rollback: %d\n", ret);
+	cleanup_ret = esp_clear_ap_ies(priv);
+	stop_ret = cmd_stop_ap(priv);
+	if (cleanup_ret || stop_ret) {
+		esp_err("AP start rollback failed (ie_ret=%d stop_ret=%d), scheduling recovery\n",
+			cleanup_ret, stop_ret);
+		if (priv->adapter) {
+			esp_schedule_fw_reset_recovery(priv->adapter);
+			esp_request_firmware_restart(priv->adapter);
+		}
+	}
+	esp_port_close(priv);
+	return ret;
 }
 
 static int esp_cfg80211_stop_ap(struct wiphy *wiphy, struct net_device *dev
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0))
 				, unsigned int link_id
 #endif
-                                )
+				)
 {
-	if (!wiphy || !dev) {
-		esp_err("%u invalid params\n", __LINE__);
-		return -EINVAL;
-	}
+	struct esp_wifi_device *priv;
+	int ret;
+	int ie_ret;
 
+	if (!wiphy || !dev)
+		return -EINVAL;
+	priv = netdev_priv(dev);
+	if (!priv || priv->if_type != ESP_AP_IF)
+		return -EINVAL;
+
+	/* ESP_MAX_INTERFACE is currently one. Transitioning APSTA -> STA is the
+	 * firmware-backed AP teardown for this single exposed interface. */
+	ret = cmd_stop_ap(priv);
+	if (ret)
+		return ret;
+
+	ie_ret = esp_clear_ap_ies(priv);
+	if (ie_ret) {
+		esp_err("AP stop: IE cleanup failed: %d, scheduling recovery\n", ie_ret);
+		if (priv->adapter) {
+			esp_schedule_fw_reset_recovery(priv->adapter);
+			esp_request_firmware_restart(priv->adapter);
+		}
+	}
+	esp_port_close(priv);
 	return 0;
 }
 
@@ -1052,13 +1439,7 @@ static void esp_cfg80211_mgmt_frame_registrations(struct wiphy *wiphy,
 static int esp_cfg80211_probe_client(struct wiphy *wiphy, struct net_device *dev,
                                   const u8 *peer, u64 *cookie)
 {
-
-	if (!wiphy || !dev) {
-		esp_err("%u invalid params\n", __LINE__);
-		return -EINVAL;
-	}
-
-	return 0;
+	return -EOPNOTSUPP;
 }
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0))
@@ -1084,7 +1465,7 @@ static int esp_cfg80211_del_station(struct wiphy *wiphy, struct net_device *dev,
 		return -EINVAL;
 	}
 	if (priv->if_type == ESP_AP_IF)
-		return cmd_disconnect_request(priv, params->reason_code, params->mac);
+		return cmd_disconnect_request(priv, params->reason_code, params->mac, DISCONNECT_TYPE_DEAUTH);
 
 	return 0;
 }
@@ -1115,7 +1496,7 @@ static int esp_cfg80211_add_station(struct wiphy *wiphy, struct net_device *dev,
 	}
 
 	if (priv->if_type == ESP_AP_IF)
-		cmd_add_station(priv, mac, params, false);
+		return cmd_add_station(priv, mac, params, false);
 
 	return 0;
 }
@@ -1134,7 +1515,7 @@ static int esp_cfg80211_change_station(struct wiphy *wiphy,
 #endif
 	struct esp_wifi_device *priv = NULL;
 
-	if (!wiphy || !dev) {
+	if (!wiphy || !dev || !mac || !params) {
 		esp_err("%u invalid params\n", __LINE__);
 		return -EINVAL;
 	}
@@ -1144,8 +1525,24 @@ static int esp_cfg80211_change_station(struct wiphy *wiphy,
 		esp_err("empty priv\n");
 		return -EINVAL;
 	}
-	if (priv->if_type == ESP_AP_IF)
+	if (priv->if_type == ESP_AP_IF) {
+		int ret = cfg80211_check_station_change(wiphy, params,
+							CFG80211_STA_AP_MLME_CLIENT);
+		if (ret)
+			return ret;
 		return cmd_add_station(priv, mac, params, true);
+	}
+
+	if (priv->if_type == ESP_STA_IF &&
+	    (params->sta_flags_mask & BIT(NL80211_STA_FLAG_AUTHORIZED))) {
+		bool authorized = !!(params->sta_flags_set &
+				 BIT(NL80211_STA_FLAG_AUTHORIZED));
+
+		esp_dbg("STA_PORT_AUTH_RX "MACSTR" authorized=%u mask=0x%x set=0x%x\n",
+			 MAC2STR(mac), authorized, params->sta_flags_mask,
+			 params->sta_flags_set);
+		return cmd_sta_set_authorized(priv, mac, authorized);
+	}
 
 	return 0;
 }
@@ -1206,39 +1603,28 @@ esp_default_mgmt_stypes[NUM_NL80211_IFTYPES] = {
 static void esp_reg_notifier(struct wiphy *wiphy,
 			     struct regulatory_request *request)
 {
-	struct esp_wifi_device *priv = NULL;
-	struct esp_device *esp_dev = NULL;
-	struct esp_adapter *adapter = esp_get_adapter();
+	struct esp_device *esp_dev;
+	struct esp_adapter *adapter;
+	struct esp_wifi_device *priv;
+	int ret;
 
-	if (!wiphy || !request) {
-		esp_info("%u invalid input\n", __LINE__);
+	if (!wiphy || !request)
 		return;
-	}
 
-	if (!test_bit(ESP_INIT_DONE, &adapter->state_flags)) {
-		esp_info("Driver init is ongoing\n");
+	adapter = esp_get_adapter();
+	if (!adapter)
 		return;
-	}
-	if (test_bit(ESP_CLEANUP_IN_PROGRESS, &adapter->state_flags)) {
-		esp_info("Driver cleanup is ongoing\n");
+	if (test_bit(ESP_DRIVER_UNLOADING, &adapter->state_flags) ||
+	    test_bit(ESP_CLEANUP_IN_PROGRESS, &adapter->state_flags) ||
+	    !test_bit(ESP_INIT_DONE, &adapter->state_flags))
 		return;
-	}
 
 	esp_dev = wiphy_priv(wiphy);
-
-	if (!esp_dev || !esp_dev->adapter) {
-		esp_info("%u esp_dev not initialized yet \n", __LINE__);
+	if (!esp_dev || !esp_dev->adapter)
 		return;
-	}
-
 	priv = esp_dev->adapter->priv[0];
-
-	if (!priv) {
-		esp_info("%u esp_wifi_device not initialized yet \n", __LINE__);
+	if (!priv)
 		return;
-	}
-	esp_info("cfg80211 regulatory domain callback for %c%c, current=%c%c\n",
-		    request->alpha2[0], request->alpha2[1], priv->country_code[0], priv->country_code[1]);
 
 	switch (request->initiator) {
 	case NL80211_REGDOM_SET_BY_DRIVER:
@@ -1247,15 +1633,18 @@ static void esp_reg_notifier(struct wiphy *wiphy,
 	case NL80211_REGDOM_SET_BY_COUNTRY_IE:
 		break;
 	default:
-		esp_dbg("unknown regdom initiator: %d\n", request->initiator);
 		return;
 	}
 
-	/* Don't send same regdom info to firmware */
-	if (strncmp(request->alpha2, priv->country_code, strlen(request->alpha2))) {
-		strscpy(priv->country_code, request->alpha2, MAX_COUNTRY_LEN);
-		cmd_set_reg_domain(priv);
-	}
+	/* Do not pre-commit alpha2. Identical callbacks are suppressed only
+	 * after firmware has acknowledged the country-code update. */
+	if (!memcmp(request->alpha2, priv->country_code, 2))
+		return;
+
+	ret = cmd_set_reg_domain(priv, request->alpha2);
+	if (ret)
+		esp_err("Regulatory domain %c%c apply failed: %d\n",
+			request->alpha2[0], request->alpha2[1], ret);
 }
 
 int esp_add_wiphy(struct esp_adapter *adapter)
@@ -1307,11 +1696,11 @@ int esp_add_wiphy(struct esp_adapter *adapter)
 		wiphy->n_cipher_suites = ARRAY_SIZE(esp_cipher_suites);
 	}
 
-	/* TODO: check and finalize the numbers */
-	wiphy->max_scan_ssids = 10;
+	/* ESP scan supports at most 1 SSID, no probe request IEs, and no scheduled scans */
+	wiphy->max_scan_ssids = 1;
 	/*	wiphy->max_match_sets = 10;*/
-	wiphy->max_scan_ie_len = 1000;
-	wiphy->max_sched_scan_ssids = 10;
+	wiphy->max_scan_ie_len = 0;
+	wiphy->max_sched_scan_ssids = 0;
 	wiphy->signal_type = CFG80211_SIGNAL_TYPE_MBM;
 #ifdef CONFIG_PM
 	wiphy->wowlan = &esp_wowlan_support;
@@ -1330,6 +1719,11 @@ int esp_add_wiphy(struct esp_adapter *adapter)
 	wiphy->features |= NL80211_FEATURE_SK_TX_STATUS;
 
 	ret = wiphy_register(wiphy);
+	if (ret) {
+		esp_err("Failed to register wiphy: %d\n", ret);
+		adapter->wiphy = NULL;
+		wiphy_free(wiphy);
+	}
 
 	return ret;
 }
@@ -1363,5 +1757,6 @@ int esp_mark_scan_done_and_disconnect(struct esp_wifi_device *priv, uint8_t loca
 		return 0;
 
 	ESP_MARK_SCAN_DONE(priv, true);
+	esp_wifi_put_bss(priv);
 	return esp_mark_disconnect(priv, 0, locally_disconnect);
 }

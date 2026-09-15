@@ -44,19 +44,46 @@ void esp_hci_update_rx_counter(struct hci_dev *hdev, u8 pkt_type, size_t len)
 	hdev->stat.byte_rx += len;
 }
 
-static int esp_bt_open(struct hci_dev *hdev)
+static bool esp_bt_session_ready(struct esp_adapter *adapter)
 {
-	return 0;
+	return adapter &&
+		test_bit(ESP_INIT_DONE, &adapter->state_flags) &&
+		!test_bit(ESP_ALLOW_RECONSTRUCT, &adapter->state_flags) &&
+		!test_bit(ESP_CLEANUP_IN_PROGRESS, &adapter->state_flags) &&
+		!test_bit(ESP_FW_RECOVERY_PENDING, &adapter->state_flags) &&
+		!test_bit(ESP_FW_RESET_EXPECTED, &adapter->state_flags) &&
+		!test_bit(ESP_TRANSPORT_REMOVING, &adapter->state_flags) &&
+		!test_bit(ESP_DRIVER_UNLOADING, &adapter->state_flags) &&
+		atomic_read(&adapter->state) >= ESP_CONTEXT_READY;
 }
 
-static int esp_bt_close(struct hci_dev *hdev)
+static int esp_bt_open(struct hci_dev *hdev)
 {
+	struct esp_adapter *adapter;
+
+	if (!hdev)
+		return -EINVAL;
+	adapter = hci_get_drvdata(hdev);
+	if (!esp_bt_session_ready(adapter))
+		return -EBUSY;
 	return 0;
 }
 
 static int esp_bt_flush(struct hci_dev *hdev)
 {
+	struct esp_adapter *adapter;
+
+	if (!hdev)
+		return -EINVAL;
+	adapter = hci_get_drvdata(hdev);
+	if (adapter && adapter->if_ops && adapter->if_ops->flush_bt_traffic)
+		adapter->if_ops->flush_bt_traffic(adapter);
 	return 0;
+}
+
+static int esp_bt_close(struct hci_dev *hdev)
+{
+	return esp_bt_flush(hdev);
 }
 
 static ESP_BT_SEND_FRAME_PROTOTYPE()
@@ -77,6 +104,11 @@ static ESP_BT_SEND_FRAME_PROTOTYPE()
 		esp_err("Invalid args");
 		return -EINVAL;
 	}
+	/* Do not consume the HCI skb until the current firmware incarnation is
+	 * fully published. This closes the reconstruction window where TX could
+	 * be accepted while RX completions were still intentionally dropped. */
+	if (!esp_bt_session_ready(adapter))
+		return -EBUSY;
 	esp_hex_dump_verbose("bt_tx: ", skb->data, len);
 
 	/* Create space for payload header */
@@ -117,12 +149,13 @@ static ESP_BT_SEND_FRAME_PROTOTYPE()
 		skb_copy_from_linear_data(skb, pos, skb->len);
 		skb_put(new_skb, skb->len + pad_len);
 
-		/* Replace old SKB */
+		/* HCI skb is now consumed; send() must return 0 after this. */
 		dev_kfree_skb_any(skb);
 		skb = new_skb;
 	} else {
 		/* Realloc is not needed, Make space for interface header */
 		skb_push(skb, pad_len);
+		memset(skb->cb, 0, sizeof(skb->cb));
 	}
 
 	hdr = (struct esp_payload_header *) skb->data;
@@ -135,20 +168,34 @@ static ESP_BT_SEND_FRAME_PROTOTYPE()
 	hdr->offset = esp_wire_cpu_to_le16(pad_len);
 	pos = skb->data;
 
-	/* set HCI packet type */
+	/* Firmware consumes the H4 packet type from offset - 1. Duplicate it in
+	 * the fixed header union as well so transport-side ambiguity classifiers
+	 * can identify HCI commands even when alignment padding extends offset. */
+	hdr->hci_pkt_type = pkt_type;
 	*(pos + pad_len - 1) = pkt_type;
 
 	if (adapter->capabilities & ESP_CHECKSUM_ENABLED)
 		hdr->checksum = esp_wire_cpu_to_le16(compute_checksum(skb->data,
 							       len + pad_len));
 
+	/* Transport always consumes skb. HCI core kfree_skb()s the frame we
+	 * were given if send() returns an error, so a non-zero return after
+	 * this point is a double-free (seen as bluetoothd consume_skb Oops
+	 * during reboot/unload). */
+	total_len = skb->len;
 	ret = esp_send_packet(adapter, skb);
+	skb = NULL;
 
 	if (ret) {
 		hdev->stat.err_tx++;
-		return ret;
+		/* Transport consumed the skb but failed delivery. Because send() must
+		 * return 0 to prevent double-free in HCI core, Linux believes this packet
+		 * committed. Reincarnate firmware to prevent silent loss of HCI commands
+		 * or ACL flow-control credits. */
+		esp_schedule_fw_reset_recovery(adapter);
+		esp_request_firmware_restart(adapter);
 	} else {
-		esp_hci_update_tx_counter(hdev, hdr->hci_pkt_type, skb->len);
+		esp_hci_update_tx_counter(hdev, pkt_type, total_len);
 	}
 
 	return 0;
@@ -254,8 +301,10 @@ int esp_init_bt(struct esp_adapter *adapter)
 	ret = hci_register_dev(hdev);
 	if (ret < 0) {
 		BT_ERR("Can not register HCI device");
+		hci_set_drvdata(hdev, NULL);
+		adapter->hcidev = NULL;
 		hci_free_dev(hdev);
-		return -ENOMEM;
+		return ret;
 	}
 
 	return 0;

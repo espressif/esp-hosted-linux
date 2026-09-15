@@ -4,7 +4,7 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
@@ -69,7 +69,17 @@ typedef struct {
     SemaphoreHandle_t done;
 } test_args_t;
 
-void debug_update_raw_tp_rx_count(uint16_t len);
+void debug_raw_tp_set_seq(struct esp_payload_header *header, uint32_t seq);
+uint32_t debug_raw_tp_get_seq(const struct esp_payload_header *header);
+uint32_t debug_raw_tp_tx_seq_get(void);
+void debug_raw_tp_tx_complete(uint32_t frame_count);
+void debug_raw_tp_tx_failed(uint32_t frame_count);
+void debug_update_raw_tp_rx_count(const struct esp_payload_header *header,
+                                  uint16_t len);
+void debug_raw_tp_cleanup(void);
+uint32_t debug_raw_tp_get_run_id(void);
+bool debug_raw_tp_is_e2h_active(void);
+bool debug_raw_tp_is_run_active(uint32_t run_id);
 
 void debug_log_firmware_version(void);
 void create_debugging_tasks(void);
