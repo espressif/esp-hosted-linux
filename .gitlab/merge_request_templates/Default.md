@@ -61,15 +61,21 @@ None
 <!--
 Release-note information is stored in the GitLab MR, not in commit messages.
 
-Select exactly ONE option and replace the corresponding TODO field.
+This section is required only when the MR changes host/ or esp/.
+Set Release notes decision to exactly one of:
+- added
+- not required
+
+Release notes may be a single line, paragraphs, or multiple Markdown list items.
 -->
 
-- [ ] Release note added
-- [ ] Release note not required
+Release notes decision:
 
-Release note: TODO
+<!-- Required when Release notes decision is "added". -->
+Release notes:
 
-Skip reason: TODO
+<!-- Required when Release notes decision is "not required". -->
+Skip reason:
 
 ## Checklist
 

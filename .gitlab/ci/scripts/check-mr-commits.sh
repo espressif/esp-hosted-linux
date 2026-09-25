@@ -57,10 +57,10 @@ for sha in "${commits[@]}"; do
         fail=1
     fi
 
-    # CI-generated firmware version bumps are mechanical commits and do not
-    # require a DCO sign-off. Keep this exemption deliberately narrow.
+    # CI-generated version bumps are mechanical commits and do not require a
+    # DCO sign-off. Keep this exemption deliberately narrow.
     if [[ "${author_email}" == "esp-hosted-linux-version-bot@espressif.com" &&
-          "${subject}" =~ ^ci:\ bump\ firmware\ version\  ]]; then
+          "${subject}" =~ ^ci:\ bump\ version\  ]]; then
 
         mapfile -t changed_files < <(
             git diff-tree --no-commit-id --name-only -r "${sha}" | sort
@@ -81,11 +81,12 @@ for sha in "${commits[@]}"; do
             printf '       %s\n' "${changed_files[@]}" >&2
             fail=1
         else
-            echo "Automated firmware version bump: sign-off not required"
+            echo "Automated version bump: sign-off not required"
         fi
 
         continue
     fi
+
     expected="Signed-off-by: ${author_name} <${author_email}>"
     message="$(git show -s --format='%B' "${sha}")"
 

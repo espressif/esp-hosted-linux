@@ -17,13 +17,16 @@
   interruptible: true
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-      changes:
-        - host/**/*
-        - esp/**/*
     - when: never
 
 mr:release-notes:
   extends: .mr_governance
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - host/**/*
+        - esp/**/*
+    - when: never
   script:
     - .gitlab/ci/scripts/check-mr-release-notes.sh
 
