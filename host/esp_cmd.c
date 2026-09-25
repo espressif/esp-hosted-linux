@@ -3296,7 +3296,7 @@ int cmd_scan_request(struct esp_wifi_device *priv, struct cfg80211_scan_request 
 	memcpy(scan_req->bssid, request->bssid, MAC_ADDR_LEN);
 #endif
 
-	if (request->n_channels == 1 && request->channels && request->channels[0])
+	if (request->n_channels == 1 && request->channels[0])
 		scan_req->channel = request->channels[0]->hw_value;
 	else
 		scan_req->channel = 0;

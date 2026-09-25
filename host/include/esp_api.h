@@ -9,6 +9,7 @@
 #define _esp_api__h_
 
 #include "esp.h"
+#include "esp_utils.h"
 
 #define RET_ON_FAIL(x)                                                \
 	do {                                                          \
@@ -55,13 +56,6 @@ bool esp_host_reset_available(void);
  * GPIO operations through an ownership guard so a failed request cannot still
  * drive a GPIO and repeated firmware recovery does not re-request the line.
  * Non-reset GPIO labels retain native gpiolib behavior. */
-int esp_gpio_request_guard(unsigned int gpio, const char *label);
-bool esp_gpio_is_valid_guard(int gpio);
-int esp_gpio_direction_output_guard(unsigned int gpio, int value);
-int esp_gpio_direction_input_guard(unsigned int gpio);
-void esp_gpio_set_value_guard(unsigned int gpio, int value);
-void esp_gpio_free_guard(unsigned int gpio);
-
 #undef gpio_request
 #undef gpio_is_valid
 #undef gpio_direction_output

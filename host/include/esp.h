@@ -230,9 +230,10 @@ struct esp_wifi_device {
 	bool                    pending_mgmt_active;
 	unsigned long           pending_mgmt_sent_at;
 
-	/* cfg80211 MLME ops hold wdev->mtx across wait_and_decode_cmd_resp().
-	 * Stage AUTH/ASSOC/DISCONNECT events until that wait returns, then
-	 * notify under the same mutex. Late events run on mlme_work. */
+	/* cfg80211 MLME ops hold the wdev lock (wdev->mtx, or the wiphy
+	 * mutex from 6.12) across wait_and_decode_cmd_resp(). Stage
+	 * AUTH/ASSOC/DISCONNECT events until that wait returns, then
+	 * notify under the same lock. Late events run on mlme_work. */
 	struct work_struct      mlme_work;
 	struct delayed_work     mlme_timeout_work;
 	struct delayed_work     scan_timeout_work;

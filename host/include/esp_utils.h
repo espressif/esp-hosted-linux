@@ -37,6 +37,13 @@ enum wpa_alg {
 
 int wpa_cipher_to_alg(int cipher);
 
+int esp_gpio_request_guard(unsigned int gpio, const char *label);
+bool esp_gpio_is_valid_guard(int gpio);
+int esp_gpio_direction_output_guard(unsigned int gpio, int value);
+int esp_gpio_direction_input_guard(unsigned int gpio);
+void esp_gpio_set_value_guard(unsigned int gpio, int value);
+void esp_gpio_free_guard(unsigned int gpio);
+
 char * esp_chipname_from_id(int chipset_id);
 
 typedef enum {
