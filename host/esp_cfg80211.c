@@ -1028,44 +1028,223 @@ static int esp_cfg80211_set_txq_params(struct wiphy *wiphy, struct net_device *n
 }
 
 
+/* Slot order matches hostapd beacon blobs. Wire ie_type must be the ABI
+ * enum, not the slot index — e5f8a3f5 accidentally sent i as ie_type. */
+static const u8 esp_ap_ie_slot_type[5] = {
+	IE_BEACON_PROBE_HEAD,
+	IE_BEACON_PROBE_TAIL,
+	IE_BEACON,
+	IE_PROBE_RESP,
+	IE_ASSOC_RESP,
+};
+
+/* 802.11 hdr(24)+timestamp(8)+beacon_int(2). Bytes 34–35 are capability
+ * and are part of the HEAD ABI sent to firmware. Variable IEs start at 36. */
+#define ESP_BEACON_PROBE_HEAD_FIXED_LEN 34
+#define ESP_BEACON_HEAD_IE_OFF 36
+
+static void esp_dbg_ie_slot(int slot, u8 type, const u8 *buf, u16 len)
+{
+	u8 first = 0, last = 0;
+	const u8 *pos, *end;
+
+	if (buf && len >= 2) {
+		first = buf[0];
+		pos = buf;
+		end = buf + len;
+		while (pos + 2 <= end) {
+			u16 elen = 2 + pos[1];
+
+			if (pos + elen > end)
+				break;
+			last = pos[0];
+			pos += elen;
+		}
+	}
+	esp_dbg("SET_IE slot=%d type=%u len=%u first_eid=%u last_eid=%u\n",
+		slot, type, len, first, last);
+}
+
+/* Cached HEAD is firmware blob: capability (2) + IEs. */
+static void esp_ap_compare_head_tail(struct esp_wifi_device *priv,
+				     struct cfg80211_beacon_data *info,
+				     const u8 **head_ies, u16 *head_ies_len,
+				     const u8 **tail, u16 *tail_len)
+{
+	if (info->head && info->head_len > ESP_BEACON_HEAD_IE_OFF) {
+		*head_ies = info->head + ESP_BEACON_HEAD_IE_OFF;
+		*head_ies_len = info->head_len - ESP_BEACON_HEAD_IE_OFF;
+	} else if (priv->ap_ie_buf[0] && priv->ap_ie_len[0] > 2) {
+		*head_ies = priv->ap_ie_buf[0] + 2;
+		*head_ies_len = priv->ap_ie_len[0] - 2;
+	} else {
+		*head_ies = NULL;
+		*head_ies_len = 0;
+	}
+
+	if (info->tail) {
+		*tail = info->tail;
+		*tail_len = info->tail_len;
+	} else {
+		*tail = priv->ap_ie_buf[1];
+		*tail_len = priv->ap_ie_len[1];
+	}
+}
+
+static bool esp_ie_blob_contains_tlv(const u8 *blob, u16 blob_len,
+				     const u8 *tlv, u16 tlv_len)
+{
+	const u8 *pos, *end;
+
+	if (!blob || !tlv || tlv_len < 2)
+		return false;
+
+	pos = blob;
+	end = blob + blob_len;
+	while (pos + 2 <= end) {
+		u16 elen = 2 + pos[1];
+
+		if (pos + elen > end)
+			break;
+		if (elen == tlv_len && !memcmp(pos, tlv, tlv_len))
+			return true;
+		pos += elen;
+	}
+	return false;
+}
+
+/* Drop a TLV only if the entire TLV already exists in HEAD IEs or TAIL.
+ * Vendor 221 and ext 255 match on the full body (OUI / ext-id included). */
+static int esp_filter_extra_ies(const u8 *head_ies, u16 head_ies_len,
+				const u8 *tail, u16 tail_len,
+				const u8 *extra, u16 extra_len,
+				u8 **out, u16 *out_len)
+{
+	const u8 *pos, *end;
+	u8 *dst;
+	u16 kept = 0;
+
+	*out = NULL;
+	*out_len = 0;
+	if (!extra || !extra_len)
+		return 0;
+
+	dst = kmalloc(extra_len, GFP_KERNEL);
+	if (!dst)
+		return -ENOMEM;
+
+	pos = extra;
+	end = extra + extra_len;
+	while (pos + 2 <= end) {
+		u16 elen = 2 + pos[1];
+
+		if (pos + elen > end)
+			break;
+		if (!esp_ie_blob_contains_tlv(head_ies, head_ies_len, pos, elen) &&
+		    !esp_ie_blob_contains_tlv(tail, tail_len, pos, elen)) {
+			memcpy(dst + kept, pos, elen);
+			kept += elen;
+		}
+		pos += elen;
+	}
+	if (pos < end) {
+		u16 rem = end - pos;
+
+		memcpy(dst + kept, pos, rem);
+		kept += rem;
+	}
+
+	if (!kept) {
+		kfree(dst);
+		return 0;
+	}
+	*out = dst;
+	*out_len = kept;
+	return 0;
+}
+
+static int esp_prep_filtered_extra(struct esp_wifi_device *priv,
+				   struct cfg80211_beacon_data *info,
+				   const u8 *extra, u16 extra_len,
+				   const u8 **new_buf, u16 *new_len,
+				   u8 **owned)
+{
+	const u8 *head_ies, *tail;
+	u16 head_ies_len, tail_len;
+	int ret;
+
+	*owned = NULL;
+	*new_buf = extra;
+	*new_len = extra_len;
+	if (!extra || !extra_len)
+		return 0;
+
+	esp_ap_compare_head_tail(priv, info, &head_ies, &head_ies_len,
+				 &tail, &tail_len);
+	ret = esp_filter_extra_ies(head_ies, head_ies_len, tail, tail_len,
+				   extra, extra_len, owned, new_len);
+	if (ret)
+		return ret;
+	*new_buf = *owned;
+	return 0;
+}
+
 static int esp_set_ies(struct esp_wifi_device *priv, struct cfg80211_beacon_data *info)
 {
+	static const u8 empty_ie;
 	const u8 *new_buf[5] = {NULL};
 	u16 new_len[5] = {0};
 	bool update[5] = {false};
 	u8 *prep_buf[5] = {NULL};
+	u8 *filt_extra[5] = {NULL};
 	int ret = 0;
 	int i, j;
 
 	if (!priv || !info)
 		return -EINVAL;
 
-#define FIXED_PARAM_LEN 34
-
-	if (info->head && info->head_len > FIXED_PARAM_LEN) {
+	if (info->head && info->head_len > ESP_BEACON_PROBE_HEAD_FIXED_LEN) {
 		update[0] = true;
-		new_buf[0] = info->head + FIXED_PARAM_LEN;
-		new_len[0] = info->head_len - FIXED_PARAM_LEN;
+		new_buf[0] = info->head + ESP_BEACON_PROBE_HEAD_FIXED_LEN;
+		new_len[0] = info->head_len - ESP_BEACON_PROBE_HEAD_FIXED_LEN;
 	}
 	if (info->tail && info->tail_len) {
 		update[1] = true;
 		new_buf[1] = info->tail;
 		new_len[1] = info->tail_len;
 	}
-	if (info->beacon_ies && info->beacon_ies_len) {
+	if (info->beacon_ies) {
 		update[2] = true;
-		new_buf[2] = info->beacon_ies;
-		new_len[2] = info->beacon_ies_len;
+		ret = esp_prep_filtered_extra(priv, info, info->beacon_ies,
+					      info->beacon_ies_len,
+					      &new_buf[2], &new_len[2],
+					      &filt_extra[2]);
+		if (ret)
+			return ret;
 	}
-	if (info->proberesp_ies && info->proberesp_ies_len) {
+	if (info->proberesp_ies) {
 		update[3] = true;
-		new_buf[3] = info->proberesp_ies;
-		new_len[3] = info->proberesp_ies_len;
+		ret = esp_prep_filtered_extra(priv, info, info->proberesp_ies,
+					      info->proberesp_ies_len,
+					      &new_buf[3], &new_len[3],
+					      &filt_extra[3]);
+		if (ret) {
+			for (j = 0; j < 5; j++)
+				kfree(filt_extra[j]);
+			return ret;
+		}
 	}
-	if (info->assocresp_ies && info->assocresp_ies_len) {
+	if (info->assocresp_ies) {
 		update[4] = true;
-		new_buf[4] = info->assocresp_ies;
-		new_len[4] = info->assocresp_ies_len;
+		ret = esp_prep_filtered_extra(priv, info, info->assocresp_ies,
+					      info->assocresp_ies_len,
+					      &new_buf[4], &new_len[4],
+					      &filt_extra[4]);
+		if (ret) {
+			for (j = 0; j < 5; j++)
+				kfree(filt_extra[j]);
+			return ret;
+		}
 	}
 
 	/* Allocate all cache buffers upfront before modifying firmware */
@@ -1076,6 +1255,8 @@ static int esp_set_ies(struct esp_wifi_device *priv, struct cfg80211_beacon_data
 		if (!prep_buf[i]) {
 			while (--i >= 0)
 				kfree(prep_buf[i]);
+			for (j = 0; j < 5; j++)
+				kfree(filt_extra[j]);
 			return -ENOMEM;
 		}
 	}
@@ -1083,11 +1264,17 @@ static int esp_set_ies(struct esp_wifi_device *priv, struct cfg80211_beacon_data
 	for (i = 0; i < 5; i++) {
 		if (!update[i])
 			continue;
-		ret = cmd_set_ie(priv, i, new_buf[i], new_len[i]);
+		esp_dbg_ie_slot(i, esp_ap_ie_slot_type[i],
+				new_len[i] ? new_buf[i] : NULL, new_len[i]);
+		ret = cmd_set_ie(priv, esp_ap_ie_slot_type[i],
+				 new_len[i] ? new_buf[i] : &empty_ie, new_len[i]);
 		if (ret) {
-			esp_err("esp_set_ies failed for type %d (ret=%d)\n", i, ret);
-			for (j = 0; j < 5; j++)
+			esp_err("esp_set_ies failed for slot %d type %u (ret=%d)\n",
+				i, esp_ap_ie_slot_type[i], ret);
+			for (j = 0; j < 5; j++) {
 				kfree(prep_buf[j]);
+				kfree(filt_extra[j]);
+			}
 			return ret;
 		}
 	}
@@ -1098,12 +1285,11 @@ static int esp_set_ies(struct esp_wifi_device *priv, struct cfg80211_beacon_data
 			priv->ap_ie_buf[i] = prep_buf[i];
 			priv->ap_ie_len[i] = new_len[i];
 		}
+		kfree(filt_extra[i]);
 	}
 
 	return 0;
 }
-
-#define ESP_BEACON_PROBE_HEAD_FIXED_LEN 34
 
 static int esp_change_ap_ies(struct esp_wifi_device *priv,
 			     struct cfg80211_beacon_data *info)
@@ -1114,6 +1300,7 @@ static int esp_change_ap_ies(struct esp_wifi_device *priv,
 	bool update[5] = {false};
 	bool committed[5] = {false};
 	u8 *prep_buf[5] = {NULL};
+	u8 *filt_extra[5] = {NULL};
 	int ret = 0;
 	int i, j;
 
@@ -1143,25 +1330,47 @@ static int esp_change_ap_ies(struct esp_wifi_device *priv,
 
 	if (info->beacon_ies) {
 		update[2] = true;
-		new_buf[2] = info->beacon_ies;
-		new_len[2] = info->beacon_ies_len;
+		ret = esp_prep_filtered_extra(priv, info, info->beacon_ies,
+					      info->beacon_ies_len,
+					      &new_buf[2], &new_len[2],
+					      &filt_extra[2]);
+		if (ret)
+			return ret;
 	} else if (info->beacon_ies_len) {
 		return -EINVAL;
 	}
 
 	if (info->proberesp_ies) {
 		update[3] = true;
-		new_buf[3] = info->proberesp_ies;
-		new_len[3] = info->proberesp_ies_len;
+		ret = esp_prep_filtered_extra(priv, info, info->proberesp_ies,
+					      info->proberesp_ies_len,
+					      &new_buf[3], &new_len[3],
+					      &filt_extra[3]);
+		if (ret) {
+			for (j = 0; j < 5; j++)
+				kfree(filt_extra[j]);
+			return ret;
+		}
 	} else if (info->proberesp_ies_len) {
+		for (j = 0; j < 5; j++)
+			kfree(filt_extra[j]);
 		return -EINVAL;
 	}
 
 	if (info->assocresp_ies) {
 		update[4] = true;
-		new_buf[4] = info->assocresp_ies;
-		new_len[4] = info->assocresp_ies_len;
+		ret = esp_prep_filtered_extra(priv, info, info->assocresp_ies,
+					      info->assocresp_ies_len,
+					      &new_buf[4], &new_len[4],
+					      &filt_extra[4]);
+		if (ret) {
+			for (j = 0; j < 5; j++)
+				kfree(filt_extra[j]);
+			return ret;
+		}
 	} else if (info->assocresp_ies_len) {
+		for (j = 0; j < 5; j++)
+			kfree(filt_extra[j]);
 		return -EINVAL;
 	}
 
@@ -1173,6 +1382,8 @@ static int esp_change_ap_ies(struct esp_wifi_device *priv,
 		if (!prep_buf[i]) {
 			while (--i >= 0)
 				kfree(prep_buf[i]);
+			for (j = 0; j < 5; j++)
+				kfree(filt_extra[j]);
 			return -ENOMEM;
 		}
 	}
@@ -1181,26 +1392,33 @@ static int esp_change_ap_ies(struct esp_wifi_device *priv,
 	for (i = 0; i < 5; i++) {
 		if (!update[i])
 			continue;
-		ret = cmd_set_ie(priv, i, new_len[i] ? new_buf[i] : &empty_ie, new_len[i]);
+		esp_dbg_ie_slot(i, esp_ap_ie_slot_type[i],
+				new_len[i] ? new_buf[i] : NULL, new_len[i]);
+		ret = cmd_set_ie(priv, esp_ap_ie_slot_type[i],
+				 new_len[i] ? new_buf[i] : &empty_ie, new_len[i]);
 		if (ret) {
-			esp_err("Failed to set AP IE type %d ret=%d, rolling back\n", i, ret);
+			esp_err("Failed to set AP IE slot %d type %u ret=%d, rolling back\n",
+				i, esp_ap_ie_slot_type[i], ret);
 			while (--i >= 0) {
 				int rb_ret;
 				if (!committed[i])
 					continue;
-				rb_ret = cmd_set_ie(priv, i,
+				rb_ret = cmd_set_ie(priv, esp_ap_ie_slot_type[i],
 						    priv->ap_ie_len[i] ? priv->ap_ie_buf[i] : &empty_ie,
 						    priv->ap_ie_len[i]);
 				if (rb_ret) {
-					esp_err("change_beacon rollback failed for type %d (ret=%d), scheduling recovery\n", i, rb_ret);
+					esp_err("change_beacon rollback failed for slot %d type %u (ret=%d), scheduling recovery\n",
+						i, esp_ap_ie_slot_type[i], rb_ret);
 					if (priv->adapter) {
 						esp_schedule_fw_reset_recovery(priv->adapter);
 						esp_request_firmware_restart(priv->adapter);
 					}
 				}
 			}
-			for (j = 0; j < 5; j++)
+			for (j = 0; j < 5; j++) {
 				kfree(prep_buf[j]);
+				kfree(filt_extra[j]);
+			}
 			return ret;
 		}
 		committed[i] = true;
@@ -1213,6 +1431,7 @@ static int esp_change_ap_ies(struct esp_wifi_device *priv,
 			priv->ap_ie_buf[i] = prep_buf[i];
 			priv->ap_ie_len[i] = new_len[i];
 		}
+		kfree(filt_extra[i]);
 	}
 	return 0;
 }
