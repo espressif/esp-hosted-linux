@@ -992,15 +992,30 @@ int esp_start_ota(struct esp_adapter *adapter, char *ota_file)
 		esp_err("OTA Start failed: %d\n", ret);
 		goto done;
 	}
+	esp_info("OTA start completed, writing %s in %d-byte chunks\n",
+		 ota_file, OTA_CHUNK_SIZE);
 
-	while ((nread = esp_kernel_read(file, ota_chunk, OTA_CHUNK_SIZE, &file->f_pos)) > 0) {
-		ret = cmd_process_ota_write(adapter->priv[ESP_STA_NW_IF], ota_chunk, nread);
-		if (ret) {
-			esp_err("OTA Write failed: %d\n", ret);
-			goto done;
+	{
+		int chunk = 0;
+		size_t written = 0;
+
+		while ((nread = esp_kernel_read(file, ota_chunk, OTA_CHUNK_SIZE, &file->f_pos)) > 0) {
+			chunk++;
+			ret = cmd_process_ota_write(adapter->priv[ESP_STA_NW_IF], ota_chunk, nread);
+			if (ret) {
+				esp_err("OTA Write failed at chunk %d offset %zu nread=%zd\n",
+					chunk, written, nread);
+				goto done;
+			}
+			written += nread;
+			if ((chunk % 50) == 0)
+				esp_info("OTA write progress: chunk %d bytes %zu\n",
+					 chunk, written);
+			if (nread < OTA_CHUNK_SIZE)
+				break;
 		}
-		if (nread < OTA_CHUNK_SIZE)
-			break;
+		esp_info("OTA file read done: chunks=%d bytes=%zu last_nread=%zd\n",
+			 chunk, written, nread);
 	}
 
 	if (nread < 0) {

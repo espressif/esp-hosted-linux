@@ -23,6 +23,7 @@
 #include <linux/mutex.h>
 
 #define COMMAND_RESPONSE_TIMEOUT (5 * HZ)
+#define OTA_COMMAND_RESPONSE_TIMEOUT (30 * HZ)
 #define SCAN_COMPLETION_TIMEOUT  (30 * HZ)
 #ifndef U8_MAX
 #define U8_MAX			((u8)~0U)
@@ -1206,8 +1207,18 @@ static int wait_and_decode_cmd_resp(struct esp_wifi_device *priv,
 	adapter = priv->adapter;
 
 	/* Once submitted, command ownership is protocol state. Do not let a
-	 * userspace signal abandon a command that firmware may still execute. */
-	ret = esp_cmd_wait_event_guard(adapter, cmd_node, COMMAND_RESPONSE_TIMEOUT);
+	 * userspace signal abandon a command that firmware may still execute.
+	 * OTA flash erase/write can exceed the default 5s command timeout. */
+	{
+		unsigned long timeout = COMMAND_RESPONSE_TIMEOUT;
+
+		if (cmd_node->cmd_code == CMD_START_OTA_UPDATE ||
+		    cmd_node->cmd_code == CMD_START_OTA_WRITE ||
+		    cmd_node->cmd_code == CMD_START_OTA_END)
+			timeout = OTA_COMMAND_RESPONSE_TIMEOUT;
+
+		ret = esp_cmd_wait_event_guard(adapter, cmd_node, timeout);
+	}
 	if (cmd_node->queued_at)
 		elapsed_ms = jiffies_to_msecs(jiffies - cmd_node->queued_at);
 	if (cmd_node->sent_at)
