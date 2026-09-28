@@ -662,7 +662,8 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 			adapter->tx_aggr_size = le32_to_cpup((__le32 *)(pos + 2));
 			if (!adapter->tx_aggr_size ||
 			    adapter->tx_aggr_size > ESP_TX_AGGR_SIZE_MAX ||
-			    adapter->tx_aggr_size % ESP_TX_AGGR_SIZE_ALIGN) {
+			    (adapter->if_type != ESP_IF_TYPE_SPI &&
+			     adapter->tx_aggr_size % ESP_TX_AGGR_SIZE_ALIGN)) {
 				esp_err("Invalid slave RX aggregate size: %u\n",
 					adapter->tx_aggr_size);
 				ret = -EINVAL;
