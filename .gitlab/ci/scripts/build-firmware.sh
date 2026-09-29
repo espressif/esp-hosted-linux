@@ -100,15 +100,35 @@ cp build/network_adapter.bin "$ARTIFACT_DIR/"
 [[ -f build/network_adapter.map ]] && cp build/network_adapter.map "$ARTIFACT_DIR/"
 cp sdkconfig "$ARTIFACT_DIR/"
 
+BIN_SIZE="$(wc -c < build/network_adapter.bin | tr -d ' ')"
+MAX_BIN_BYTES="$(python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1] + "/components/partition_table")
+from gen_esp32part import APP_TYPE, PartitionTable
+table = PartitionTable.from_binary(open(sys.argv[2], "rb").read())
+apps = [p.size for p in table if p.type == APP_TYPE]
+if not apps:
+    raise SystemExit("no app partition in table")
+print(min(apps))
+' "$IDF_PATH" build/partition_table/partition-table.bin)"
+
 {
     echo "target=${IDF_TARGET}"
     echo "transport=${TRANSPORT}"
     echo "commit=${CI_COMMIT_SHA:-unknown}"
     echo "idf_commit=${ACTUAL_IDF_COMMIT}"
     echo "idf_version=$(idf.py --version)"
+    echo "bin_size=${BIN_SIZE}"
+    echo "app_partition_bytes=${MAX_BIN_BYTES}"
     echo "bin_sha256=$(sha256sum build/network_adapter.bin | awk '{print $1}')"
 } > "$ARTIFACT_DIR/build-info.txt"
 
 cat "$ARTIFACT_DIR/build-info.txt"
+
+echo "network_adapter.bin: ${BIN_SIZE} bytes (app partition ${MAX_BIN_BYTES} bytes)"
+if (( BIN_SIZE >= MAX_BIN_BYTES )); then
+    echo "ERROR: ${IDF_TARGET}/${TRANSPORT} network_adapter.bin is ${BIN_SIZE} bytes; must be < ${MAX_BIN_BYTES} (smallest app partition)" >&2
+    exit 1
+fi
 
 echo "=== PASS: ${IDF_TARGET}/${TRANSPORT} ==="

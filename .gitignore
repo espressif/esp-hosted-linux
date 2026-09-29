@@ -31,6 +31,10 @@ host/sdio/*.mod
 host/sdio/*.mod.c
 host/sdio/.*.cmd
 
+# CI size-compare worktrees
+.ci-size-base-*/
+build-artifacts/
+
 # General temporary files
 *.swp
 *~
