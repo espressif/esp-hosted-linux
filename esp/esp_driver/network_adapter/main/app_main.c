@@ -800,7 +800,7 @@ void process_rx_pkt(interface_buffer_handle_t *buf_handle)
                     (station_authorized || header->packet_type == PACKET_TYPE_EAPOL)) {
                     int ret = 0;
                     /*ESP_LOGI(TAG, "Send wlan\n");*/
-                    ret = wifi_tx_with_retry(ESP_IF_WIFI_STA, payload, payload_len);
+                    ret = wifi_tx_with_retry(WIFI_IF_STA, payload, payload_len);
                     if (ret) {
                         H2E_STATS_INC(h2e_wifi_tx_fail);
                         ESP_LOGW(TAG, "STA data tx failed=%d", ret);
@@ -818,7 +818,7 @@ void process_rx_pkt(interface_buffer_handle_t *buf_handle)
 
                 /* Forward packet over soft AP interface */
                 /* ESP_LOGI(TAG, "Send data pkt over wlan\n"); */
-                int ret = wifi_tx_with_retry(ESP_IF_WIFI_AP, payload, payload_len);
+                int ret = wifi_tx_with_retry(WIFI_IF_AP, payload, payload_len);
                 if (ret) {
                     H2E_STATS_INC(h2e_wifi_tx_fail);
                     ESP_LOGW(TAG, "Sending data failed=%d\n", ret);
