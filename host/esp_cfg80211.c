@@ -14,6 +14,10 @@
 #include "esp_kernel_port.h"
 #include "esp_utils.h"
 
+#ifndef U16_MAX
+#define U16_MAX			((u16)~0U)
+#endif
+
 /* WiFi PHY rate encodings. */
 typedef enum {
 	WIFI_PHY_RATE_1M_L      = 0x00, /**< 1 Mbps with long preamble */
@@ -1047,11 +1051,20 @@ static void esp_dbg_ie_slot(int slot, u8 type, const u8 *buf, u16 len)
 {
 	u8 first = 0, last = 0;
 	const u8 *pos, *end;
+	const u8 *parse = buf;
+	u16 parse_len = len;
 
-	if (buf && len >= 2) {
-		first = buf[0];
-		pos = buf;
-		end = buf + len;
+	/* Firmware HEAD starts with the two-byte capability field; only the
+	 * remaining bytes are an IE stream. */
+	if (slot == 0 && parse && parse_len >= 2) {
+		parse += 2;
+		parse_len -= 2;
+	}
+
+	if (parse && parse_len >= 2) {
+		first = parse[0];
+		pos = parse;
+		end = parse + parse_len;
 		while (pos + 2 <= end) {
 			u16 elen = 2 + pos[1];
 
@@ -1071,9 +1084,16 @@ static void esp_ap_compare_head_tail(struct esp_wifi_device *priv,
 				     const u8 **head_ies, u16 *head_ies_len,
 				     const u8 **tail, u16 *tail_len)
 {
-	if (info->head && info->head_len > ESP_BEACON_HEAD_IE_OFF) {
-		*head_ies = info->head + ESP_BEACON_HEAD_IE_OFF;
-		*head_ies_len = info->head_len - ESP_BEACON_HEAD_IE_OFF;
+	if (info->head) {
+		if (info->head_len > ESP_BEACON_HEAD_IE_OFF) {
+			*head_ies = info->head + ESP_BEACON_HEAD_IE_OFF;
+			*head_ies_len = info->head_len - ESP_BEACON_HEAD_IE_OFF;
+		} else {
+			/* A supplied HEAD replaces the cached HEAD even when it has
+			 * no variable IEs. Do not dedupe against stale cached data. */
+			*head_ies = NULL;
+			*head_ies_len = 0;
+		}
 	} else if (priv->ap_ie_buf[0] && priv->ap_ie_len[0] > 2) {
 		*head_ies = priv->ap_ie_buf[0] + 2;
 		*head_ies_len = priv->ap_ie_len[0] - 2;
@@ -1189,6 +1209,16 @@ static int esp_prep_filtered_extra(struct esp_wifi_device *priv,
 	return 0;
 }
 
+static void esp_free_ap_ie_work(u8 *prep_buf[5], u8 *filt_extra[5])
+{
+	int i;
+
+	for (i = 0; i < 5; i++) {
+		kfree(prep_buf[i]);
+		kfree(filt_extra[i]);
+	}
+}
+
 static int esp_set_ies(struct esp_wifi_device *priv, struct cfg80211_beacon_data *info)
 {
 	static const u8 empty_ie;
@@ -1198,66 +1228,86 @@ static int esp_set_ies(struct esp_wifi_device *priv, struct cfg80211_beacon_data
 	u8 *prep_buf[5] = {NULL};
 	u8 *filt_extra[5] = {NULL};
 	int ret = 0;
-	int i, j;
+	int i;
 
 	if (!priv || !info)
 		return -EINVAL;
 
-	if (info->head && info->head_len > ESP_BEACON_PROBE_HEAD_FIXED_LEN) {
+	if (info->head) {
+		if (info->head_len < ESP_BEACON_HEAD_IE_OFF ||
+		    info->head_len - ESP_BEACON_PROBE_HEAD_FIXED_LEN > U16_MAX)
+			return -EINVAL;
 		update[0] = true;
 		new_buf[0] = info->head + ESP_BEACON_PROBE_HEAD_FIXED_LEN;
-		new_len[0] = info->head_len - ESP_BEACON_PROBE_HEAD_FIXED_LEN;
+		new_len[0] = (u16)(info->head_len - ESP_BEACON_PROBE_HEAD_FIXED_LEN);
+	} else if (info->head_len) {
+		return -EINVAL;
 	}
-	if (info->tail && info->tail_len) {
+
+	if (info->tail) {
+		if (info->tail_len > U16_MAX)
+			return -EINVAL;
 		update[1] = true;
 		new_buf[1] = info->tail;
-		new_len[1] = info->tail_len;
+		new_len[1] = (u16)info->tail_len;
+	} else if (info->tail_len) {
+		return -EINVAL;
 	}
+
 	if (info->beacon_ies) {
+		if (info->beacon_ies_len > U16_MAX)
+			return -EINVAL;
 		update[2] = true;
 		ret = esp_prep_filtered_extra(priv, info, info->beacon_ies,
-					      info->beacon_ies_len,
+					      (u16)info->beacon_ies_len,
 					      &new_buf[2], &new_len[2],
 					      &filt_extra[2]);
 		if (ret)
-			return ret;
-	}
-	if (info->proberesp_ies) {
-		update[3] = true;
-		ret = esp_prep_filtered_extra(priv, info, info->proberesp_ies,
-					      info->proberesp_ies_len,
-					      &new_buf[3], &new_len[3],
-					      &filt_extra[3]);
-		if (ret) {
-			for (j = 0; j < 5; j++)
-				kfree(filt_extra[j]);
-			return ret;
-		}
-	}
-	if (info->assocresp_ies) {
-		update[4] = true;
-		ret = esp_prep_filtered_extra(priv, info, info->assocresp_ies,
-					      info->assocresp_ies_len,
-					      &new_buf[4], &new_len[4],
-					      &filt_extra[4]);
-		if (ret) {
-			for (j = 0; j < 5; j++)
-				kfree(filt_extra[j]);
-			return ret;
-		}
+			goto fail;
+	} else if (info->beacon_ies_len) {
+		return -EINVAL;
 	}
 
-	/* Allocate all cache buffers upfront before modifying firmware */
+	if (info->proberesp_ies) {
+		if (info->proberesp_ies_len > U16_MAX) {
+			ret = -EINVAL;
+			goto fail;
+		}
+		update[3] = true;
+		ret = esp_prep_filtered_extra(priv, info, info->proberesp_ies,
+					      (u16)info->proberesp_ies_len,
+					      &new_buf[3], &new_len[3],
+					      &filt_extra[3]);
+		if (ret)
+			goto fail;
+	} else if (info->proberesp_ies_len) {
+		ret = -EINVAL;
+		goto fail;
+	}
+
+	if (info->assocresp_ies) {
+		if (info->assocresp_ies_len > U16_MAX) {
+			ret = -EINVAL;
+			goto fail;
+		}
+		/* Association-response IEs are frame-specific. They may legitimately
+		 * duplicate beacon/probe IEs and must not be filtered against them. */
+		update[4] = true;
+		new_buf[4] = info->assocresp_ies;
+		new_len[4] = (u16)info->assocresp_ies_len;
+	} else if (info->assocresp_ies_len) {
+		ret = -EINVAL;
+		goto fail;
+	}
+
+	/* Allocate all programmed-cache buffers upfront before modifying firmware. */
 	for (i = 0; i < 5; i++) {
 		if (!update[i] || !new_len[i])
 			continue;
 		prep_buf[i] = kmemdup(new_buf[i], new_len[i], GFP_KERNEL);
 		if (!prep_buf[i]) {
-			while (--i >= 0)
-				kfree(prep_buf[i]);
-			for (j = 0; j < 5; j++)
-				kfree(filt_extra[j]);
-			return -ENOMEM;
+			ret = -ENOMEM;
+			goto fail;
 		}
 	}
 
@@ -1271,24 +1321,25 @@ static int esp_set_ies(struct esp_wifi_device *priv, struct cfg80211_beacon_data
 		if (ret) {
 			esp_err("esp_set_ies failed for slot %d type %u (ret=%d)\n",
 				i, esp_ap_ie_slot_type[i], ret);
-			for (j = 0; j < 5; j++) {
-				kfree(prep_buf[j]);
-				kfree(filt_extra[j]);
-			}
-			return ret;
+			goto fail;
 		}
 	}
 
 	for (i = 0; i < 5; i++) {
-		if (update[i]) {
-			kfree(priv->ap_ie_buf[i]);
-			priv->ap_ie_buf[i] = prep_buf[i];
-			priv->ap_ie_len[i] = new_len[i];
-		}
-		kfree(filt_extra[i]);
+		if (!update[i])
+			continue;
+		kfree(priv->ap_ie_buf[i]);
+		priv->ap_ie_buf[i] = prep_buf[i];
+		priv->ap_ie_len[i] = new_len[i];
+		prep_buf[i] = NULL;
 	}
 
+	esp_free_ap_ie_work(prep_buf, filt_extra);
 	return 0;
+
+fail:
+	esp_free_ap_ie_work(prep_buf, filt_extra);
+	return ret;
 }
 
 static int esp_change_ap_ies(struct esp_wifi_device *priv,
@@ -1302,93 +1353,94 @@ static int esp_change_ap_ies(struct esp_wifi_device *priv,
 	u8 *prep_buf[5] = {NULL};
 	u8 *filt_extra[5] = {NULL};
 	int ret = 0;
-	int i, j;
+	int i;
 
 	if (!priv || !info)
 		return -EINVAL;
 
-	/* Validate all parameters before executing any command */
+	/* HEAD/TAIL are partial-update fields: NULL means unchanged. */
 	if (info->head) {
-		if (info->head_len < ESP_BEACON_PROBE_HEAD_FIXED_LEN)
+		if (info->head_len < ESP_BEACON_HEAD_IE_OFF ||
+		    info->head_len - ESP_BEACON_PROBE_HEAD_FIXED_LEN > U16_MAX)
 			return -EINVAL;
 		update[0] = true;
-		if (info->head_len > ESP_BEACON_PROBE_HEAD_FIXED_LEN) {
-			new_buf[0] = info->head + ESP_BEACON_PROBE_HEAD_FIXED_LEN;
-			new_len[0] = info->head_len - ESP_BEACON_PROBE_HEAD_FIXED_LEN;
-		}
+		new_buf[0] = info->head + ESP_BEACON_PROBE_HEAD_FIXED_LEN;
+		new_len[0] = (u16)(info->head_len - ESP_BEACON_PROBE_HEAD_FIXED_LEN);
 	} else if (info->head_len) {
 		return -EINVAL;
 	}
 
 	if (info->tail) {
+		if (info->tail_len > U16_MAX)
+			return -EINVAL;
 		update[1] = true;
 		new_buf[1] = info->tail;
-		new_len[1] = info->tail_len;
+		new_len[1] = (u16)info->tail_len;
 	} else if (info->tail_len) {
 		return -EINVAL;
 	}
 
+	/* Extra-IE fields describe the current SET_BEACON state. Absence means
+	 * clear the corresponding firmware slot, matching firmware-offload
+	 * cfg80211 drivers and hostapd's netlink encoding. */
+	update[2] = true;
 	if (info->beacon_ies) {
-		update[2] = true;
+		if (info->beacon_ies_len > U16_MAX)
+			return -EINVAL;
 		ret = esp_prep_filtered_extra(priv, info, info->beacon_ies,
-					      info->beacon_ies_len,
+					      (u16)info->beacon_ies_len,
 					      &new_buf[2], &new_len[2],
 					      &filt_extra[2]);
 		if (ret)
-			return ret;
+			goto fail;
 	} else if (info->beacon_ies_len) {
 		return -EINVAL;
 	}
 
+	update[3] = true;
 	if (info->proberesp_ies) {
-		update[3] = true;
+		if (info->proberesp_ies_len > U16_MAX) {
+			ret = -EINVAL;
+			goto fail;
+		}
 		ret = esp_prep_filtered_extra(priv, info, info->proberesp_ies,
-					      info->proberesp_ies_len,
+					      (u16)info->proberesp_ies_len,
 					      &new_buf[3], &new_len[3],
 					      &filt_extra[3]);
-		if (ret) {
-			for (j = 0; j < 5; j++)
-				kfree(filt_extra[j]);
-			return ret;
-		}
+		if (ret)
+			goto fail;
 	} else if (info->proberesp_ies_len) {
-		for (j = 0; j < 5; j++)
-			kfree(filt_extra[j]);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto fail;
 	}
 
+	update[4] = true;
 	if (info->assocresp_ies) {
-		update[4] = true;
-		ret = esp_prep_filtered_extra(priv, info, info->assocresp_ies,
-					      info->assocresp_ies_len,
-					      &new_buf[4], &new_len[4],
-					      &filt_extra[4]);
-		if (ret) {
-			for (j = 0; j < 5; j++)
-				kfree(filt_extra[j]);
-			return ret;
+		if (info->assocresp_ies_len > U16_MAX) {
+			ret = -EINVAL;
+			goto fail;
 		}
+		/* Association-response IEs are frame-specific. They may legitimately
+		 * duplicate beacon/probe IEs and must not be filtered against them. */
+		new_buf[4] = info->assocresp_ies;
+		new_len[4] = (u16)info->assocresp_ies_len;
 	} else if (info->assocresp_ies_len) {
-		for (j = 0; j < 5; j++)
-			kfree(filt_extra[j]);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto fail;
 	}
 
-	/* Allocate all cache buffers upfront before modifying firmware */
+	/* Allocate all programmed-cache buffers upfront before modifying firmware. */
 	for (i = 0; i < 5; i++) {
 		if (!update[i] || !new_len[i])
 			continue;
 		prep_buf[i] = kmemdup(new_buf[i], new_len[i], GFP_KERNEL);
 		if (!prep_buf[i]) {
-			while (--i >= 0)
-				kfree(prep_buf[i]);
-			for (j = 0; j < 5; j++)
-				kfree(filt_extra[j]);
-			return -ENOMEM;
+			ret = -ENOMEM;
+			goto fail;
 		}
 	}
 
-	/* Execute updates sequentially with checked rollback on failure */
+	/* Execute updates sequentially with checked rollback on failure. */
 	for (i = 0; i < 5; i++) {
 		if (!update[i])
 			continue;
@@ -1401,6 +1453,7 @@ static int esp_change_ap_ies(struct esp_wifi_device *priv,
 				i, esp_ap_ie_slot_type[i], ret);
 			while (--i >= 0) {
 				int rb_ret;
+
 				if (!committed[i])
 					continue;
 				rb_ret = cmd_set_ie(priv, esp_ap_ie_slot_type[i],
@@ -1415,25 +1468,27 @@ static int esp_change_ap_ies(struct esp_wifi_device *priv,
 					}
 				}
 			}
-			for (j = 0; j < 5; j++) {
-				kfree(prep_buf[j]);
-				kfree(filt_extra[j]);
-			}
-			return ret;
+			goto fail;
 		}
 		committed[i] = true;
 	}
 
-	/* Commit new IEs to local cache upon full success */
+	/* Commit local cache only after the whole firmware transaction succeeds. */
 	for (i = 0; i < 5; i++) {
-		if (update[i]) {
-			kfree(priv->ap_ie_buf[i]);
-			priv->ap_ie_buf[i] = prep_buf[i];
-			priv->ap_ie_len[i] = new_len[i];
-		}
-		kfree(filt_extra[i]);
+		if (!update[i])
+			continue;
+		kfree(priv->ap_ie_buf[i]);
+		priv->ap_ie_buf[i] = prep_buf[i];
+		priv->ap_ie_len[i] = new_len[i];
+		prep_buf[i] = NULL;
 	}
+
+	esp_free_ap_ie_work(prep_buf, filt_extra);
 	return 0;
+
+fail:
+	esp_free_ap_ie_work(prep_buf, filt_extra);
+	return ret;
 }
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0))
@@ -1478,7 +1533,6 @@ static int esp_clear_ap_ies(struct esp_wifi_device *priv)
 		priv->ap_ie_buf[i] = NULL;
 		priv->ap_ie_len[i] = 0;
 	}
-
 #define ESP_CLEAR_AP_IE(_type) do { \
 	ret = cmd_set_ie(priv, (_type), &empty_ie, 0); \
 	if (ret && !first) \
@@ -1524,8 +1578,7 @@ static int esp_cfg80211_start_ap(struct wiphy *wiphy, struct net_device *dev,
 	}
 
 	/* Stale application IEs from an earlier AP incarnation are part of the
-	 * transaction. In particular esp_set_ies() does not rewrite HEAD when the
-	 * new beacon has no variable head IEs, so a failed clear cannot be ignored. */
+	 * transaction, so clear them before staging the new complete AP state. */
 	ret = esp_clear_ap_ies(priv);
 	if (ret) {
 		esp_err("AP start: previous IE cleanup failed: %d\n", ret);
