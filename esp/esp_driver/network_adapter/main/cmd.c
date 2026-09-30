@@ -931,6 +931,19 @@ int process_owe_assoc_resp(const u8 *rsn_ie, size_t rsn_len, const uint8_t *dh_i
     return 0;
 }
 
+uint8_t *wpa3_build_sae_msg(uint8_t *bssid, uint32_t type, size_t *len)
+{
+    if (len) {
+        *len = 0;
+    }
+    return NULL;
+}
+
+int wpa3_parse_sae_msg(uint8_t *buf, size_t len, uint32_t type, uint16_t status)
+{
+    return 0;
+}
+
 int wpa3_hostap_handle_auth(uint8_t *buf, size_t len, uint32_t type, uint16_t status, uint8_t *bssid)
 {
     return 0;
@@ -1681,6 +1694,8 @@ static void sta_disconnected(uint8_t reason_code)
 esp_err_t initialise_wifi(void)
 {
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    /* Ensure Wi-Fi MAC layer has WPA3/SAE (1<<0), GCMP (1<<4), Enterprise (1<<7), and OWE (1<<10) capability bits set for host-driven security */
+    cfg.feature_caps |= (1 << 0) | (1 << 4) | (1 << 7) | (1 << 10);
 
     esp_err_t result = esp_wifi_init(&cfg);
     if (result != ESP_OK) {
@@ -2397,6 +2412,13 @@ int process_auth_request(uint8_t if_type, uint8_t *payload, uint16_t payload_len
             goto send_resp;
         }
 
+        if (!ap_bssid) {
+            ap_bssid = malloc(MAC_ADDR_LEN);
+        }
+        if (ap_bssid) {
+            memcpy(ap_bssid, cmd_auth->bssid, MAC_ADDR_LEN);
+        }
+
         memcpy(wifi_config.sta.ssid, cmd_auth->ssid, MAX_SSID_LEN);
         /* ESP_LOGI(TAG, "ssid_found:%u Auth type scanned[%u], exp[%u] for ssid %s", found_ssid, auth_type, cmd_auth->auth_type, wifi_config.sta.ssid); */
 
@@ -2413,7 +2435,7 @@ int process_auth_request(uint8_t if_type, uint8_t *payload, uint16_t payload_len
             wifi_config.sta.owe_enabled = 1;
         } else if (auth_type != WIFI_AUTH_OPEN) {
             memcpy(wifi_config.sta.password, DUMMY_PASSPHRASE, sizeof(DUMMY_PASSPHRASE));
-            wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA_PSK;;
+            wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA_PSK;
         }
 
 	if (auth_type == WIFI_AUTH_WPA2_ENTERPRISE ||
@@ -2788,7 +2810,7 @@ int process_init_interface(uint8_t if_type, uint8_t *payload, uint16_t payload_l
         esp_read_mac(dev_mac, ESP_MAC_WIFI_STA);
 
         if (if_type == ESP_AP_IF) {
-            ESP_GOTO_ON_ERROR(esp_wifi_disconnect(), done, TAG, "Station Disconnect failed");
+            esp_wifi_disconnect();
             ESP_GOTO_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_APSTA), done, TAG, "Setting mode to APSTA failed");
             ESP_LOGI(TAG, "Setting APSTA mode");
             wifi_config_t wifi_config = {0};
