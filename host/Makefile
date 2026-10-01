@@ -15,6 +15,10 @@ endif
 target ?= sdio
 MODULE_NAME := esp32_$(target)
 
+# Device Tree overlay compiler and generated Raspberry Pi SPI overlays.
+DTC ?= dtc
+SPI_DTBOS := spidev_disabler.dtbo overlays/esp32-spi.dtbo
+
 # Debug and AP support
 # NOTE: use ccflags-y (not EXTRA_CFLAGS) for -D defines. Modern kbuild
 # (kernel 6.x, confirmed on 6.18) ignores EXTRA_CFLAGS, which silently
@@ -54,11 +58,23 @@ obj-m := $(MODULE_NAME).o
 $(MODULE_NAME)-y := $(module_objects)
 
 # Build targets
+.DELETE_ON_ERROR:
+.PHONY: all clean check spi-dtbo
+
 all: clean
 	$(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) -C $(KERNEL) M=$(PWD) modules
 
+spi-dtbo: $(SPI_DTBOS)
+
+spidev_disabler.dtbo: spidev_disabler.dts
+	$(DTC) -@ -I dts -O dtb -o $@ $<
+
+overlays/esp32-spi.dtbo: overlays/esp32-spi.dts
+	$(DTC) -@ -I dts -O dtb -o $@ $<
+
 clean:
 	rm -rf *.o */*.o *.ko *.mod.c *.symvers *.order .*.cmd .tmp_versions
+	rm -f $(SPI_DTBOS)
 	$(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) -C $(KERNEL) M=$(PWD) clean
 
 check:

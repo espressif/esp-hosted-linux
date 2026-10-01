@@ -39,6 +39,8 @@
 #define ESP_SDIO_PKT_LEN_RETRY_MIN_US  20
 #define ESP_SDIO_PKT_LEN_RETRY_MAX_US  50
 #define ESP_SDIO_PKT_LEN_DELAYED_RETRIES 32
+#define ESP_SDIO_PROBE_IO_RETRIES         3
+#define ESP_SDIO_MAX_CLK_MHZ             50U
 
 #define CHECK_SDIO_RW_ERROR(ret) do {                                     \
 	if (ret)                                                            \
@@ -1007,8 +1009,13 @@ static int esp_sdio_recover_transport_inner(struct esp_adapter *adapter)
 		ret = esp_sdio_handshake_slave_reset(context, ESP_RESET);
 		if (ret) {
 			esp_err("SDIO recover: ESP_RESET handshake failed %d; escalating\n", ret);
+			/*
+			 * Quarantine the current incarnation before issuing CLOSE.
+			 * This preserves the same publish-before-restart ordering used
+			 * by the generic recovery path.
+			 */
+			esp_schedule_fw_reset_recovery(adapter);
 			esp_request_firmware_restart(adapter);
-			set_bit(ESP_FW_RESET_EXPECTED, &adapter->state_flags);
 			atomic_set(&sdio_need_counter_rebase, 1);
 			return ret;
 		}
@@ -1223,11 +1230,33 @@ static int init_context(struct esp_sdio_context *context)
 		return -EINVAL;
 	}
 
-	/* Cached host credits belong to one firmware/physical binding only. */
+	/* Cached host credits belong to one firmware/physical binding only.
+	 * Function enumeration can race a peripheral that is just becoming ready,
+	 * so tolerate a few transient register-read failures before refusing probe. */
 	sdio_buf_available = 0;
-	ret = get_firmware_data(context);
-	if (ret)
-		return ret;
+	{
+		int attempt;
+
+		for (attempt = 0; attempt < ESP_SDIO_PROBE_IO_RETRIES; attempt++) {
+			ret = get_firmware_data(context);
+			if (!ret)
+				break;
+			esp_warn("Initial SDIO baseline failed %d (attempt %d/%d)\n",
+				 ret, attempt + 1, ESP_SDIO_PROBE_IO_RETRIES);
+			if (attempt + 1 < ESP_SDIO_PROBE_IO_RETRIES)
+				msleep(20);
+		}
+	}
+	if (ret) {
+		/*
+		 * Keep the enumerated function bound. The recovery worker can
+		 * re-enable the function and establish the first safe baseline;
+		 * aborting probe here would leave no automatic retry path.
+		 */
+		esp_warn("Initial SDIO baseline unavailable; deferring baseline to transport recovery\n");
+		atomic_set(&sdio_need_counter_rebase, 1);
+		ret = 0;
+	}
 
 	context->adapter = esp_get_adapter();
 
@@ -2325,19 +2354,47 @@ static int esp_probe(struct sdio_func *func,
 	context->adapter->dev = &func->dev;
 	clear_bit(ESP_TRANSPORT_REMOVING, &context->adapter->state_flags);
 	atomic_set(&context->adapter->state, ESP_CONTEXT_RX_READY);
-	ret = generate_slave_intr(context, BIT(ESP_OPEN_DATA_PATH));
-	if (ret) {
-		esp_err("Failed to open data path on slave: %d\n", ret);
-		kthread_stop(tx_thread);
-		tx_thread = NULL;
-		cancel_delayed_work_sync(&context->rx_len_retry_work);
-		deinit_sdio_func(context);
-		esp_sdio_free_dma_bufs(context);
-		context->func = NULL;
-		return ret;
+
+	if (atomic_read(&sdio_need_counter_rebase)) {
+		/*
+		 * No firmware session has been accepted yet, and the initial
+		 * producer/token baseline could not be read reliably. Ordinary
+		 * transport resync can otherwise loop on OPEN forever against a
+		 * stale live firmware session. Reincarnate firmware explicitly and
+		 * start host counters from the reset baseline.
+		 */
+		esp_warn("Initial SDIO baseline unavailable; restarting firmware for a clean baseline\n");
+		context->rx_byte_count = 0;
+		context->tx_buffer_count = 0;
+		sdio_buf_available = 0;
+		esp_schedule_fw_reset_recovery(context->adapter);
+		esp_request_firmware_restart(context->adapter);
+		return 0;
 	}
 
-	esp_schedule_recovery(context->adapter, ESP_FW_RECOVERY_WATCHDOG_MS, false, false);
+	ret = generate_slave_intr(context, BIT(ESP_OPEN_DATA_PATH));
+	if (ret) {
+		/*
+		 * OPEN may have reached firmware even when the host observes an I/O
+		 * error. Before the first accepted boot TLV there is no established
+		 * session to preserve, so restart firmware rather than repeatedly
+		 * probing an ambiguous/stale session.
+		 */
+		esp_err("Initial OPEN_DATA_PATH failed %d; restarting firmware\n",
+			ret);
+		context->rx_byte_count = 0;
+		context->tx_buffer_count = 0;
+		sdio_buf_available = 0;
+		esp_schedule_fw_reset_recovery(context->adapter);
+		esp_request_firmware_restart(context->adapter);
+		return 0;
+	}
+
+	/* Wait for the boot TLV without publishing recovery/quarantine state.
+	 * If firmware is left in an old session after an unclean host restart,
+	 * the watchdog escalates to CLOSE_DATA_PATH and a fresh incarnation. */
+	schedule_delayed_work(&context->adapter->fw_recovery_work,
+			      msecs_to_jiffies(ESP_FW_RECOVERY_WATCHDOG_MS));
 	esp_dbg("ESP SDIO probe completed\n");
 
 	return ret;
@@ -2517,6 +2574,11 @@ int esp_init_interface_layer(struct esp_adapter *adapter, u32 speed)
 	adapter->if_context = &sdio_context;
 	adapter->if_ops = &if_ops;
 	sdio_context.adapter = adapter;
+	if (speed > ESP_SDIO_MAX_CLK_MHZ) {
+		esp_warn("Requested SDIO clock %u MHz exceeds supported maximum %u MHz; capping\n",
+			 speed, ESP_SDIO_MAX_CLK_MHZ);
+		speed = ESP_SDIO_MAX_CLK_MHZ;
+	}
 	sdio_context.sdio_clk_mhz = speed;
 	sdio_buf_available = 0;
 

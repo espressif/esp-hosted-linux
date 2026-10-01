@@ -1,168 +1,365 @@
 #!/usr/bin/env bash
 
 # SPDX-License-Identifier: Apache-2.0
-# Copyright 2015-2021 Espressif Systems (Shanghai) PTE LTD
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright 2015-2026 Espressif Systems (Shanghai) CO LTD
 
-RESETPIN=""
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+
+IF_TYPE="sdio"
 BT_INIT_SET="0"
 RAW_TP_MODE="0"
-IF_TYPE="sdio"
-MODULE_NAME="esp32_${IF_TYPE}.ko"
-RPI_RESETPIN=6
+AP_SUPPORT="0"
 OTA_FILE=""
+
+# Historical Raspberry Pi wiring defaults. Override these for another board.
+SPI_RESETGPIO="6"
+SPI_HANDSHAKEGPIO="22"
+SPI_DATAREADYGPIO="27"
+SPI_MAX_FREQUENCY="30000000"
+SPI_CS_CHANGE="0"
+
+if [ "$(id -u)" -eq 0 ]; then
+    SUDO=()
+else
+    SUDO=(sudo)
+fi
+
+run_root()
+{
+    "${SUDO[@]}" "$@"
+}
+
+die()
+{
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+module_loaded()
+{
+    grep -q "^$1 " /proc/modules 2>/dev/null
+}
+
+overlay_id()
+{
+    local name="$1"
+
+    command -v dtoverlay >/dev/null 2>&1 || return 1
+    dtoverlay -l 2>/dev/null |
+        awk -F: -v name="$name" '
+            {
+                id=$1
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
+                rest=$2
+                sub(/^[[:space:]]+/, "", rest)
+                split(rest, fields, /[[:space:]]+/)
+                if (fields[1] == name) {
+                    print id
+                    exit
+                }
+            }'
+}
+
+remove_runtime_overlay()
+{
+    local name="$1"
+    local id=""
+
+    id="$(overlay_id "$name" || true)"
+    if [ -n "$id" ]; then
+        echo "Removing runtime overlay $name (id $id)"
+        run_root dtoverlay -r "$id"
+    fi
+}
+
+require_gpio()
+{
+    local name="$1"
+    local value="$2"
+
+    case "$value" in
+        ''|*[!0-9]*)
+            die "$name must be a BCM GPIO number"
+            ;;
+    esac
+
+    [ "$value" -le 53 ] || die "$name GPIO$value is outside BCM GPIO0..53"
+
+    # SPI0 itself owns GPIO7..11 on the classic Raspberry Pi header.
+    if [ "$value" -ge 7 ] && [ "$value" -le 11 ]; then
+        die "$name GPIO$value conflicts with SPI0"
+    fi
+}
+
+wait_for_spi_bind()
+{
+    local retries=20
+    local driver=""
+
+    while [ "$retries" -gt 0 ]; do
+        if [ -L /sys/bus/spi/devices/spi0.0/driver ]; then
+            driver="$(basename "$(readlink -f /sys/bus/spi/devices/spi0.0/driver)")"
+            [ "$driver" = "esp_spi" ] && return 0
+        fi
+        sleep 0.25
+        retries=$((retries - 1))
+    done
+    return 1
+}
 
 bringup_network_interface()
 {
-	if [ "$1" != "" ] ; then
-		if [ `ifconfig -a | grep $1 | wc -l` != "0" ]; then
-			sudo ifconfig $1 up
-		fi
-	fi
+    local retries=20
+
+    while [ "$retries" -gt 0 ]; do
+        if [ -e /sys/class/net/wlan0 ]; then
+            if command -v ip >/dev/null 2>&1; then
+                run_root ip link set wlan0 up
+            elif command -v ifconfig >/dev/null 2>&1; then
+                run_root ifconfig wlan0 up
+            fi
+            return 0
+        fi
+        sleep 0.25
+        retries=$((retries - 1))
+    done
+
+    return 1
+}
+
+build_driver()
+{
+    local arch_found
+    local -a make_args
+
+    if [ "$(getconf LONG_BIT)" = "32" ]; then
+        arch_found="arm"
+    else
+        arch_found="arm64"
+    fi
+
+    make_args=(
+        "target=$IF_TYPE"
+        "KERNEL=/lib/modules/$(uname -r)/build"
+        "ARCH=$arch_found"
+    )
+
+    if [ "$AP_SUPPORT" = "1" ]; then
+        make_args+=("CONFIG_AP_SUPPORT=y")
+    fi
+
+    echo "Building for $IF_TYPE protocol"
+    make -j8 "${make_args[@]}"
+
+    if [ "$IF_TYPE" = "spi" ]; then
+        command -v dtc >/dev/null 2>&1 || die "dtc is required for SPI Device Tree setup"
+        command -v dtoverlay >/dev/null 2>&1 || die "dtoverlay is required for SPI Device Tree setup"
+        make spi-dtbo
+    fi
+}
+
+unload_esp_modules()
+{
+    # rpi_init.sh is a bring-up helper: replace whichever ESP transport is
+    # currently loaded instead of maintaining rollback/provenance state.
+    if module_loaded esp32_sdio; then
+        echo "Unloading esp32_sdio"
+        run_root rmmod esp32_sdio
+    fi
+    if module_loaded esp32_spi; then
+        echo "Unloading esp32_spi"
+        run_root rmmod esp32_spi
+    fi
+}
+
+setup_spi()
+{
+    local -a module_args
+
+    require_gpio resetgpio "$SPI_RESETGPIO"
+    require_gpio handshakegpio "$SPI_HANDSHAKEGPIO"
+    require_gpio datareadygpio "$SPI_DATAREADYGPIO"
+
+    if [ "$SPI_RESETGPIO" = "$SPI_HANDSHAKEGPIO" ] ||
+       [ "$SPI_RESETGPIO" = "$SPI_DATAREADYGPIO" ] ||
+       [ "$SPI_HANDSHAKEGPIO" = "$SPI_DATAREADYGPIO" ]; then
+        die "resetgpio, handshakegpio and datareadygpio must be distinct"
+    fi
+
+    case "$SPI_MAX_FREQUENCY" in
+        ''|*[!0-9]*) die "max_frequency must be an integer in Hz" ;;
+    esac
+    [ "$SPI_MAX_FREQUENCY" -gt 0 ] || die "max_frequency must be greater than zero"
+    [ "$SPI_MAX_FREQUENCY" -le 40000000 ] ||
+        die "max_frequency exceeds the ESP-Hosted SPI 40 MHz limit"
+
+    case "$SPI_CS_CHANGE" in
+        0|1) ;;
+        *) die "spi_cs_change must be 0 or 1" ;;
+    esac
+
+    # Remove only overlays owned by this helper. Do not touch the Raspberry Pi
+    # SDIO boot overlay: custom SPI control GPIOs can coexist with it.
+    remove_runtime_overlay esp32-spi
+    remove_runtime_overlay spidev_disabler
+
+    module_args=("raw_tp_mode=$RAW_TP_MODE" "spi_cs_change=$SPI_CS_CHANGE")
+    if [ -n "$OTA_FILE" ]; then
+        module_args+=("ota_file=$OTA_FILE")
+    fi
+
+    # Register our freshly built driver before creating the DT child so udev
+    # cannot win a modalias race with an older installed esp32_spi.ko.
+    run_root insmod ./esp32_spi.ko "${module_args[@]}"
+
+    echo "Disabling stock spidev0 Device Tree node"
+    run_root dtoverlay -d "$SCRIPT_DIR" spidev_disabler
+
+    echo "Applying ESP SPI Device Tree overlay:"
+    echo "  reset=$SPI_RESETGPIO handshake=$SPI_HANDSHAKEGPIO data-ready=$SPI_DATAREADYGPIO max-frequency=$SPI_MAX_FREQUENCY"
+    run_root dtoverlay -d "$SCRIPT_DIR/overlays" esp32-spi         "resetgpio=$SPI_RESETGPIO"         "handshakegpio=$SPI_HANDSHAKEGPIO"         "datareadygpio=$SPI_DATAREADYGPIO"         "max_frequency=$SPI_MAX_FREQUENCY"
+
+    # Normally the driver core binds immediately when the DT child appears.
+    # Give it a short chance, then issue one explicit probe for bring-up kernels
+    # where auto-probe was disabled externally.
+    if ! wait_for_spi_bind; then
+        if [ -e /sys/bus/spi/devices/spi0.0 ] &&
+           [ -e /sys/bus/spi/drivers_probe ]; then
+            printf 'spi0.0\n' | run_root tee /sys/bus/spi/drivers_probe >/dev/null || true
+        fi
+    fi
+
+    wait_for_spi_bind ||
+        die "esp32_spi loaded but spi0.0 did not bind; check dmesg for the probe error"
+}
+
+setup_sdio()
+{
+    local -a module_args
+
+    module_args=("raw_tp_mode=$RAW_TP_MODE")
+    if [ -n "$OTA_FILE" ]; then
+        module_args+=("ota_file=$OTA_FILE")
+    fi
+
+    run_root insmod ./esp32_sdio.ko "${module_args[@]}"
 }
 
 wlan_init()
 {
-    if [ `lsmod | grep esp32 | wc -l` != "0" ]; then
-        if [ `lsmod | grep esp32_sdio | wc -l` != "0" ]; then
-            sudo rmmod esp32_sdio &> /dev/null
-            else
-            sudo rmmod esp32_spi &> /dev/null
-        fi
-    fi
+    build_driver
+    unload_esp_modules
 
-    if [ "$CUSTOM_OPTS" != "" ] ; then
-        echo "Adding $CUSTOM_OPTS"
-    fi
-
-    # For Linux other than Raspberry Pi, Please point
-    # CROSS_COMPILE -> <Toolchain-Path>/bin/arm-linux-gnueabihf-
-    # KERNEL        -> Place where kernel is checked out and built
-    # ARCH          -> Architecture
-    # make -j8 target=$IF_TYPE CROSS_COMPILE=/usr/bin/arm-linux-gnueabihf- KERNEL="/lib/modules/$(uname -r)/build" \
-    # ARCH=arm64
-
-    if [ "$AP_SUPPORT" = "1" ]; then
-        echo "Setting CONFIG_AP_SUPPORT to y"
-        CUSTOM_OPTS="${CUSTOM_OPTS} CONFIG_AP_SUPPORT=y"
-    fi
-
-    # Populate your arch if not populated correctly.
-    arch_num_bits=$(getconf LONG_BIT)
-    if [ "$arch_num_bits" = "32" ] ; then arch_found="arm"; else arch_found="arm64"; fi
-
-    make -j8 target=$IF_TYPE KERNEL="/lib/modules/$(uname -r)/build" ARCH=$arch_found $CUSTOM_OPTS \
-
-    if [ "$RESETPIN" = "" ] ; then
-        #By Default, BCM6 is GPIO on host. use resetpin=6
-        sudo insmod $MODULE_NAME resetpin=$RPI_RESETPIN raw_tp_mode=$RAW_TP_MODE ota_file=$OTA_FILE
+    if [ "$IF_TYPE" = "spi" ]; then
+        setup_spi
     else
-        #Use resetpin value from argument
-        sudo insmod $MODULE_NAME $RESETPIN raw_tp_mode=$RAW_TP_MODE ota_file=$OTA_FILE
+        setup_sdio
     fi
 
-    if [ `lsmod | grep esp32 | wc -l` != "0" ]; then
-        echo "esp32 module inserted "
-		sleep 4
-		bringup_network_interface "wlan0"
-
-        echo "ESP32 host init successfully completed"
+    if ! bringup_network_interface; then
+        echo "WARNING: module loaded but wlan0 did not appear yet" >&2
+        echo "Check dmesg for firmware/transport bring-up logs." >&2
     fi
+
+    echo "ESP32 host init completed"
 }
 
 bt_init()
 {
-    sudo pinctrl set 15 a0 pu
-    sudo pinctrl set 14 a0 pu
-    if [ "$BT_INIT_SET" = "4" ] ; then
-        sudo pinctrl set 16 a3 pu
-        sudo pinctrl set 17 a3 pu
+    run_root pinctrl set 15 a0 pu
+    run_root pinctrl set 14 a0 pu
+    if [ "$BT_INIT_SET" = "4" ]; then
+        run_root pinctrl set 16 a3 pu
+        run_root pinctrl set 17 a3 pu
     fi
 }
 
 usage()
 {
-    echo "This script prepares RPI for WLAN and BT/BLE operation over ESP32 device."
-    echo "\nUsage: ./rpi_init.sh [arguments]"
-    echo "\nArguments are optional and are as below:"
-    echo "  spi:           sets ESP32<->RPI communication over SPI"
-    echo "  sdio:          sets ESP32<->RPI communication over SDIO"
-    echo "  btuart:        Set GPIO pins on RPI for HCI UART operations with TX, RX, CTS, RTS (defaulted to option btuart_4pins)"
-    echo "  btuart_2pins:  Set GPIO pins on RPI for HCI UART operations with only TX & RX pins configured (only for ESP32-C2/C6)"
-    echo "  resetpin=6:   Set GPIO pins on RPI connected to EN pin of ESP32, used to reset ESP32 (default: 6 for BCM6)"
-    echo "  ap_support:     Enable access point support"
-    echo "\nExample:"
-    echo "  - Prepare RPi for WLAN operation on SDIO. SDIO is default if no interface mentioned."
-    echo "    # ./rpi_init.sh or ./rpi_init.sh sdio"
-    echo "\n  - Use SPI for host<->ESP32 communication. SDIO is default if no interface mentioned."
-    echo "    # ./rpi_init.sh spi"
-    echo "\n  - Prepare RPi for BT/BLE operation over UART and WLAN over SDIO/SPI."
-    echo "    # ./rpi_init.sh sdio btuart or ./rpi_init.sh spi btuart"
-    echo "\n  - Use GPIO pin BCM5 (GPIO29) for reset."
-    echo "    # ./rpi_init.sh resetpin=5"
-    echo "\n  - Enable access point support."
-    echo "    # ./rpi_init.sh <transport> ap_support"
-    echo "\n  - Do btuart, using GPIO pin BCM5 (GPIO29) for reset over SDIO/SPI."
-    echo "    # ./rpi_init.sh sdio btuart resetpin=5 or ./rpi_init.sh spi btuart resetpin=5"
-    echo "\n  - set the OTA file path"
-    echo "   # ./rpi_init.sh spi ota_file=/path/to/ota_file"
+    cat <<'EOF'
+This script prepares a Raspberry Pi for ESP-Hosted bring-up.
+
+Usage:
+  ./rpi_init.sh [spi|sdio] [options]
+
+Common options:
+  btuart | btuart_4pins
+  btuart_2pins
+  rawtp_host_to_esp
+  rawtp_esp_to_host
+  ap_support
+  ota_file=/path/to/file
+
+SPI Device Tree options:
+  resetgpio=N           ESP EN/reset BCM GPIO (default: 6)
+  handshakegpio=N       ESP handshake BCM GPIO (default: 22)
+  datareadygpio=N       ESP data-ready BCM GPIO (default: 27)
+  max_frequency=N       spi-max-frequency in Hz (default: 30000000)
+  spi_cs_change=0|1     Optional controller workaround (default: 0)
+
+Legacy:
+  resetpin=N            Alias for resetgpio=N when using SPI
+
+Examples:
+  ./rpi_init.sh sdio
+  ./rpi_init.sh spi
+  ./rpi_init.sh spi handshakegpio=5 datareadygpio=12
+  ./rpi_init.sh spi resetgpio=6 handshakegpio=5 datareadygpio=12
+EOF
 }
 
 parse_arguments()
 {
-    while [ "$1" != "" ]; do
-        case $1 in
-            --help | -h )
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --help|-h)
                 usage
                 exit 0
                 ;;
-            sdio)
-                IF_TYPE=$1
+            spi|sdio)
+                IF_TYPE="$1"
                 ;;
-            spi)
-                IF_TYPE=$1
+            resetgpio=*)
+                SPI_RESETGPIO="${1#*=}"
                 ;;
             resetpin=*)
-                echo "Received Option: $1"
-                RESETPIN=$1
+                SPI_RESETGPIO="${1#*=}"
                 ;;
-            btuart | btuart_4pins | btuart_4pin)
-                echo "Configure Host BT UART with 4 pins, RX, TX, CTS, RTS"
+            handshakegpio=*)
+                SPI_HANDSHAKEGPIO="${1#*=}"
+                ;;
+            datareadygpio=*)
+                SPI_DATAREADYGPIO="${1#*=}"
+                ;;
+            max_frequency=*)
+                SPI_MAX_FREQUENCY="${1#*=}"
+                ;;
+            spi_cs_change=*)
+                SPI_CS_CHANGE="${1#*=}"
+                ;;
+            btuart|btuart_4pins|btuart_4pin)
                 BT_INIT_SET="4"
                 ;;
-            btuart_2pins | btuart_2pin)
-                echo "Configure Host BT UART with 2 pins, RX & TX"
+            btuart_2pins|btuart_2pin)
                 BT_INIT_SET="2"
                 ;;
             rawtp_host_to_esp)
-                echo "Test RAW TP HOST to ESP"
                 RAW_TP_MODE="1"
                 ;;
             rawtp_esp_to_host)
-                echo "Test RAW TP ESP to HOST"
                 RAW_TP_MODE="2"
                 ;;
             ap_support)
-                echo "Enabling AP support"
                 AP_SUPPORT="1"
                 ;;
             ota_file=*)
-                echo "Recvd Option: $1"
-                OTA_FILE=${1#*=}
+                OTA_FILE="${1#*=}"
                 ;;
             *)
-                echo "$1 : unknown option"
+                echo "$1: unknown option" >&2
                 usage
                 exit 1
                 ;;
@@ -171,41 +368,13 @@ parse_arguments()
     done
 }
 
-parse_arguments $*
-if [ "$IF_TYPE" = "" ] ; then
-    echo "Error: No protocol selected"
-    usage
-    exit 1
-else
-    echo "Building for $IF_TYPE protocol"
-    MODULE_NAME=esp32_${IF_TYPE}.ko
-fi
+parse_arguments "$@"
 
-if [ "$IF_TYPE" = "spi" ] ; then
-    rm spidev_disabler.dtbo
-    # Disable default spidev driver
-    dtc spidev_disabler.dts -O dtb > spidev_disabler.dtbo
-    sudo dtoverlay -d . spidev_disabler
-fi
+run_root modprobe bluetooth
+run_root modprobe cfg80211
 
-if [ `lsmod | grep bluetooth | wc -l` = "0" ]; then
-    echo "bluetooth module inserted"
-    sudo modprobe bluetooth
-fi
+wlan_init
 
-if [ `lsmod | grep cfg80211 | wc -l` = "0" ]; then
-    echo "cfg80211 module inserted"
-    sudo modprobe cfg80211
-fi
-
-if [ `lsmod | grep bluetooth | wc -l` != "0" ]; then
-    wlan_init
-fi
-
-if [ "$BT_INIT_SET" != "0" ] ; then
+if [ "$BT_INIT_SET" != "0" ]; then
     bt_init
 fi
-
-
-#alias load_module_sdio='sudo modprobe bluetooth; sudo modprobe cfg80211; sudo insmod ./esp32_sdio.ko resetpin=6; sleep 4;sudo ifconfig wlan0 up'
-#alias load_module_spi='sudo dtoverlay spidev_disabler; sudo modprobe bluetooth; sudo modprobe cfg80211; sudo insmod ./esp32_spi.ko resetpin=6; sleep 4;sudo ifconfig wlan0 up'

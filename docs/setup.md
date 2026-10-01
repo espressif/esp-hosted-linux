@@ -2,7 +2,7 @@
 
 ## 1 Setup Introduction
 
-- In this setup, ESP board acts as a SDIO/SPI/UART peripheral and provides Wi-Fi and/or Bluetooth capabilities to host. 
+- In this setup, ESP board acts as a SDIO/SPI/UART peripheral and provides Wi-Fi and/or Bluetooth capabilities to host.
 - This document explains ESP-Hosted setup and usage.:
 - [1. Software setup](#1-software-setup)
     + [1.1 Host software setup](#11-host-software-setup)
@@ -18,7 +18,7 @@
 - [6. Manually loading and unloading the Kernel Module](#6-manually-loading-and-unloading-the-kernel-module)
 
 # 1. Software setup
-* This section briefly explains software setup required for esp hosted device and host. Esp hosted device setup is divided into two parts 
+* This section briefly explains software setup required for esp hosted device and host. Esp hosted device setup is divided into two parts
     * [Host software setup](#11-host-software-setup) This section provides information about installation of required packages for host device
     * [ESP Quick start guide](#12-esp-quick-start-guide) This section briefly explains ESP-Hosted setup. One can refer this guide to quickly prepare and test ESP-Hosted solution
     * [ESP Comprehensive guide](#13-esp-comprehensive-guide) This section provides in depth information about ESP-Hosted setup, available customization options etc.
@@ -94,12 +94,12 @@ Make sure that host machine is equipped with following:
     $ ./setup.sh
     ```
 * This will clone the required esp-idf repository and will setup it up for esp hosted firmware
-* Set-Up the esp firmware build environment using 
+* Set-Up the esp firmware build environment using
     ```sh
     $ cd esp/esp_driver/esp-idf
     $ . ./esp-idf/export.sh
     # Optionally, You can add alias for this command in ~/.bashrc for later use
-    ``` 
+    ```
 * To build, flash and monitor firmware
     ```sh
     $ cd esp/esp_driver/network_adapter
@@ -116,7 +116,7 @@ Windows](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started
 Prompt](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/windows-setup.html#using-the-command-prompt) to execute `esp/esp_driver/setup.ps1`. It will setup `esp-idf` as a submodule to be used by `network_adapter`.
 
 > [!CAUTION]
-> 
+>
 > This command will revert all your local changes. Stash the changes if still needed.
 
 - Setup compiling environment by running `export.ps1` in `esp/esp_driver/esp-idf`
@@ -134,7 +134,7 @@ directory
 
 # 2. Transport layer configuration
 
-* This section will provide all required configuration to be made for required desired transport layer. 
+* This section will provide all required configuration to be made for required desired transport layer.
 * Hardware requirements
     1) 8-12 jumper wires of length < 10cm.
     2) ESP32, ESP32 C3, ESP32 S3, ESP32 C2 board.
@@ -160,9 +160,9 @@ directory
         | 21 | IO12 | IO13 | IO2 | IO2 | MISO |
         | 19 | IO13 | IO11 | IO7 | IO7 | MOSI |
         | 25 | GND | GND | GND | GND | Ground |
-        | 15 | IO2 | IO2 | IO3 | IO3 | Handshake |
-        | 13 | IO4 | IO4 | IO4 | IO4 | Data Ready |
-        | 31 | EN  | RST | RST | RST | ESP32 Reset |
+        | 15 | IO2 | IO2 | IO3 | IO3 | Handshake (BCM GPIO22) |
+        | 13 | IO4 | IO4 | IO4 | IO4 | Data Ready (BCM GPIO27) |
+        | 31 | EN  | RST | RST | RST | ESP Reset (BCM GPIO6) |
     * Raspberry-Pi pinout can be found [here!](https://pinout.xyz/pinout/spi)
     * Optionally, Add external pull-up of min 10k Ohm on CS line just to prevent bus floating
     * In case of ESP32-S3, For avoidance of doubt, You can power using [UART port](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/hw-reference/esp32s3/user-guide-devkitc-1.html#description-of-components)
@@ -178,19 +178,25 @@ directory
         core_freq_min=250
         ```
     * Please reboot Raspberry-Pi after changing this file.
+    * If the Raspberry Pi was previously configured for ESP-Hosted SDIO with `dtoverlay=sdio,poll_once=off`, remove or comment that overlay and reboot before using the default SPI wiring. The SDIO overlay muxes GPIO22-27 to the MMC controller, which conflicts with the default SPI handshake (GPIO22) and data-ready (GPIO27) signals. Alternatively, rewire those SPI control signals and pass non-conflicting `handshakegpio=`/`datareadygpio=` values to `rpi_init.sh spi`.
+    * The SPI host driver binds to an `espressif,esp32-spi` Device Tree node. The node must provide `reset-gpios`, `handshake-gpios`, `data-ready-gpios`, and `spi-max-frequency`.
+    * The Raspberry Pi runtime overlay example is in [`host/overlays/README.md`](../host/overlays/README.md). To preserve compatibility with the historical ESP-Hosted wiring, the default example uses reset=BCM6, handshake=BCM22, and data-ready=BCM27.
+    * The supplied runtime overlay uses the classic Raspberry Pi `brcm,*` pinctrl binding and is intended for that Raspberry Pi GPIO controller. Use a validated RP1/base Device Tree description on Raspberry Pi 5.
 * Setting up the environment and getting started
-    * Host environment setup  
+    * Host environment setup
         * Execute following commands in root directory of cloned ESP-Hosted repository on Raspberry-Pi
             ```sh
             $ cd host/
             $ bash rpi_init.sh spi <ap_support>
+            $ bash rpi_init.sh spi handshakegpio=5 datareadygpio=12
             ```
          - add `ap_support` if you want to use interface as access point.
+         - `resetgpio=`, `handshakegpio=`, `datareadygpio=` and `max_frequency=` are applied directly to the runtime SPI Device Tree overlay. This allows SPI control GPIOs such as BCM5/BCM12 to coexist with an SDIO pinmux on BCM22-27.
         * This script compiles and loads host driver on Raspberry-Pi. It also creates network interface `wlanX` which is used as a control interface for Wi-Fi on ESP peripheral
 
         * Follow these steps to [Manually load the Kernel Module](6-manually-loading-and-unloading-the-kernel-module)
     * For esp firmware if you are using [ESP Quick start guide](#12-esp-quick-start-guide)
-        * Please flash the required binaries using with command mentioned in `flashing_cmd.txt` within desired transport configuration folder as explained in [ESP Quick start guide](#12-esp-quick-start-guide).  
+        * Please flash the required binaries using with command mentioned in `flashing_cmd.txt` within desired transport configuration folder as explained in [ESP Quick start guide](#12-esp-quick-start-guide).
         * Use minicom or any similar terminal emulator with baud rate 115200 to fetch esp side logs on UART
             ```sh
             $ minicom -D <serial_port>
@@ -246,7 +252,6 @@ directory
         | 16 | IO15+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/sd_pullup_requirements.html) | IO18+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c6/api-reference/peripherals/sd_pullup_requirements.html) | IO10+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c5/api-reference/peripherals/sd_pullup_requirements.html) | IO25+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c61/api-reference/peripherals/sd_pullup_requirements.html) | CMD |
         | 18 | IO2+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/sd_pullup_requirements.html) | IO20+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c6/api-reference/peripherals/sd_pullup_requirements.html) | IO8+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c5/api-reference/peripherals/sd_pullup_requirements.html) | IO27+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c61/api-reference/peripherals/sd_pullup_requirements.html) | DAT0 |
         | 22 | IO4+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/sd_pullup_requirements.html) | IO21+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c6/api-reference/peripherals/sd_pullup_requirements.html) | IO7+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c5/api-reference/peripherals/sd_pullup_requirements.html) | IO28+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c61/api-reference/peripherals/sd_pullup_requirements.html) | DAT1 |
-        | 31 | EN  | ESP Reset | ESP Reset | ESP Reset | Reset |
         | 37 | IO12+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/sd_pullup_requirements.html)| IO22+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c6/api-reference/peripherals/sd_pullup_requirements.html) | IO14+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c5/api-reference/peripherals/sd_pullup_requirements.html) | IO22+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c61/api-reference/peripherals/sd_pullup_requirements.html) | DAT2 |
         | 39 | GND | GND | GND | GND | GND |
     * Raspberry-Pi pinout can be found [here!](https://pinout.xyz/pinout/sdio)
@@ -260,8 +265,9 @@ directory
         dtoverlay=disable-bt
         ```
     * Please reboot Raspberry-Pi after changing this file.
+    * ESP-Hosted SDIO does not require or accept a `resetpin=` module argument. Once the SDIO function has enumerated, bring-up and recovery use the SDIO control protocol (`OPEN_DATA_PATH`, `CLOSE_DATA_PATH`, and the in-band SDIO reset handshake). If a board requires host-controlled reset/power to make the SDIO function enumerate or to recover a device that no longer enumerates, model that in the MMC/platform Device Tree (for example with the platform's MMC power-sequence/reset mechanism).
 * Setting up the environment and getting started
-    * Host environment setup  
+    * Host environment setup
         * Execute following commands in root directory of cloned ESP-Hosted repository on Raspberry-Pi
             ```sh
             $ cd host/
@@ -272,7 +278,7 @@ directory
 
         * Follow these steps to [Manually load the Kernel Module](6-manually-loading-and-unloading-the-kernel-module)
     * For esp firmware if you are using [ESP Quick start guide](#12-esp-quick-start-guide)
-        * Please flash the required binaries using with command mentioned in `flashing_cmd.txt` within desired transport configuration folder as explained in [ESP Quick start guide](#12-esp-quick-start-guide).  
+        * Please flash the required binaries using with command mentioned in `flashing_cmd.txt` within desired transport configuration folder as explained in [ESP Quick start guide](#12-esp-quick-start-guide).
         * Use minicom or any similar terminal emulator with baud rate 115200 to fetch esp side logs on UART
             ```sh
             $ minicom -D <serial_port>
@@ -327,12 +333,12 @@ directory
 * Wi-fi over SDIO and Bluetooth over UART
     * Supported targets **ESP32, ESP32C5, ESP32C6, ESP32C61**
     * Please follows these steps first to setup esp device in SDIO mode [SDIO configuration](#22-sdio-configuration)
-        
+
 * Hardware Uart setup
-    * **Pin Connections**  
+    * **Pin Connections**
     * Four line setup
         | Raspberry-Pi Pin Function | Raspberry-Pi Pin | ESP32 | ESP32-S3 | ESP32-C3 | ESP32 Pin Function |
-        |:-------:|:--------:|:---------:|:--------:|:--------:|:--------:| 
+        |:-------:|:--------:|:---------:|:--------:|:--------:|:--------:|
         | RX | 10 | IO5 | IO17 | IO5 | TX |
         | TX | 8 | IO18 | IO18 | IO18 | RX |
         | CTS | 36 | IO19 | IO19 | IO19 | RTS |
@@ -375,7 +381,7 @@ directory
             ```
     * Please reboot Raspberry-Pi after changing this file.
 * Setting up the environment and getting started
-    * Host environment setup  
+    * Host environment setup
         * Execute following commands in root directory of cloned ESP-Hosted repository on Raspberry-Pi
             ```sh
             $ cd host/
@@ -388,7 +394,7 @@ directory
         - For ESP32-C2, 2 pin UART (TX & RX only) is supported. So `btuart_2pins` should be used for ESP32-C2.
         - For other chipsets, `btuart` should be used, where 4 pin UART (TX, RX, CTS, RTS) is used.
     * For esp firmware if you are using [ESP Quick start guide](#12-esp-quick-start-guide)
-        * Please flash the required binaries using with command mentioned in `flashing_cmd.txt` within desired transport configuration folder as explained in [ESP Quick start guide](#12-esp-quick-start-guide).  
+        * Please flash the required binaries using with command mentioned in `flashing_cmd.txt` within desired transport configuration folder as explained in [ESP Quick start guide](#12-esp-quick-start-guide).
         * Use minicom or any similar terminal emulator with baud rate 115200 to fetch esp side logs on UART
             ```sh
             $ minicom -D <serial_port>
@@ -503,24 +509,26 @@ Once the kernel modules `esp32_sdio.ko` or `esp32_spi.ko` are built, they can be
 
 | Parameter     | Description                                                  |
 | ------------- | ------------------------------------------------------------ |
-| `resetpin`    | GPIO pin used to reset the ESP peripheral                    |
-| `clockspeed`  | Clock frequency in MHz (max 50 for SDIO, 40 for SPI)         |
+| `clockspeed`  | Clock frequency in MHz (max 50 for SDIO; SPI is DT-capped)   |
 | `raw_tp_mode` | Enables raw throughput mode to measure transport performance |
 | `ota_file`    | Path to the firmware binary for updating the ESP             |
+| `spi_cs_change` | SPI only: enable Linux cs_change semantics on single-transfer messages for controllers that need the legacy workaround |
 
 **Notes:**
 
-* `resetpin` is **mandatory**.
-* `clockspeed` is **optional**. If omitted:
+* Reset is transport-owned: SPI uses the required Device Tree `reset-gpios` descriptor. SDIO recovery is in-band after the SDIO function enumerates; any pre-enumeration board reset/power sequencing belongs to the MMC/platform Device Tree rather than a module GPIO parameter.
+* Migration from older helper scripts: `rpi_init.sh spi resetpin=N` is accepted as an alias for `resetgpio=N`. It has no effect on SDIO. Direct `insmod` of either new module does **not** accept `resetpin=`; SPI uses Device Tree and SDIO uses in-band recovery after enumeration.
+* `clockspeed` is **optional** and is consumed only when the module/transport is initialized; it is exposed read-only at runtime. Reload the module to change it. If omitted:
 
-  * SDIO defaults to 25–50 MHz as per device tree.
-  * SPI defaults to 10 MHz.
-  * Ensure value is ≤50 MHz for SDIO, and does not exceed the device tree setting.
+  * SDIO uses the controller/device-tree clock policy.
+  * SPI starts at 10 MHz.
+  * SPI clock changes are capped by the node's `spi-max-frequency` value and the driver's 40 MHz protocol maximum.
 * `raw_tp_mode` is **optional** and intended **only for testing the transport layer throughput**. It bypasses the protocol stack and sends raw DAPA frames directly between the host and ESP. Useful for stress testing or evaluating performance limits:
 
   * `rawtp_host_to_esp`: Sends frames from Host → ESP.
   * `rawtp_esp_to_host`: Sends frames from ESP → Host.
 * `ota_file` is **optional**. When specified, it triggers a firmware update on the ESP. After a successful update, the ESP reboots and reconnects automatically.
+* `spi_cs_change=1` is an **optional SPI-only compatibility workaround**. On the single-transfer messages used by ESP-Hosted, Linux may keep chip select asserted until the next transfer when this flag is set. Leave it disabled unless the target controller is known to require that end-of-message behavior. With the Raspberry Pi helper, pass it as `./rpi_init.sh spi spi_cs_change=1`.
 
 ---
 
@@ -529,19 +537,55 @@ Once the kernel modules `esp32_sdio.ko` or `esp32_spi.ko` are built, they can be
 **For SDIO:**
 
 ```bash
-$ sudo insmod host/esp32_sdio.ko resetpin=6
+$ sudo insmod host/esp32_sdio.ko
 ```
 
 **For SPI:**
 
+On Raspberry Pi, disable SPI **binding** auto-probe for the replacement
+window, unload any currently running ESP SPI module, and preload the freshly
+built module before creating the ESP Device Tree child. The kernel still emits
+a modalias uevent when the child is created even with `drivers_autoprobe=0`;
+preloading the intended module prevents an older installed copy from being
+auto-loaded by udev/modprobe first:
+
 ```bash
-$ sudo insmod host/esp32_spi.ko resetpin=6
+$ cd host
+$ set -e
+$ dtc -@ -I dts -O dtb -o spidev_disabler.dtbo spidev_disabler.dts
+$ dtc -@ -I dts -O dtb -o overlays/esp32-spi.dtbo overlays/esp32-spi.dts
+$ old_autoprobe="$(cat /sys/bus/spi/drivers_autoprobe)"
+$ restore_autoprobe() { printf '%s\n' "$old_autoprobe" | sudo tee /sys/bus/spi/drivers_autoprobe >/dev/null; }
+$ trap restore_autoprobe EXIT
+$ printf '0\n' | sudo tee /sys/bus/spi/drivers_autoprobe >/dev/null
+$ if [ -d /sys/module/esp32_spi ]; then sudo rmmod esp32_spi; fi
+$ sudo insmod ./esp32_spi.ko
+$ sudo dtoverlay -d . spidev_disabler
+$ sudo dtoverlay -d overlays esp32-spi
+$ grep esp32-spi /sys/bus/spi/devices/spi0.0/modalias
+$ printf 'spi0.0\n' | sudo tee /sys/bus/spi/drivers_probe
+$ restore_autoprobe
+$ trap - EXIT
 ```
+
+The `rpi_init.sh` script is intentionally a bring-up/test helper. It builds
+the requested transport first, unloads a currently loaded ESP-Hosted transport,
+replaces only the runtime `esp32-spi`/`spidev_disabler` overlays when using
+SPI, loads the freshly built module, and checks that SPI binds. It does not keep
+transactional rollback/provenance state. The Raspberry Pi SDIO boot overlay is
+left alone, so it may remain active when the selected SPI control GPIOs do not
+overlap it. For example, a mating board using BCM5/BCM12 can be started with
+`./rpi_init.sh spi handshakegpio=5 datareadygpio=12`.
+
+The SPI driver supports normal Linux late/deferred probe semantics and binds
+when an `espressif,esp32-spi` device appears. The supplied Raspberry Pi
+overlay describes SPI mode 2 with the standard `spi-cpol` Device Tree
+property; other boards should describe their required CPOL/CPHA in Device Tree.
 
 You can also pass optional parameters:
 
 ```bash
-$ sudo insmod esp32_sdio.ko resetpin=6 clockspeed=40 ota_file=/path/to/firmware.bin
+$ sudo insmod esp32_sdio.ko clockspeed=40 ota_file=/path/to/firmware.bin
 ```
 
 ---

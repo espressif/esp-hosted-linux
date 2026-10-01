@@ -1,0 +1,73 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Raspberry Pi SPI Device Tree example for ESP-Hosted.
+ *
+ * Runtime loading uses a separate spidev_disabler overlay first. Keeping
+ * spidev removal separate avoids a stale spi0.0 device retaining chip-select 0
+ * during dynamic overlay application.
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2835";
+
+	fragment@0 {
+		target = <&spi0>;
+
+		__overlay__ {
+			status = "okay";
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			esp_spi: esp_spi@0 {
+				compatible = "espressif,esp32-spi";
+				reg = <0>;
+				spi-max-frequency = <30000000>;
+
+				/* ESP-Hosted default is SPI mode 2: CPOL=1, CPHA=0. */
+				spi-cpol;
+
+				/* Host -> ESP EN/reset, active low. */
+				reset-gpios = <&gpio 6 1>;
+
+				/* ESP -> host signals, active high in this example. */
+				handshake-gpios = <&gpio 22 0>;
+				data-ready-gpios = <&gpio 27 0>;
+
+				pinctrl-names = "default";
+				pinctrl-0 = <&esp_spi_pins>;
+				status = "okay";
+			};
+		};
+	};
+
+	fragment@1 {
+		target = <&gpio>;
+
+		__overlay__ {
+			esp_spi_pins: esp_spi_pins {
+				brcm,pins = <6 22 27>;
+				/*
+				 * Request safe input directions through Device Tree
+				 * pinctrl. The runtime helper deliberately does not
+				 * force these GPIO directions from userspace; pinctrl
+				 * and the driver's GPIO descriptors own the lines.
+				 */
+				brcm,function = <0 0 0>;
+				brcm,pull = <2 0 0>;
+			};
+		};
+	};
+
+	__overrides__ {
+		resetgpio = <&esp_spi>,"reset-gpios:4",
+			    <&esp_spi_pins>,"brcm,pins:0";
+		handshakegpio = <&esp_spi>,"handshake-gpios:4",
+				<&esp_spi_pins>,"brcm,pins:4";
+		datareadygpio = <&esp_spi>,"data-ready-gpios:4",
+				<&esp_spi_pins>,"brcm,pins:8";
+		max_frequency = <&esp_spi>,"spi-max-frequency:0";
+	};
+};

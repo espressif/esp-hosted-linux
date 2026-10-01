@@ -50,29 +50,6 @@ void esp_schedule_recovery(struct esp_adapter *adapter,
 void esp_schedule_transport_recovery(struct esp_adapter *adapter);
 void esp_schedule_fw_reset_recovery(struct esp_adapter *adapter);
 void esp_request_firmware_restart(struct esp_adapter *adapter);
-bool esp_host_reset_available(void);
 
-/* Legacy main.c acquires resetpin through gpio_request(..., "sysfs"). Route
- * GPIO operations through an ownership guard so a failed request cannot still
- * drive a GPIO and repeated firmware recovery does not re-request the line.
- * Non-reset GPIO labels retain native gpiolib behavior. */
-#undef gpio_request
-#undef gpio_is_valid
-#undef gpio_direction_output
-#undef gpio_direction_input
-#undef gpio_set_value
-#undef gpio_free
-#define gpio_request(_gpio, _label) \
-	esp_gpio_request_guard((_gpio), (_label))
-#define gpio_is_valid(_gpio) \
-	esp_gpio_is_valid_guard((_gpio))
-#define gpio_direction_output(_gpio, _value) \
-	esp_gpio_direction_output_guard((_gpio), (_value))
-#define gpio_direction_input(_gpio) \
-	esp_gpio_direction_input_guard((_gpio))
-#define gpio_set_value(_gpio, _value) \
-	esp_gpio_set_value_guard((_gpio), (_value))
-#define gpio_free(_gpio) \
-	esp_gpio_free_guard((_gpio))
 
 #endif
