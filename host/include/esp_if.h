@@ -19,6 +19,12 @@ struct esp_if_ops {
 	struct sk_buff* (*alloc_skb)(u32 len);
 	int (*quiesce_for_fw_reset)(struct esp_adapter *adapter);
 	int (*reinit_after_fw_reset)(struct esp_adapter *adapter);
+	/*
+	 * Request the transport-owned hardware reset, when available.
+	 * Return 0 once the request is accepted; completion is asynchronous and
+	 * is observed through the normal firmware boot/recovery path.
+	 */
+	int (*reset_target)(struct esp_adapter *adapter);
 	/* <0 error; 0 waiting for a new boot TLV; >0 existing session restored. */
 	int (*recover_transport)(struct esp_adapter *adapter);
 	/* Host caused or observed a firmware reincarnation: rebase then OPEN. */

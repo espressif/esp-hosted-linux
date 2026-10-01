@@ -11,18 +11,19 @@ As mentioned in earlier sections, Linux based ESP-Hosted solution supports Raspb
 
 ## 1.2 Peripherals and GPIOs
 
-- When you are opting Linux other than Raspberry, hardware peripherals and GPIO functions would need changes. GPIO pins for [SDIO](setup.md), [SPI](setup.md), [UART](setup.md) and resetpin would differ.
+- When you are opting Linux other than Raspberry, hardware peripheral and GPIO mappings for [SDIO](setup.md), [SPI](setup.md), and [UART](setup.md) need to match the host platform.
 
 ###### Host side
-- ResetPin GPIO
-	- You need to choose any unused GPIO for resetting ESP and configure in your SoC's Device Tree Config
+- Reset ownership
+	- SPI requires a host-controlled ESP EN/reset line described as `reset-gpios` in the SPI device node.
+	- SDIO has no `resetpin=` module parameter. After the SDIO function enumerates, firmware restart and transport reset are performed through the SDIO control protocol. If a board needs host-controlled reset/power before enumeration, provide that through MMC/platform power sequencing.
 - Peripheral GPIOs
 	- Check the pincontrol device tree blobs and verify if the correct GPIOs are in place for your expected SDIO hardware instance.
 	- SDIO GPIOs
 		- You may need to change connections from ESP to mapping pins for `SDIO_CLK`, `SDIO_CMD`, `SDIO_DAT0`, `SDIO_DAT1`, `SDIO_DAT2` and `SDIO_DAT3` from your SoC's Device Tree Pin Control.
 	- SPI GPIOs
-		- You may need to change connections from ESP to mapping pins for `SPI_ChipSelect`, `SPI_CLK`, `SPI_MISO`, `SPI_MOSI` from your SoC's Device Tree Pin Control.
-		- Additionally you need another two unused GPIOs for `SPI_Handshake` and `SPI_DataReady` new pins to be defined in your DeviceTree
+		- You may need to change connections from ESP to mapping pins for `SPI_ChipSelect`, `SPI_CLK`, `SPI_MISO`, and `SPI_MOSI` from your SoC's Device Tree pin control.
+		- Define `reset-gpios`, `handshake-gpios`, and `data-ready-gpios` in the ESP SPI device node. GPIO polarity is taken from the descriptors.
 
 ###### Slave side
 - Changing GPIOs
@@ -40,7 +41,7 @@ As mentioned in earlier sections, Linux based ESP-Hosted solution supports Raspb
 - SPI or UART peripherals
 	- Chip Select is suggested to be externally pulled
 - SDIO peripheral
-	- In general, For Most of ESP32 boards, additional external pull-up of at least 10k Ohm resistor will be required for pins CMD and DATA(DAT0-DAT3) lines. 
+	- In general, For Most of ESP32 boards, additional external pull-up of at least 10k Ohm resistor will be required for pins CMD and DATA(DAT0-DAT3) lines.
 	- In our PCB we use 51k Ohm pull-ups
 	- Please go through a detailed document which details [pull-up requirement depending upon your ESP chipset](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/sd_pullup_requirements.html). In top left, choose your expected target ESP chipset from combo box.
 
@@ -69,9 +70,10 @@ Driver underlies heavily over underlying kernel. ESP-Hosted is tested over Linux
 ## 2.2 rpi_init.sh
 * [rpi_init.sh](../host/rpi_init.sh) is utility script to load the ESP kernel module
 * You can rename script as per your convenience, although it needs to be ported for kernel module building
-* Reset Pin
-	* Reset pin could be chosen over unused GPIO.
-	* Input parameter to script, `resetpin=X` to be changed accordingly. This is used to reset ESP on loading the kernel module.
+* Device Tree GPIO ownership
+	* SPI reset, handshake, and data-ready GPIOs belong in the ESP SPI Device Tree node.
+	* After SDIO enumeration, reset/recovery is in-band. Any host-controlled reset/power needed to obtain or recover enumeration belongs to MMC/platform power sequencing, not an ESP-Hosted module parameter.
+	* The Raspberry Pi helper accepts legacy `resetpin=N` only as a deprecated SPI alias for `resetgpio=N`; direct module loading no longer accepts `resetpin=`. For SDIO the helper warns and ignores it.
 * UART configuration
 	* `bt_init()` lists `raspi-gpio` commands.
 	* `rapi-gpio` are simple utilities used to configure GPIO pins for their levels, alternate functions and pull up values.
@@ -104,25 +106,28 @@ KERNEL=/home/user1/arm64_kernel
 * Verify user space SPI driver
 	- If the user space drivers like spidev works as expected in Tx & Rx, then we would be assured that the SPI Linux drivers for your SoCs are working fine & SPI bus is correctly configured
 
-* Disable default SPI driver
-		- Linux kernel has a default SPI controller driver which needs to be disabled in order to make esp32_spi module work. Please see following code snippet from rpi_init.sh script
+* Disable the conflicting spidev child
+		- Keep the Linux SPI **controller** driver enabled. ESP-Hosted needs that controller driver. Disable only the default `spidev` child on the chip select that the ESP node will use. The Raspberry Pi CS0 example does this with the separate `spidev_disabler` overlay before creating the ESP node.
 
 		```
-		# Disable default spidev driver
-		dtc spidev_disabler.dts -O dtb > spidev_disabler.dtbo
+		# Disable the default spidev0 child, not the SPI controller.
+		dtc -@ -I dts -O dtb -o spidev_disabler.dtbo spidev_disabler.dts
 		sudo dtoverlay -d . spidev_disabler
 		```
-		While porting, equivalent commands or steps need to be run to disable default SPI driver through the Device Tree for expected SoC.
+		While porting, disable only the conflicting spidev/device child on the selected chip select. Keep the host SPI controller enabled.
 * Verify disabling of spidev
 		- Default spidev when not disabled, create a device file, /dev/spidevX.Y where X refers SPI bus and Y refers to Chip Select to be used.
 		- For example, Say User disables SPI bus 1 and Chip select 0 through Device Tree, then verify after loading Device Tree changes, /dev/spidev1.0 is no more listed
 * Additional GPIOs
-		- Apart from regular MOSI, MISO, CLK and Chip select, there are two additional GPIO pins used for SPI implementation.
-		- These pins should be selected such that they would not interfere other any peripheral work.
-		- Alter `HANDSHAKE_PIN` and `SPI_DATA_READY_PIN` in [esp_spi.h](../host/spi/esp_spi.h).
+		- Apart from MOSI, MISO, CLK and chip select, ESP-Hosted SPI uses three board-level signals: reset, handshake and data-ready.
+		- Select pins that do not conflict with other peripherals.
+		- Describe `reset-gpios`, `handshake-gpios` and `data-ready-gpios` in the SPI Device Tree node. GPIO numbers and polarity are board data and must not be hard-coded in the driver.
+		- Keep reset electrically released while the driver is not bound. A child device's default pinctrl state is applied as part of binding/probe, so do not assume that merely creating an unbound DT node changes a previously programmed GPIO direction. The Raspberry Pi helper deliberately does not force these GPIO directions from userspace; the platform Device Tree/pinctrl state and the GPIO descriptor API remain the ownership authorities. The driver acquires reset as input and only drives the deliberate reset pulse after all dependencies are ready.
+		- Keep ESP SPI chip select electrically active-low: do not add the `spi-cs-high` firmware property. The Linux SPI core may still represent a GPIO-backed active-low CS with the internal `SPI_CS_HIGH` mode bit while gpiolib performs inversion; transport code must not clear that core-managed bit.
 		- Additional pins functionality details mentioned in [1.1.1 additional pin setup](../spi_protocol.md#111-additional-pin-setup) of [spi protocol documentation](../spi_protocol.md).
-* cs_change
-		- Reason why this setting was enabled is, SPI transfer was losing first byte in transfer. Although this issue is only observed while testing with Raspberry Pi. Enabling cs_change=1 makes CS always de-assert after each transfer request. While porting, you may want to remove line, `trans.cs_change = 1;`.
+* `cs_change` compatibility workaround
+		- ESP-Hosted submits one transfer per SPI message. With Linux `cs_change` set on that final transfer, the controller may keep chip select asserted until the next transfer rather than using the normal end-of-message deselect behavior.
+		- The driver exposes this only as the opt-in SPI module parameter `spi_cs_change=1`; the default is disabled. Do not hard-code `trans.cs_change` in a board port; enable it only when the target controller demonstrates that requirement.
 * Tune the SPI slave clock
 		- Maximum SPI slave clock supported by ESP chipsets are:
 			- ESP32 : 10MHZ
@@ -130,9 +135,9 @@ KERNEL=/home/user1/arm64_kernel
 			- ESP32-C2: 60MHz
 			- ESP32-C3: 60MHz
 			- ESP32-S3: 60MHz
-		- Above frequencies cannot be used while using Raspberry Pi as SPI master because of its limitation. \
-		  However, you can increase the SPI clock stepwise to see what maximum frequency works for your SoC.
-		- Higher the frequency set, better the throughput would be.
+		- These are chipset-side capabilities, not ESP-Hosted host-driver limits. The current Linux SPI transport enforces a 40 MHz protocol maximum and also obeys the Device Tree `spi-max-frequency` safety cap.
+		- Raspberry Pi is normally configured more conservatively (the supplied overlay defaults to 30 MHz). On another host, increase frequency only up to the lower of the board/controller limit, `spi-max-frequency`, and 40 MHz.
+		- Higher frequency can improve throughput when signal integrity and both endpoints support it.
 		- SPI clock frequency could be changed from macro `SPI_CLK_MHZ` in `esp/esp_driver/network_adapter/main/spi_slave_api.c`
 * Identify peripheral limitations
 		- For Raspberry Pi, Please use
@@ -143,13 +148,13 @@ KERNEL=/home/user1/arm64_kernel
 		  as mentioned in [SPI setup](SPI_setup.md#12-raspberry-pi-software-setup)
 		- Raspberry Pi could not perform reliably when the SPI clock was set higher frequency than 30MHz
 		- Any such limitation for your Soc should be checked. Also power saving modes and peripheral clocks for your platform should be known.
-* SPI Bus instance and Chip select number
-		- Default value for both is 0, _i.e._ SPI0 and chip select 0.
-		- It could be changed using variables, `esp_board.bus_num` and `esp_board.chip_select` in function `spi_dev_init()` from file `host/linux/host_driver/esp32/spi/esp_spi.c`
+* SPI Bus instance and chip select number
+		- The Raspberry Pi example uses SPI0 and chip select 0 (`reg = <0>` under `&spi0`).
+		- For another host/controller, place the `espressif,esp32-spi` node under the required SPI controller and select the chip select with the node's `reg` property. The driver no longer creates an SPI device from hard-coded bus/chip-select numbers.
 * SPI mode
-		- Refrain from using SPI mode 0 at Slave side (no limitation at host for this as such)
-		- If the correct software settings are loaded, you can expect first event received from ESP to Host in dmesg
-		- If first event is not received, you can change SPI mode at both ESP and Host to other values, lower SPI freq and retry
+		- Describe CPOL/CPHA with the standard Device Tree properties `spi-cpol` and `spi-cpha`. The supplied Raspberry Pi overlay uses mode 2 (`spi-cpol`, no `spi-cpha`).
+		- The driver preserves CPOL/CPHA parsed by the SPI core and rejects unsupported bus modes such as active-high CS, 3-wire, LSB-first, loopback, or dual/quad data lanes.
+		- If testing another SPI mode, change both the ESP peripheral firmware and the host Device Tree together, then lower the SPI frequency while validating timing.
 * SPI interrupt handlers
 		- If even after porting only first event received and nothing works ahead, you can suspect the GPIOs `Handshake` and `DataReady` not correctly configured as Interrupts.
 		- Try to add log `printk(KERN_ERR "%s\n",__func__);` in `spi_data_ready_interrupt_handler()` and `spi_interrupt_handler()` functions if the interrupts are hit by assessing dmesg log
@@ -158,8 +163,9 @@ KERNEL=/home/user1/arm64_kernel
 
 User verified things like:
 
-* Reset Pin
-	* On host reload of driver, ESP is resetting
+* Reset
+	* SPI: confirm the Device Tree `reset-gpios` line is connected to ESP EN/reset and that module probe pulses it only after all SPI/GPIO/IRQ resources are ready.
+	* SDIO: ESP-Hosted does not use a `resetpin=` module argument. After the SDIO function has enumerated, transport recovery is in-band. If a board needs host-controlled reset or power cycling to make the SDIO function enumerate (or recover a device that no longer enumerates), describe that at the MMC/platform level, for example with the platform's MMC power-sequence/reset mechanism.
 * Data_Ready / Handshake
 	* Debug logs in ISR are getting printed on manual logic change on GPIOs
 * spidev is correctly disabled
@@ -169,7 +175,7 @@ User verified things like:
 * SPI frequency
 	* Lower the frequency to 1MHz
 * SPI modes
-	* Try different SPI modes like SPI mode 1/2/3 (Make sure, both ESP & Host have both have same changed SPI mode in one testing).
+	* If changing modes for timing/debug, keep ESP firmware and host Device Tree CPOL/CPHA synchronized for the same test.
 
 **Despite all above trials**, the ESP-Hosted fail to get first INIT event from ESP to Host **OR** <br />
 only first event is received and fails to work after that <br />

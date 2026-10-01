@@ -10,7 +10,6 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/stddef.h>
-#include <linux/gpio.h>
 #include <linux/igmp.h>
 #include <linux/jiffies.h>
 
@@ -25,7 +24,6 @@
 #include "esp_cfg80211.h"
 #include "esp_stats.h"
 
-#define HOST_GPIO_PIN_INVALID -1
 #define CONFIG_ALLOW_MULTICAST_WAKEUP 1
 
 #define STRINGIFY_HELPER(x) #x
@@ -34,17 +32,13 @@
 #define RELEASE_VERSION PROJECT_NAME "-" STRINGIFY(PROJECT_VERSION_MAJOR_1) "." STRINGIFY(PROJECT_VERSION_MAJOR_2) "." STRINGIFY(PROJECT_VERSION_MINOR) "." STRINGIFY(PROJECT_REVISION_PATCH_1) "." STRINGIFY(PROJECT_REVISION_PATCH_2)
 
 static char *ota_file = NULL;
-static int resetpin = HOST_GPIO_PIN_INVALID;
 static u32 clockspeed = 0;
 u32 raw_tp_mode = 0;
 int log_level = ESP_INFO;
 char version_str[ESP_VERSION_BUFFER_SIZE];
 
 
-module_param(resetpin, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-MODULE_PARM_DESC(resetpin, "Host's GPIO pin number which is connected to ESP32's EN to reset ESP32 device");
-
-module_param(clockspeed, uint, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+module_param(clockspeed, uint, S_IRUSR | S_IRGRP | S_IROTH);
 MODULE_PARM_DESC(clockspeed, "Hosts clock speed in MHz");
 
 module_param(raw_tp_mode, uint, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
@@ -54,7 +48,6 @@ module_param(ota_file, charp, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 MODULE_PARM_DESC(ota_file, "Ota file to update ESP firmware");
 
 static void deinit_adapter(void);
-static void esp_reset(void);
 static int esp_publish_network_ifaces(struct esp_adapter *adapter);
 
 
@@ -65,11 +58,6 @@ static struct esp_adapter adapter;
 struct esp_adapter *esp_get_adapter(void)
 {
 	return &adapter;
-}
-
-bool esp_host_reset_available(void)
-{
-	return resetpin != HOST_GPIO_PIN_INVALID && gpio_is_valid(resetpin);
 }
 
 void esp_process_new_packet_intr(struct esp_adapter *adapter)
@@ -160,15 +148,19 @@ void esp_request_firmware_restart(struct esp_adapter *adapter)
 		ret = generate_slave_intr(adapter->if_context,
 					  BIT(ESP_CLOSE_DATA_PATH));
 
-	/* SPI cannot deliver CLOSE_DATA_PATH. A valid reset GPIO is a required
-	 * SPI capability, enforced during transport initialization. */
+	/* SPI has no in-band CLOSE_DATA_PATH interrupt. Its transport-owned
+	 * reset-gpios descriptor is the single production reset authority. */
 	if (adapter->if_type == ESP_IF_TYPE_SPI) {
-		if (esp_host_reset_available()) {
-			clear_bit(ESP_FW_RESTART_NEEDED, &adapter->state_flags);
-			esp_reset();
-		} else {
-			esp_err("SPI firmware restart requested without a usable reset GPIO\n");
-		}
+		ret = -ENODEV;
+		if (adapter->if_ops && adapter->if_ops->reset_target)
+			ret = adapter->if_ops->reset_target(adapter);
+		if (ret)
+			esp_err("SPI firmware restart requested without usable reset-gpios: %d\n",
+				ret);
+		/*
+		 * reset_target() is asynchronous. ESP_FW_RESTART_NEEDED remains
+		 * asserted until the transport reset worker confirms completion.
+		 */
 	} else if (ret == 0) {
 		clear_bit(ESP_FW_RESTART_NEEDED, &adapter->state_flags);
 	} else {
@@ -185,15 +177,16 @@ static void esp_bootup_request_retry(struct esp_adapter *adapter)
 	    test_bit(ESP_TRANSPORT_REMOVING, &adapter->state_flags))
 		return;
 
-	/* The boot TLV was already consumed. Repeated OPEN does not make
-	 * firmware resend it; restart the slave so a new boot can be published. */
-	esp_request_firmware_restart(adapter);
-
-	set_bit(ESP_FW_RECOVERY_PENDING, &adapter->state_flags);
-	/* A failed reconstruct must not leave CLEANUP stuck, or recover_transport
-	 * can never reopen the datapath while the module stays loaded. */
+	/*
+	 * The boot TLV was already consumed. Publish reset quarantine and bump
+	 * the recovery generation before asking the transport to reincarnate the
+	 * firmware. SPI reset_target() is asynchronous, so doing this afterwards
+	 * would leave a window where an old queued boot event could reconstruct
+	 * the incarnation that is about to be reset.
+	 */
 	clear_bit(ESP_CLEANUP_IN_PROGRESS, &adapter->state_flags);
 	esp_schedule_recovery(adapter, ESP_FW_RECOVERY_WATCHDOG_MS, true, true);
+	esp_request_firmware_restart(adapter);
 }
 
 static void esp_fw_recovery_work(struct work_struct *work)
@@ -231,6 +224,14 @@ static void esp_fw_recovery_work(struct work_struct *work)
 	}
 	fw_reset = test_bit(ESP_FW_RESET_EXPECTED, &adapter->state_flags);
 	gen = atomic_read(&adapter->fw_recovery_gen);
+	if (!test_bit(ESP_INIT_DONE, &adapter->state_flags) &&
+	    !test_bit(ESP_FW_RECOVERY_PENDING, &adapter->state_flags) &&
+	    !fw_reset) {
+		spin_unlock_irqrestore(&adapter->fw_recovery_lock, flags);
+		esp_info("Initial boot event timed out; restarting firmware\n");
+		esp_bootup_request_retry(adapter);
+		return;
+	}
 	spin_unlock_irqrestore(&adapter->fw_recovery_lock, flags);
 
 	if (!adapter->if_ops || !adapter->if_ops->recover_transport) {
@@ -591,9 +592,14 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 {
 	int len_left = len, tag_len, ret = 0;
 	u8 *pos;
-	struct fw_data *fw_p;
+	struct fw_data fw_data;
 	bool reinitializing = false;
 	bool committed = false;
+	bool seen_capability = false;
+	bool seen_chipset = false;
+	bool seen_fw_data = false;
+	bool seen_rx_buf_size = false;
+	bool seen_spi_clk = false;
 
 	if (!adapter || !evt_buf)
 		return -1;
@@ -615,6 +621,11 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 		set_bit(ESP_FW_RECOVERY_PENDING, &adapter->state_flags);
 	clear_bit(ESP_INIT_DONE, &adapter->state_flags);
 	clear_bit(ESP_FW_RESTART_NEEDED, &adapter->state_flags);
+	/* Boot metadata belongs to exactly one firmware incarnation. Never let a
+	 * missing/malformed TLV inherit transport/checksum/chip state from the
+	 * previous boot. */
+	adapter->capabilities = 0;
+	adapter->chipset = ESP_FIRMWARE_CHIP_UNRECOGNIZED;
 	adapter->tx_aggr_size = 0;
 
 	if (reinitializing) {
@@ -651,6 +662,11 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 
 		switch (*pos) {
 		case ESP_BOOTUP_CAPABILITY:
+			if (seen_capability) {
+				esp_err("Duplicate capability TLV in firmware boot event\n");
+				ret = -EPROTO;
+				goto fail;
+			}
 			if (tag_len == 1) {
 				adapter->capabilities = *(pos + 2);
 			} else if (tag_len == 2) {
@@ -661,13 +677,24 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 				ret = -EINVAL;
 				goto fail;
 			}
+			seen_capability = true;
 			break;
 		case ESP_BOOTUP_RX_BUF_SIZE:
+			if (seen_rx_buf_size) {
+				esp_err("Duplicate RX buffer size TLV in firmware boot event\n");
+				ret = -EPROTO;
+				goto fail;
+			}
 			if (tag_len != sizeof(u32)) {
 				ret = -EINVAL;
 				goto fail;
 			}
-			adapter->tx_aggr_size = le32_to_cpup((__le32 *)(pos + 2));
+			{
+				__le32 rx_buf_size_le;
+
+				memcpy(&rx_buf_size_le, pos + 2, sizeof(rx_buf_size_le));
+				adapter->tx_aggr_size = le32_to_cpu(rx_buf_size_le);
+			}
 			if (!adapter->tx_aggr_size ||
 			    adapter->tx_aggr_size > ESP_TX_AGGR_SIZE_MAX ||
 			    (adapter->if_type != ESP_IF_TYPE_SPI &&
@@ -679,28 +706,50 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 			}
 			esp_info("Slave RX Buffer Size configured dynamically: %u bytes\n",
 				 adapter->tx_aggr_size);
+			seen_rx_buf_size = true;
 			break;
 		case ESP_BOOTUP_FIRMWARE_CHIP_ID:
+			if (seen_chipset) {
+				esp_err("Duplicate chipset TLV in firmware boot event\n");
+				ret = -EPROTO;
+				goto fail;
+			}
 			if (tag_len != 1) {
 				ret = -EINVAL;
 				goto fail;
 			}
 			ret = esp_validate_chipset(adapter, *(pos + 2));
+			if (!ret)
+				seen_chipset = true;
 			break;
 		case ESP_BOOTUP_FW_DATA:
+			if (seen_fw_data) {
+				esp_err("Duplicate firmware data TLV in firmware boot event\n");
+				ret = -EPROTO;
+				goto fail;
+			}
 			if (tag_len != sizeof(struct fw_data)) {
 				ret = -EINVAL;
 				goto fail;
 			}
-			fw_p = (struct fw_data *)(pos + 2);
-			ret = process_fw_data(fw_p, tag_len);
+			memcpy(&fw_data, pos + 2, sizeof(fw_data));
+			ret = process_fw_data(&fw_data, tag_len);
+			if (!ret)
+				seen_fw_data = true;
 			break;
 		case ESP_BOOTUP_SPI_CLK_MHZ:
+			if (seen_spi_clk) {
+				esp_err("Duplicate SPI clock TLV in firmware boot event\n");
+				ret = -EPROTO;
+				goto fail;
+			}
 			if (tag_len != 1) {
 				ret = -EINVAL;
 				goto fail;
 			}
 			ret = esp_adjust_spi_clock(adapter, *(pos + 2));
+			if (!ret)
+				seen_spi_clk = true;
 			break;
 		default:
 			esp_warn("Unsupported tag=%x in boot-up event\n", *pos);
@@ -718,6 +767,40 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 	    test_bit(ESP_TRANSPORT_REMOVING, &adapter->state_flags))
 		return -ESHUTDOWN;
 
+	if (!seen_capability || !seen_chipset || !seen_fw_data) {
+		esp_err("Firmware boot event missing required TLV(s): capability=%u chipset=%u fw_data=%u\n",
+			seen_capability, seen_chipset, seen_fw_data);
+		ret = -EPROTO;
+		goto fail;
+	}
+
+	/* Reject an incompatible firmware image before reopening a reset
+	 * transport or publishing READY for reconstruction commands. */
+	if (adapter->if_type == ESP_IF_TYPE_SPI) {
+		if (!(adapter->capabilities & ESP_WLAN_SPI_SUPPORT)) {
+			esp_err("Firmware does not advertise WLAN-over-SPI capability (0x%x)\n",
+				adapter->capabilities);
+			ret = -EPROTO;
+			goto fail;
+		}
+	} else if (adapter->if_type == ESP_IF_TYPE_SDIO) {
+		if (!(adapter->capabilities & ESP_WLAN_SDIO_SUPPORT)) {
+			esp_err("Firmware does not advertise WLAN-over-SDIO capability (0x%x)\n",
+				adapter->capabilities);
+			ret = -EPROTO;
+			goto fail;
+		}
+	} else {
+		esp_err("Unknown host transport type %u\n", adapter->if_type);
+		ret = -EINVAL;
+		goto fail;
+	}
+	if (adapter->chipset == ESP_FIRMWARE_CHIP_UNRECOGNIZED) {
+		esp_err("Firmware boot event did not provide a supported chipset ID\n");
+		ret = -EPROTO;
+		goto fail;
+	}
+
 	if (reinitializing && adapter->if_ops &&
 	    adapter->if_ops->reinit_after_fw_reset) {
 		ret = adapter->if_ops->reinit_after_fw_reset(adapter);
@@ -726,10 +809,7 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 	}
 
 	esp_begin_reconstruction(adapter);
-
-	if (adapter->capabilities & ESP_WLAN_SDIO_SUPPORT ||
-	    adapter->capabilities & ESP_BT_SDIO_SUPPORT)
-		atomic_set(&adapter->state, ESP_CONTEXT_READY);
+	atomic_set(&adapter->state, ESP_CONTEXT_READY);
 
 	ret = esp_add_card(adapter);
 	if (ret) {
@@ -1265,12 +1345,53 @@ static int process_internal_event(struct esp_adapter *adapter,
 	return 0;
 }
 
+static bool esp_internal_checksum_required(const u8 *frame, u16 len,
+					 u16 offset, u16 wire_checksum)
+{
+	const struct esp_internal_bootup_event *evt;
+	const u8 *pos;
+	int left;
+	u8 tag_len;
+
+	/*
+	 * Non-boot internal events do not establish a new checksum contract.
+	 * Preserve the legacy rule of validating them when firmware supplied a
+	 * checksum. Zero is byte-order invariant, so testing the wire field here
+	 * is safe without conversion.
+	 */
+	if (len < offsetof(struct esp_internal_bootup_event, data))
+		return wire_checksum != 0;
+
+	evt = (const struct esp_internal_bootup_event *)(frame + offset);
+	if (evt->header.event_code != ESP_INTERNAL_BOOTUP_EVENT)
+		return wire_checksum != 0;
+	if (evt->len > len - offsetof(struct esp_internal_bootup_event, data))
+		return wire_checksum != 0;
+
+	pos = evt->data;
+	left = evt->len;
+	while (left >= 2) {
+		tag_len = pos[1];
+		if (tag_len > left - 2)
+			break;
+		if (pos[0] == ESP_BOOTUP_CAPABILITY && tag_len == 1)
+			return (pos[2] & ESP_CHECKSUM_ENABLED) || wire_checksum != 0;
+		pos += tag_len + 2;
+		left -= tag_len + 2;
+	}
+
+	/* Missing/malformed capability is rejected by the boot parser later.
+	 * If a checksum is present, still verify it before handing the frame on. */
+	return wire_checksum != 0;
+}
+
 static void process_rx_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 {
 	struct esp_wifi_device *priv = NULL;
 	struct esp_payload_header *payload_header = NULL;
 	u16 len = 0, offset = 0;
 	u16 rx_checksum = 0, checksum = 0;
+	bool validate_checksum = false;
 	struct hci_dev *hdev = adapter->hcidev;
 
 	if (!skb)
@@ -1296,7 +1417,23 @@ static void process_rx_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 	if (payload_header->if_type != ESP_TEST_IF && payload_header->reserved2 == 0xFF)
 		esp_hex_dump("Wake up packet: ", skb->data, len + offset);
 
-	if (adapter->capabilities & ESP_CHECKSUM_ENABLED) {
+	/*
+	 * The boot event establishes the checksum capability for a new firmware
+	 * incarnation, so it cannot be gated by the previous incarnation's
+	 * capability bit. Firmware zero-initializes checksum-disabled boot
+	 * frames and fills checksum when enabled. Inspect the boot capability TLV
+	 * first so an enabled checksum is validated even when its valid 16-bit
+	 * value happens to be 0x0000. Ordinary traffic follows the already
+	 * negotiated capability.
+	 */
+	if (payload_header->if_type == ESP_INTERNAL_IF)
+		validate_checksum = esp_internal_checksum_required(skb->data, len,
+							       offset,
+							       payload_header->checksum);
+	else
+		validate_checksum = adapter->capabilities & ESP_CHECKSUM_ENABLED;
+
+	if (validate_checksum) {
 		rx_checksum = esp_wire_le16_to_cpu(payload_header->checksum);
 		payload_header->checksum = 0;
 		checksum = compute_checksum(skb->data, len + offset);
@@ -1614,68 +1751,18 @@ static void deinit_adapter(void)
 	}
 }
 
-static bool reset_gpio_requested = false;
-
-static void esp_free_reset_gpio(void)
-{
-	if (reset_gpio_requested && resetpin != HOST_GPIO_PIN_INVALID) {
-		gpio_free(resetpin);
-		reset_gpio_requested = false;
-	}
-}
-
-static void esp_reset(void)
-{
-	int ret;
-
-	if (resetpin != HOST_GPIO_PIN_INVALID) {
-		if (!gpio_is_valid(resetpin)) {
-			esp_warn("host resetpin (%d) configured is invalid GPIO\n", resetpin);
-			resetpin = HOST_GPIO_PIN_INVALID;
-			return;
-		}
-		if (!reset_gpio_requested) {
-			ret = gpio_request(resetpin, "esp_reset");
-			if (ret) {
-				esp_warn("host resetpin (%d) request failed: %d\n", resetpin, ret);
-				resetpin = HOST_GPIO_PIN_INVALID;
-				return;
-			}
-			reset_gpio_requested = true;
-		}
-		ret = gpio_direction_output(resetpin, true);
-		if (ret) {
-			esp_warn("host resetpin (%d) direction output failed: %d\n", resetpin, ret);
-			esp_free_reset_gpio();
-			resetpin = HOST_GPIO_PIN_INVALID;
-			return;
-		}
-		gpio_set_value(resetpin, 0);
-		udelay(200);
-		gpio_direction_input(resetpin);
-		esp_dbg("Triggering ESP reset.\n");
-	}
-}
-
 static int __init esp_init(void)
 {
 	int ret = 0;
 	struct esp_adapter *adapter = NULL;
 
-	esp_reset();
-	msleep(200);
 	adapter = init_adapter();
-	if (!adapter) {
-		esp_free_reset_gpio();
-		resetpin = HOST_GPIO_PIN_INVALID;
+	if (!adapter)
 		return -EFAULT;
-	}
 
 	ret = esp_init_interface_layer(adapter, clockspeed);
 	if (ret != 0) {
 		deinit_adapter();
-		esp_free_reset_gpio();
-		resetpin = HOST_GPIO_PIN_INVALID;
 		return ret;
 	}
 
@@ -1748,7 +1835,6 @@ static void __exit esp_exit(void)
 	esp_deinit_interface_layer();
 	deinit_adapter();
 
-	esp_free_reset_gpio();
 	debugfs_exit();
 }
 MODULE_LICENSE("GPL");
