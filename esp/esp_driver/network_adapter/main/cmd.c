@@ -154,6 +154,21 @@ static const esp_partition_t* update_partition = NULL;
 static esp_ota_handle_t handle;
 
 extern int wpa_parse_wpa_ie_wrapper(const u8 *wpa_ie, size_t wpa_ie_len, wifi_wpa_ie_t *data);
+
+/* Redirect IDF's esp_supplicant_init/deinit (called unconditionally by
+ * esp_wifi's wifi_init.c) to these no-ops via -Wl,--wrap linker flags.
+ * The host drives the supplicant state machine and installs custom callbacks
+ * in initialise_wifi(), so the IDF supplicant state machine is not started. */
+esp_err_t __wrap_esp_supplicant_init(void)
+{
+    return ESP_OK;
+}
+
+esp_err_t __wrap_esp_supplicant_deinit(void)
+{
+    return esp_wifi_unregister_wpa_cb_internal();
+}
+
 static inline void WPA_PUT_LE16(u8 *a, u16 val)
 {
     a[1] = val >> 8;
