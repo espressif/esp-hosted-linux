@@ -1510,8 +1510,8 @@ static int is_valid_assoc_resp(uint8_t *frame, size_t len, uint8_t *src_addr)
     return true;
 }
 
-static int handle_wpa_sta_rx_mgmt(uint8_t type, uint8_t *frame, size_t len, uint8_t *sender,
-                                  uint32_t rssi, uint8_t channel, uint64_t current_tsf)
+static int handle_wpa_sta_rx_mgmt(u8 type, u8 *frame, size_t len, u8 *sender,
+                                  int8_t rssi, u8 channel, u64 current_tsf)
 {
     if (!sender) {
         ESP_LOGI(TAG, "%s:%u src mac addr NULL", __func__, __LINE__);
@@ -1559,8 +1559,7 @@ static int handle_wpa_sta_rx_mgmt(uint8_t type, uint8_t *frame, size_t len, uint
     return ESP_OK;
 }
 
-static int hostap_sta_join(uint8_t *bssid, uint8_t *wpa_ie, uint8_t wpa_ie_len,
-                           uint8_t* rsnxe, uint16_t rsnxe_len, bool *pmf_enable, int subtype, uint8_t *pairwise_cipher)
+static int hostap_sta_join(wpa_station_join_param_t *join)
 {
     return true;
 }
@@ -1570,7 +1569,7 @@ static int wpa_ap_remove(uint8_t* bssid)
     return true;
 }
 
-static uint8_t  *wpa_ap_get_wpa_ie(uint8_t *ie_len)
+static uint8_t  *wpa_ap_get_wpa_ie(size_t *ie_len)
 {
     *ie_len = 0;
     return NULL;
@@ -1634,9 +1633,9 @@ static void wpa_ap_get_peer_spp_msg(void *sm_data, bool *spp_cap, bool *spp_req)
 }
 
 char hostapd;
-static int *hostap_init(void)
+static int hostap_init(void)
 {
-    return NULL;
+    return 0;
 }
 
 static int hostap_deinit(void *data)
@@ -3578,7 +3577,6 @@ rollback:
             esp_restart();
         }
     }
-
 send_resp:
     ret = send_command_resp(if_type, CMD_AP_CONFIG, cmd_status, NULL, 0);
 

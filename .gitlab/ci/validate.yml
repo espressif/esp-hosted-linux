@@ -54,3 +54,19 @@ validate_precommit:
     - .gitlab/ci/scripts/run-precommit.sh
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+validate_wifi_lib_md5:
+  stage: validate
+  image: "$ESP_CI_IMAGE"
+  tags:
+    - build
+  script:
+    - .gitlab/ci/scripts/check-wifi-lib-md5.sh
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - esp/esp_driver/lib/**/*
+        - esp/esp_driver/network_adapter/main/esp_wifi_driver.h
+        - .gitlab/ci/scripts/check-wifi-lib-md5.sh
+        - .gitlab/ci/validate.yml
+    - when: never

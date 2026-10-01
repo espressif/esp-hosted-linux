@@ -8,7 +8,7 @@ stages:
 
 variables:
   GIT_SUBMODULE_STRATEGY: none
-  ESP_CI_IMAGE: "gitlab.espressif.cn:5050/wireless/esp-hosted-linux/ci/idf-v5.5.1@sha256:1826c3da1c8ffec4f5ce54153dbfff7c788bdb4d190280c24a79f54f00f0af14"
+  ESP_CI_IMAGE: "gitlab.espressif.cn:5050/wireless/esp-hosted-linux/ci/idf-v6.1@sha256:f3c25013f2756369f6b79096a611044c04f8d65415b8fe6373e1fd7c84df39e1"
 
 # A version-bot commit creates a newer MR pipeline. Build/test jobs are safe to
 # cancel, so do not waste resources finishing the old pre-bump pipeline.

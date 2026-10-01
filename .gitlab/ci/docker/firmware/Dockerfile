@@ -1,8 +1,8 @@
 FROM ubuntu:22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG IDF_TAG=v5.5.1
-ARG IDF_COMMIT=fcae32885b0296b32044cb99ecbdc50d98dddb83
+ARG IDF_TAG=v6.1
+ARG IDF_COMMIT=fff9895c82d744c7237be8847347bdd1b07c6643
 
 ENV IDF_PATH=/opt/esp/idf
 ENV IDF_TOOLS_PATH=/opt/esp/.espressif
@@ -44,7 +44,7 @@ RUN cd "${IDF_PATH}" && \
     rm -rf "${IDF_TOOLS_PATH}/dist/"* && \
     rm -f /tmp/rom.patch
 
-LABEL esp.hosted.idf.tag="v5.5.1"
-LABEL esp.hosted.idf.commit="fcae32885b0296b32044cb99ecbdc50d98dddb83"
+LABEL esp.hosted.idf.tag="v6.1"
+LABEL esp.hosted.idf.commit="fff9895c82d744c7237be8847347bdd1b07c6643"
 
 CMD ["/bin/bash"]
