@@ -210,6 +210,8 @@ static void open_data_path(void)
 	atomic_set(&tx_pending, 0);
 	msleep(200);
 	data_path = OPEN_DATAPATH;
+	if (spi_accepting_work() && spi_context.spi_workqueue)
+		queue_work(spi_context.spi_workqueue, &spi_context.spi_work);
 }
 
 static bool spi_accepting_work(void)
@@ -513,14 +515,13 @@ static void esp_spi_work(struct work_struct *work)
 		return;
 	trans_ready = gpio_get_value(HANDSHAKE_PIN);
 	rx_pending = gpio_get_value(SPI_DATA_READY_PIN);
-	if (!trans_ready)
-		return;
-
 	if (data_path) {
 		has_tx = !skb_queue_empty(&spi_context.tx_q[PRIO_Q_HIGH]) ||
 			 !skb_queue_empty(&spi_context.tx_q[PRIO_Q_MID]) ||
 			 !skb_queue_empty(&spi_context.tx_q[PRIO_Q_LOW]);
 	}
+	if (!trans_ready)
+		return;
 
 	if (!rx_pending && !has_tx)
 		return;
@@ -634,6 +635,15 @@ static void esp_spi_work(struct work_struct *work)
 		if (process_rx_buf(rx_skb))
 			dev_kfree_skb(rx_skb);
 		dev_kfree_skb(tx_skb);
+	}
+
+	if (!ret && spi_accepting_work()) {
+		bool more_work = gpio_get_value(SPI_DATA_READY_PIN) ||
+			!skb_queue_empty(&spi_context.tx_q[PRIO_Q_HIGH]) ||
+			!skb_queue_empty(&spi_context.tx_q[PRIO_Q_MID]) ||
+			!skb_queue_empty(&spi_context.tx_q[PRIO_Q_LOW]);
+		if (more_work && spi_context.spi_workqueue)
+			queue_work(spi_context.spi_workqueue, &spi_context.spi_work);
 	}
 }
 

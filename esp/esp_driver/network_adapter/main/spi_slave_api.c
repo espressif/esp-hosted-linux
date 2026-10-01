@@ -535,7 +535,6 @@ static void queue_next_transaction(void)
 
     /* 4. Dequeue next TX buffer if available */
     has_tx = get_next_tx_buffer(&buf_handle);
-
     if (has_tx) {
         slot->is_raw_tp = (buf_handle.if_type == ESP_TEST_IF);
         slot->raw_tp_run_id = buf_handle.raw_tp_run_id;
@@ -548,6 +547,9 @@ static void queue_next_transaction(void)
             buf_handle.free_buf_handle(buf_handle.priv_buffer_handle);
             buf_handle.free_buf_handle = NULL;
         }
+
+        /* Current transaction has data for host: assert data_ready */
+        WRITE_PERI_REG(GPIO_OUT_W1TS_REG, (1ULL << gpio_data_ready));
     } else {
         /* No pending frame: prepare dummy header */
         memset(slot->dma_tx, 0, RX_BUF_SIZE);
@@ -555,13 +557,13 @@ static void queue_next_transaction(void)
         dummy_hdr->if_type = 0xF;
         dummy_hdr->if_num  = 0xF;
         dummy_hdr->len     = 0;
-    }
 
-    /* If no more frames waiting in TX queues, clear data_ready */
-    if (!uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_HIGH]) &&
-        !uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_MID]) &&
-        !uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_LOW])) {
-        WRITE_PERI_REG(GPIO_OUT_W1TC_REG, (1ULL << gpio_data_ready));
+        /* If no pending frame in slot and no more frames waiting in TX queues, clear data_ready */
+        if (!uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_HIGH]) &&
+            !uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_MID]) &&
+            !uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_LOW])) {
+            WRITE_PERI_REG(GPIO_OUT_W1TC_REG, (1ULL << gpio_data_ready));
+        }
     }
 
     /* 5. Set up transaction */
