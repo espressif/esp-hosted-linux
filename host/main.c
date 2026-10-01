@@ -439,6 +439,9 @@ void print_capabilities(u32 cap)
 	else if (cap & ESP_WLAN_SPI_SUPPORT)
 		esp_info("\t * WLAN on SPI\n");
 
+	if (cap & ESP_WLAN_GCMP_SUPPORT)
+		esp_info("\t * GCMP\n");
+
 	if ((cap & ESP_BT_UART_SUPPORT) ||
 		    (cap & ESP_BT_SDIO_SUPPORT) ||
 		    (cap & ESP_BT_SPI_SUPPORT)) {
@@ -648,11 +651,16 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 
 		switch (*pos) {
 		case ESP_BOOTUP_CAPABILITY:
-			if (tag_len != 1) {
+			if (tag_len == 1) {
+				adapter->capabilities = *(pos + 2);
+			} else if (tag_len == 2) {
+				adapter->capabilities = le16_to_cpup((__le16 *)(pos + 2));
+			} else if (tag_len == 4) {
+				adapter->capabilities = le32_to_cpup((__le32 *)(pos + 2));
+			} else {
 				ret = -EINVAL;
 				goto fail;
 			}
-			adapter->capabilities = *(pos + 2);
 			break;
 		case ESP_BOOTUP_RX_BUF_SIZE:
 			if (tag_len != sizeof(u32)) {

@@ -177,7 +177,7 @@ static const u32 esp_cipher_suites[] = {
 	WLAN_CIPHER_SUITE_AES_CMAC,
 };
 
-static const u32 esp_cipher_suites_new[] = {
+static const u32 esp_cipher_suites_gcmp[] = {
 	WLAN_CIPHER_SUITE_WEP40,
 	WLAN_CIPHER_SUITE_WEP104,
 	WLAN_CIPHER_SUITE_TKIP,
@@ -1956,13 +1956,14 @@ int esp_add_wiphy(struct esp_adapter *adapter)
 		wiphy->bands[NL80211_BAND_5GHZ] = &esp_wifi_bands_5ghz;
 	}
 	/* Initialize cipher suits */
-	if (adapter->chipset == ESP_FIRMWARE_CHIP_ESP32C3 ||
+	if ((adapter->capabilities & ESP_WLAN_GCMP_SUPPORT) ||
+	    adapter->chipset == ESP_FIRMWARE_CHIP_ESP32C3 ||
 	    adapter->chipset == ESP_FIRMWARE_CHIP_ESP32S3 ||
 	    adapter->chipset == ESP_FIRMWARE_CHIP_ESP32C5 ||
 	    adapter->chipset == ESP_FIRMWARE_CHIP_ESP32C6 ||
 	    adapter->chipset == ESP_FIRMWARE_CHIP_ESP32C61) {
-		wiphy->cipher_suites = esp_cipher_suites_new;
-		wiphy->n_cipher_suites = ARRAY_SIZE(esp_cipher_suites_new);
+		wiphy->cipher_suites = esp_cipher_suites_gcmp;
+		wiphy->n_cipher_suites = ARRAY_SIZE(esp_cipher_suites_gcmp);
 	} else {
 		wiphy->cipher_suites = esp_cipher_suites;
 		wiphy->n_cipher_suites = ARRAY_SIZE(esp_cipher_suites);
