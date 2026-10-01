@@ -703,7 +703,7 @@ int32_t sdio_write_aggr(interface_handle_t *handle, uint8_t *payload,
     return payload_len;
 }
 
-esp_err_t send_bootup_event_to_host(uint8_t cap)
+esp_err_t send_bootup_event_to_host(uint32_t cap)
 {
     struct esp_payload_header *header = NULL;
     struct esp_internal_bootup_event *event = NULL;
@@ -741,8 +741,10 @@ esp_err_t send_bootup_event_to_host(uint8_t cap)
 
     /* TLV - Capability */
     *pos = ESP_BOOTUP_CAPABILITY;         pos++; len++;
-    *pos = LENGTH_1_BYTE;                 pos++; len++;
-    *pos = cap;                           pos++; len++;
+    *pos = 4;                             pos++; len++;
+    uint32_t cap_le = htole32(cap);
+    memcpy(pos, &cap_le, sizeof(cap_le));
+    pos += sizeof(cap_le);                len += sizeof(cap_le);
 
     /* TLV - Slave RX Buffer Size */
     *pos = ESP_BOOTUP_RX_BUF_SIZE;        pos++; len++;

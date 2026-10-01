@@ -193,11 +193,9 @@ int wpa_cipher_to_alg(int cipher)
 	switch (cipher) {
 	case WLAN_CIPHER_SUITE_CCMP:
 		return WIFI_WPA_ALG_CCMP;
-#ifdef CONFIG_GCMP
 	case WLAN_CIPHER_SUITE_GCMP_256:
 	case WLAN_CIPHER_SUITE_GCMP:
 		return WIFI_WPA_ALG_GCMP;
-#endif
 	case WLAN_CIPHER_SUITE_TKIP:
 		return WIFI_WPA_ALG_TKIP;
 	case WLAN_CIPHER_SUITE_WEP104:
@@ -205,6 +203,8 @@ int wpa_cipher_to_alg(int cipher)
 	case WLAN_CIPHER_SUITE_WEP40:
 		return WIFI_WPA_ALG_WEP40;
 	case WLAN_CIPHER_SUITE_AES_CMAC:
+	case WLAN_CIPHER_SUITE_BIP_GMAC_128:
+	case WLAN_CIPHER_SUITE_BIP_GMAC_256:
 		return WIFI_WPA_ALG_IGTK;
 	}
 	return WIFI_WPA_ALG_NONE;

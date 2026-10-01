@@ -126,5 +126,5 @@ int32_t sdio_write_aggr(interface_handle_t *handle, uint8_t *payload,
 #endif
 esp_err_t send_to_host(uint8_t prio_q_idx, interface_buffer_handle_t *buf_handle);
 esp_err_t send_to_host_timeout(uint8_t prio_q_idx, interface_buffer_handle_t *buf_handle, TickType_t wait_ticks);
-esp_err_t send_bootup_event_to_host(uint8_t cap);
+esp_err_t send_bootup_event_to_host(uint32_t cap);
 #endif

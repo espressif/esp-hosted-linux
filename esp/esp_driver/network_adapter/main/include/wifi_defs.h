@@ -26,6 +26,6 @@
 #define IEEE_HEADER_SIZE            24
 #endif
 
-#define DEFAULT_SCAN_LIST_SIZE      1
+#define DEFAULT_SCAN_LIST_SIZE      10
 
 #define IE_POS_ASSOC_RESP_STATUS    2
