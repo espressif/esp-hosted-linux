@@ -1961,7 +1961,8 @@ int esp_add_wiphy(struct esp_adapter *adapter)
 	    adapter->chipset == ESP_FIRMWARE_CHIP_ESP32S3 ||
 	    adapter->chipset == ESP_FIRMWARE_CHIP_ESP32C5 ||
 	    adapter->chipset == ESP_FIRMWARE_CHIP_ESP32C6 ||
-	    adapter->chipset == ESP_FIRMWARE_CHIP_ESP32C61) {
+	    adapter->chipset == ESP_FIRMWARE_CHIP_ESP32C61 ||
+	    adapter->chipset == ESP_FIRMWARE_CHIP_ESP32S31) {
 		wiphy->cipher_suites = esp_cipher_suites_gcmp;
 		wiphy->n_cipher_suites = ARRAY_SIZE(esp_cipher_suites_gcmp);
 	} else {
