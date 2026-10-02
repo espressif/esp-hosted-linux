@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+
+{% block site_name %}
+<a class="navbar-brand esp-hosted-brand" href="{{ nav.homepage.url|url }}">
+  <img class="esp-hosted-logo" src="{{ 'assets/espressif-logo.svg'|url }}" alt="Espressif">
+  <span class="esp-hosted-site-name">{{ config.site_name }}</span>
+</a>
+{% endblock %}
+
+{% block extrahead %}
+{{ super() }}
+<link rel="icon" type="image/svg+xml" href="{{ 'assets/espressif-icon.svg'|url }}">
+<meta name="theme-color" content="#e7352c">
+{% endblock %}
+
+{% block footer %}
+{{ super() }}
+<p class="esp-trademark">All Espressif's logos are trademarks of Espressif Systems (Shanghai) Co., Ltd.</p>
+{% endblock %}

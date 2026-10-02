@@ -15,6 +15,37 @@ firmware_version_auto_bump:
         - host/include/esp_fw_version.h
     - when: never
 
+# TODO: Re-enable generated HTML updates after the publishing/preview workflow is finalized.
+# The implementation is intentionally kept here so it can be restored without reconstruction.
+# generate_docs_html:
+#   stage: prepare
+#   image: "$ESP_CI_IMAGE"
+#   tags:
+#     - build
+#   before_script:
+#     - python3 -m venv .venv-docs
+#     - . .venv-docs/bin/activate
+#     - pip install --upgrade pip
+#     - pip install -r .gitlab/ci/docs-requirements.txt
+#   script:
+#     - .gitlab/ci/scripts/update-docs-html.sh
+#   rules:
+#     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID'
+#       changes:
+#         - docs/**/*
+#         - docs-theme/**/*
+#         - mkdocs.yml
+#         - .gitlab/ci/docs-requirements.txt
+#         - .gitlab/ci/scripts/update-docs-html.sh
+#     - if: '$CI_COMMIT_BRANCH'
+#       changes:
+#         - docs/**/*
+#         - docs-theme/**/*
+#         - mkdocs.yml
+#         - .gitlab/ci/docs-requirements.txt
+#         - .gitlab/ci/scripts/update-docs-html.sh
+#     - when: never
+
 validate_mirrored_files:
   stage: validate
   image: "$ESP_CI_IMAGE"
@@ -70,3 +101,59 @@ validate_wifi_lib_md5:
         - .gitlab/ci/scripts/check-wifi-lib-md5.sh
         - .gitlab/ci/validate.yml
     - when: never
+
+validate_docs:
+  stage: validate
+  image: "$ESP_CI_IMAGE"
+  tags:
+    - build
+  before_script:
+    - python3 -m venv .venv-docs
+    - . .venv-docs/bin/activate
+    - pip install --upgrade pip
+    - pip install -r .gitlab/ci/docs-requirements.txt
+  script:
+    - python3 tools/check_docs.py
+    - mkdocs build --strict --site-dir /tmp/esp-hosted-docs-html
+  rules:
+    - changes:
+        - README.md
+        - CONTRIBUTING.md
+        - ORIGIN.md
+        - docs/**/*
+        - docs-theme/**/*
+        - docs-html/**/*
+        - mkdocs.yml
+        - tools/check_docs.py
+        - .gitlab/ci/docs-requirements.txt
+        - .gitlab/ci/scripts/update-docs-html.sh
+        - .gitlab/ci/scripts/check-docs-html.sh
+        - .gitlab/ci/validate.yml
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# TODO: Re-enable committed HTML verification together with generate_docs_html.
+# validate_docs_html:
+#   stage: validate
+#   image: "$ESP_CI_IMAGE"
+#   tags:
+#     - build
+#   before_script:
+#     - python3 -m venv .venv-docs
+#     - . .venv-docs/bin/activate
+#     - pip install --upgrade pip
+#     - pip install -r .gitlab/ci/docs-requirements.txt
+#   script:
+#     - .gitlab/ci/scripts/check-docs-html.sh
+#   rules:
+#     - changes:
+#         - docs/**/*
+#         - docs-theme/**/*
+#         - docs-html/**/*
+#         - mkdocs.yml
+#         - .gitlab/ci/docs-requirements.txt
+#         - .gitlab/ci/scripts/update-docs-html.sh
+#         - .gitlab/ci/scripts/check-docs-html.sh
+#         - .gitlab/ci/validate.yml
+#     - if: '$CI_PIPELINE_SOURCE == "schedule"'
+#     - if: '$CI_PIPELINE_SOURCE == "web"'

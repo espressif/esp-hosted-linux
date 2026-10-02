@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="740" viewBox="0 0 1280 740" role="img" aria-labelledby="title desc">
+  <title id="title">ESP-Hosted-Linux SPI required signals</title>
+  <desc id="desc">Linux host connects SCLK, MOSI, MISO, chip select, Handshake, Data Ready, reset, and ground to an ESP device. Handshake and Data Ready are mandatory ESP-to-host GPIO signals. A separate schematic shows a recommended chip-select pull-up from CS to 3.3 volts through at least 10 kilo-ohms. Project default ESP GPIO assignments are shown by target family.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto-start-reverse" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#4b5563"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto-start-reverse" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#e7352c"/>
+    </marker>
+    <style>
+      .host{fill:#f7f8fa;stroke:#4b5563;stroke-width:2}
+      .esp{fill:#fffafa;stroke:#e7352c;stroke-width:2}
+      .inset{fill:#fffafa;stroke:#e7352c;stroke-width:1.5}
+      .title{font:700 21px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#111827;text-anchor:middle}
+      .sub{font:600 13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#6b7280;text-anchor:middle}
+      .signal{font:700 14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#111827;text-anchor:middle}
+      .requiredText{font:700 14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#c92f27;text-anchor:middle}
+      .pinHead{font:700 11px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#c92f27;text-anchor:middle}
+      .pin{font:600 11px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#111827;text-anchor:middle}
+      .note{font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#4b5563;text-anchor:middle}
+      .wire{stroke:#4b5563;stroke-width:2.2;fill:none}
+      .toesp{stroke:#4b5563;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+      .tohost{stroke:#4b5563;stroke-width:2.2;fill:none;marker-start:url(#arrow)}
+      .required{stroke:#e7352c;stroke-width:2.8;fill:none;marker-start:url(#arrowRed)}
+      .reset{stroke:#e7352c;stroke-width:2.3;fill:none;marker-end:url(#arrowRed)}
+      .pull{stroke:#e7352c;stroke-width:2;fill:#fff}
+      .vdd{stroke:#e7352c;stroke-width:2.5;fill:none}
+      .vddText{font:700 13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#c92f27;text-anchor:middle}
+      .resText{font:700 11px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#c92f27;text-anchor:middle}
+      .netText{font:700 12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#111827;text-anchor:middle}
+      .divider{stroke:#f0b8b5;stroke-width:1}
+      .labelBg{fill:#fff;opacity:.94}
+    </style>
+  </defs>
+
+  <rect class="host" x="35" y="55" width="205" height="510" rx="14" ry="14"/>
+  <text class="title" x="137" y="92">Linux host</text>
+  <text class="sub" x="137" y="116">SPI controller + GPIOs</text>
+
+  <rect class="esp" x="825" y="55" width="420" height="510" rx="14" ry="14"/>
+  <text class="title" x="1035" y="92">ESP device</text>
+  <text class="sub" x="1035" y="116">project default GPIOs</text>
+  <text class="pinHead" x="875" y="148">ESP32</text>
+  <text class="pinHead" x="950" y="148">S2/S3</text>
+  <text class="pinHead" x="1070" y="148">C2/C3/C5/C6</text>
+  <text class="pinHead" x="1190" y="148">C61</text>
+  <line class="divider" x1="845" y1="158" x2="1220" y2="158"/>
+
+  <path class="toesp" d="M240 175 H825"/><rect class="labelBg" x="470" y="160" width="80" height="22" rx="4"/><text class="signal" x="510" y="176">SCLK</text>
+  <text class="pin" x="875" y="179">IO14</text><text class="pin" x="950" y="179">IO12</text><text class="pin" x="1070" y="179">IO6</text><text class="pin" x="1190" y="179">IO6</text>
+
+  <path class="toesp" d="M240 230 H825"/><rect class="labelBg" x="470" y="215" width="80" height="22" rx="4"/><text class="signal" x="510" y="231">MOSI</text>
+  <text class="pin" x="875" y="234">IO13</text><text class="pin" x="950" y="234">IO11</text><text class="pin" x="1070" y="234">IO7</text><text class="pin" x="1190" y="234">IO7</text>
+
+  <path class="tohost" d="M240 285 H825"/><rect class="labelBg" x="470" y="270" width="80" height="22" rx="4"/><text class="signal" x="510" y="286">MISO</text>
+  <text class="pin" x="875" y="289">IO12</text><text class="pin" x="950" y="289">IO13</text><text class="pin" x="1070" y="289">IO2</text><text class="pin" x="1190" y="289">IO2</text>
+
+  <path class="toesp" d="M240 340 H825"/><rect class="labelBg" x="470" y="325" width="80" height="22" rx="4"/><text class="signal" x="510" y="341">CS</text>
+  <text class="pin" x="875" y="344">IO15</text><text class="pin" x="950" y="344">IO10</text><text class="pin" x="1070" y="344">IO10</text><text class="pin" x="1190" y="344">IO8</text>
+
+  <path class="required" d="M240 395 H825"/><rect class="labelBg" x="420" y="380" width="180" height="22" rx="4"/><text class="requiredText" x="510" y="396">Handshake — required</text>
+  <text class="pin" x="875" y="399">IO2</text><text class="pin" x="950" y="399">IO2</text><text class="pin" x="1070" y="399">IO3</text><text class="pin" x="1190" y="399">IO3</text>
+
+  <path class="required" d="M240 450 H825"/><rect class="labelBg" x="420" y="435" width="180" height="22" rx="4"/><text class="requiredText" x="510" y="451">Data Ready — required</text>
+  <text class="pin" x="875" y="454">IO4</text><text class="pin" x="950" y="454">IO4</text><text class="pin" x="1070" y="454">IO4</text><text class="pin" x="1190" y="454">IO4</text>
+
+  <path class="reset" d="M240 505 H825"/><rect class="labelBg" x="420" y="490" width="180" height="22" rx="4"/><text class="requiredText" x="510" y="506">Reset / Enable — required</text>
+  <text class="pin" x="875" y="509">EN</text><text class="pin" x="950" y="509">RST</text><text class="pin" x="1070" y="509">RST</text><text class="pin" x="1190" y="509">RST</text>
+
+  <path class="wire" d="M240 545 H825"/><rect class="labelBg" x="470" y="530" width="80" height="22" rx="4"/><text class="signal" x="510" y="546">Ground</text>
+
+  <!-- Separate CS pull-up schematic avoids implying a connection to adjacent SPI lines. -->
+  <rect class="inset" x="430" y="590" width="420" height="108" rx="12" ry="12"/>
+  <text class="sub" x="640" y="615">Recommended CS pull-up — same CS net as above</text>
+  <line class="vdd" x1="610" y1="620" x2="690" y2="620"/>
+  <text class="vddText" x="580" y="625">3.3 V</text>
+  <line class="pull" x1="650" y1="620" x2="650" y2="635"/>
+  <rect class="pull" x="643" y="635" width="14" height="26" rx="2"/>
+  <line class="pull" x1="650" y1="661" x2="650" y2="675"/>
+  <text class="resText" x="690" y="652">≥10 kΩ</text>
+  <text class="netText" x="650" y="691">CS</text>
+  <text class="note" x="640" y="724">Handshake, Data Ready, and Reset are mandatory. SPI GPIOs shown above are project defaults and may be configurable.</text>
+</svg>

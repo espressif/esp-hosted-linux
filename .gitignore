@@ -35,6 +35,9 @@ host/sdio/.*.cmd
 .ci-size-base-*/
 build-artifacts/
 
+# Documentation working environment
+.venv-docs/
+
 # General temporary files
 *.swp
 *~
