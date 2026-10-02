@@ -57,9 +57,9 @@ idf.py set-target ESP_TARGET
 idf.py menuconfig
 ```
 
-Replace `ESP_TARGET` with the selected target, such as `esp32c6`.
+Replace `ESP_TARGET` with the selected target, such as `esp32c6` (use `idf.py --preview set-target esp32s31` for ESP32-S31 in ESP-IDF v6.1).
 
-Under **Example Configuration → Transport layer**, choose **SDIO interface** or **SPI interface**. SDIO appears only when the target has SDIO-slave support.
+Under **Example Configuration → Transport layer**, choose **SDIO interface**, **SPI interface**, or **USB interface**. SDIO appears only when the target has SDIO-slave support, and USB appears on ESP32-S31.
 
 For SPI, keep the configured **Handshake** and **Data Ready** GPIOs consistent with the Linux host configuration and physical wiring.
 
@@ -95,6 +95,8 @@ From `host/`:
 make target=sdio
 # or
 make target=spi
+# or
+make target=usb
 ```
 
 For cross-builds, pass `ARCH`, `CROSS_COMPILE`, and `KERNEL`:
@@ -106,31 +108,37 @@ make target=sdio \
   KERNEL=/path/to/kernel/build
 ```
 
-Use `target=spi` for SPI. [Porting](../porting.md) covers bus, GPIO, pinctrl, and device-tree integration on another Linux platform.
+Use `target=spi` for SPI or `target=usb` for USB. [Porting](../porting.md) covers bus, GPIO, pinctrl, and device-tree integration on another Linux platform.
 
 ## 4. Load the Linux driver
 
-The Linux host must provide a GPIO connected to ESP reset/enable. Pass that Linux GPIO number with `resetpin=` when loading the module.
+ESP-Hosted kernel drivers do not take a `resetpin=` module argument. Reset and control GPIOs are owned by Device Tree or handled in-band:
 
-SDIO:
-
-```sh
-sudo modprobe bluetooth
-sudo modprobe cfg80211
-sudo insmod ./esp32_sdio.ko resetpin=GPIO_NUMBER
-```
-
-SPI:
+- **SDIO:** Post-enumeration reset and recovery are handled in-band over the SDIO bus. Insert the module directly:
 
 ```sh
 sudo modprobe bluetooth
 sudo modprobe cfg80211
-sudo insmod ./esp32_spi.ko resetpin=GPIO_NUMBER
+sudo insmod ./esp32_sdio.ko
 ```
 
-Replace `GPIO_NUMBER` with the Linux GPIO number connected to ESP reset/enable.
+- **SPI:** Reset, Handshake, and Data Ready GPIOs are described in Device Tree (`reset-gpios`, `handshake-gpios`, `data-ready-gpios`). The driver binds to the `espressif,esp32-spi` node:
 
-For SPI, **Handshake** and **Data Ready** must also be assigned in the host integration and physically connected to the ESP. See [Hardware setup](hardware-setup.md#spi).
+```sh
+sudo modprobe bluetooth
+sudo modprobe cfg80211
+sudo insmod ./esp32_spi.ko
+```
+
+On Raspberry Pi, `./rpi_init.sh spi` compiles and applies the Device Tree overlay (`overlays/esp32-spi.dtbo` and `spidev_disabler.dtbo`) automatically. See [Raspberry Pi reference](../reference/raspberry-pi.md) and [SPI Device Tree integration](../architecture/spi.md#device-tree-integration).
+
+- **USB:** Reset and recovery are handled via in-band USB vendor control requests:
+
+```sh
+sudo modprobe bluetooth
+sudo modprobe cfg80211
+sudo insmod ./esp32_usb.ko
+```
 
 Unload with:
 
@@ -138,6 +146,8 @@ Unload with:
 sudo rmmod esp32_sdio
 # or
 sudo rmmod esp32_spi
+# or
+sudo rmmod esp32_usb
 ```
 
 ## 5. Verify bring-up

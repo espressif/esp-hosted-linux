@@ -54,14 +54,14 @@ For new results, record at least:
 - Linux host and kernel
 - ESP target and firmware revision
 - band, channel, PHY mode, and channel width
-- SDIO/SPI clock
+- SDIO/SPI clock or USB speed
 - test tool and version
 - traffic direction and endpoint roles
 - network topology and AP/peer details
 
 ## Raw transport throughput
 
-Raw mode bypasses the normal Wi-Fi data path and stresses SDIO or SPI directly. It is useful for bus bring-up and transport testing; it is not a Wi-Fi application benchmark.
+Raw mode bypasses the normal Wi-Fi data path and stresses SDIO, SPI, or USB directly. It is useful for bus bring-up and transport testing; it is not a Wi-Fi application benchmark.
 
 Raw throughput testing requires `TEST_RAW_TP` in `host/include/esp_stats.h`. Build the matching module, then select the direction with the `raw_tp_mode` module parameter:
 
@@ -73,13 +73,19 @@ Raw throughput testing requires `TEST_RAW_TP` in `host/include/esp_stats.h`. Bui
 SDIO example:
 
 ```sh
-sudo insmod ./esp32_sdio.ko resetpin=GPIO_NUMBER raw_tp_mode=1
+sudo insmod ./esp32_sdio.ko raw_tp_mode=1
 ```
 
 SPI example:
 
 ```sh
-sudo insmod ./esp32_spi.ko resetpin=GPIO_NUMBER raw_tp_mode=2
+sudo insmod ./esp32_spi.ko raw_tp_mode=2
 ```
 
-Replace `GPIO_NUMBER` with the Linux GPIO connected to ESP reset/enable. For SPI, Handshake and Data Ready must also be configured and connected as described in [Hardware setup](../getting-started/hardware-setup.md#spi).
+USB example:
+
+```sh
+sudo insmod ./esp32_usb.ko raw_tp_mode=1
+```
+
+ESP-Hosted modules do not take a `resetpin=` argument. For SPI, reset, Handshake, and Data Ready are configured in Device Tree (see [Hardware setup](../getting-started/hardware-setup.md#spi) and [SPI Device Tree](../architecture/spi.md#device-tree-integration)). SDIO and USB use in-band control.

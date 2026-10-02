@@ -41,17 +41,38 @@ Do not copy ESP32-specific electrical or timing workarounds to newer targets wit
 
 Check:
 
-- host reset GPIO really resets ESP
+- Device Tree node `compatible = "espressif,esp32-spi"` is applied and driver is bound
+- host reset GPIO defined in Device Tree really resets ESP
 - ESP firmware is built for SPI
 - `spidev` does not own the same bus/CS
-- host and ESP use matching SPI mode
-- Handshake and Data Ready GPIOs are correct and generate interrupts
+- host and ESP use matching SPI mode (mode 2)
+- Handshake and Data Ready GPIOs are described with correct active polarity in Device Tree and generate interrupts
 - wiring is short with a good ground
 - SPI clock is low enough for initial bring-up
 
 The host starts SPI in mode 2 at 10 MHz. After boot information arrives it can switch to the clock advertised by firmware.
 
 If the controller keeps CS asserted longer than ESP expects, check firmware option `ESP_SPI_DEASSERT_HS_ON_CS`.
+
+## USB device is not detected
+
+1. Check physical USB cable connection and host USB port power.
+2. Confirm ESP32-S31 firmware is configured and built for USB transport (`CONFIG_ESP_USB_HOST_INTERFACE=y`).
+3. Check USB device enumeration in Linux:
+
+   ```sh
+   lsusb -d 303a:4002
+   dmesg | grep -i -E 'usb|esp32_usb'
+   ```
+
+   The device should appear with vendor ID `303a` and product ID `4002` (Espressif ESP32-S31 Hosted Network Adapter).
+4. Verify that the `esp32_usb` kernel module is loaded:
+
+   ```sh
+   lsmod | grep esp32_usb
+   ```
+
+5. If `esp32_usb` is loaded and the USB device enumerates, but WLAN does not appear, check `dmesg` for endpoint allocation errors or firmware boot notification timeouts.
 
 ## WLAN interface is missing
 
@@ -93,7 +114,7 @@ Check that AP security, PMF settings, band/channel, and firmware capability matc
 
 ## Bluetooth controller is missing
 
-For HCI over SDIO/SPI:
+For HCI over SDIO/SPI/USB:
 
 ```sh
 bluetoothctl list

@@ -1,6 +1,6 @@
 # Hardware setup
 
-ESP-Hosted-Linux connects an ESP device to a Linux host over SDIO or SPI. Both transports need a shared ground and a host-controlled ESP reset/enable signal. SPI additionally requires **Handshake** and **Data Ready** GPIOs from ESP to the host.
+ESP-Hosted-Linux connects an ESP device to a Linux host over SDIO, SPI, or USB. SDIO and SPI need a shared ground and a host-controlled ESP reset/enable signal. SPI additionally requires **Handshake** and **Data Ready** GPIOs from ESP to the host. USB uses native USB endpoints with in-band vendor control requests.
 
 All interface signals are 3.3 V logic. Do not connect them to 5 V logic without level shifting. Map the signals below to the Linux host's bus controller, pinctrl, and GPIO resources.
 
@@ -55,30 +55,37 @@ ESP-Hosted SPI uses SCLK, MOSI, MISO, chip select, reset, ground, Handshake, and
 
 **A pull-up of at least 10 kΩ on chip select helps keep the line from floating during reset or boot.**
 
-On the Linux host, configure the SPI controller, chip select, reset GPIO, and interrupt-capable GPIO inputs for Handshake and Data Ready. Keep the firmware GPIO assignments and physical wiring consistent with that host configuration.
+On the Linux host, configure the SPI controller, chip select, reset GPIO, and interrupt-capable GPIO inputs for Handshake and Data Ready in Device Tree (see [SPI Device Tree integration](../architecture/spi.md#device-tree-integration)). The driver binds to the Device Tree node and uses GPIO descriptors rather than module parameters. Keep the firmware GPIO assignments and physical wiring consistent with that host configuration.
 
 </details>
 
 <details markdown="1">
 <summary><strong>ESP SPI default GPIOs</strong></summary>
 
-| Function | ESP32 | ESP32-S2/S3 | ESP32-C2/C3/C5/C6 | ESP32-C61 |
-|---|---|---|---|---|
-| CS | IO15 | IO10 | IO10 | IO8 |
-| SCLK | IO14 | IO12 | IO6 | IO6 |
-| MISO | IO12 | IO13 | IO2 | IO2 |
-| MOSI | IO13 | IO11 | IO7 | IO7 |
-| Handshake (ESP → host) | IO2 | IO2 | IO3 | IO3 |
-| Data Ready (ESP → host) | IO4 | IO4 | IO4 | IO4 |
-| ESP reset | EN | RST | RST | RST |
+| Function | ESP32 | ESP32-S2/S3 | ESP32-S31 | ESP32-C2/C3/C5/C6 | ESP32-C61 |
+|---|---|---|---|---|---|
+| CS | IO15 | IO10 | IO23 | IO10 | IO8 |
+| SCLK | IO14 | IO12 | IO20 | IO6 | IO6 |
+| MISO | IO12 | IO13 | IO22 | IO2 | IO2 |
+| MOSI | IO13 | IO11 | IO21 | IO7 | IO7 |
+| Handshake (ESP → host) | IO2 | IO2 | IO3 | IO3 | IO3 |
+| Data Ready (ESP → host) | IO4 | IO4 | IO4 | IO4 | IO4 |
+| ESP reset | EN | RST | RST | RST | RST |
 
 These are the project defaults. Keep the active ESP firmware configuration and Linux host integration consistent if GPIO assignments are changed.
 
 </details>
 
+## USB
+
+ESP32-S31 provides a native USB 2.0 High-Speed bulk transport. Connect the ESP32-S31 USB port to a USB port on the Linux host using a standard USB cable.
+
+- No external pull-ups or sideband GPIO lines (such as Handshake, Data Ready, or reset) are needed.
+- Firmware recovery, data path enable/disable, and reset requests are handled directly over USB vendor control transfers.
+
 ## Bluetooth HCI over UART
 
-Bluetooth HCI can optionally use UART while Wi-Fi continues over SDIO or SPI. ESP firmware must be built for HCI UART, and host and ESP must use the same baud rate and flow-control mode.
+Bluetooth HCI can optionally use UART while Wi-Fi continues over SDIO, SPI, or USB. ESP firmware must be built for HCI UART, and host and ESP must use the same baud rate and flow-control mode.
 
 <details markdown="1">
 <summary><strong>ESP UART default GPIOs</strong></summary>

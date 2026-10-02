@@ -1,6 +1,6 @@
 # Architecture overview
 
-Linux keeps standard networking and Bluetooth interfaces. ESP firmware owns the radio/controller side. ESP-Hosted-Linux moves control messages and data between them over SDIO or SPI.
+Linux keeps standard networking and Bluetooth interfaces. ESP firmware owns the radio/controller side. ESP-Hosted-Linux moves control messages and data between them over SDIO, SPI, or USB.
 
 ![ESP-Hosted-Linux system architecture](../assets/system-architecture.svg)
 
@@ -30,7 +30,7 @@ Linux network stack
 ESP-Hosted driver
 ```
 
-Bluetooth over the hosted SDIO/SPI link uses Linux HCI:
+Bluetooth over the hosted SDIO/SPI/USB link uses Linux HCI:
 
 ```text
 BlueZ / HCI user space
@@ -42,7 +42,7 @@ ESP-Hosted driver
 
 Normal Wi-Fi and Bluetooth applications do not need a private ESP-Hosted user-space API. Module parameters and debugfs entries exist for setup, diagnostics, raw transport testing, OTA, and similar maintenance functions.
 
-When Bluetooth HCI is routed over UART instead, Linux attaches the UART HCI device through its normal Bluetooth UART path rather than sending HCI through the ESP-Hosted SDIO/SPI driver.
+When Bluetooth HCI is routed over UART instead, Linux attaches the UART HCI device through its normal Bluetooth UART path rather than sending HCI through the ESP-Hosted SDIO/SPI/USB driver.
 
 ## ESP firmware
 
@@ -50,14 +50,14 @@ ESP firmware lives in `esp/esp_driver/network_adapter/` and uses ESP-IDF radio/c
 
 It handles:
 
-- SDIO or SPI peripheral transport
+- SDIO, SPI, or USB peripheral transport
 - host command processing and firmware responses/events
 - Wi-Fi data forwarding
 - Bluetooth HCI forwarding when HCI shares the hosted transport
 
 ## Transport payload
 
-SDIO and SPI use the same packed 12-byte ESP-Hosted header before payload data. `offset` may be larger than 12 when DMA alignment padding is inserted.
+SDIO, SPI, and USB use the same packed 12-byte ESP-Hosted header before payload data. `offset` may be larger than 12 when DMA alignment padding is inserted.
 
 | Field | Size | Purpose |
 |---|---:|---|

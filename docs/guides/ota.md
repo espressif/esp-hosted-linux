@@ -2,23 +2,30 @@
 
 ESP-Hosted-Linux can send an ESP firmware image from Linux to ESP over the hosted command path.
 
-OTA is requested with the host driver's `ota_file` module parameter. Build the matching SDIO or SPI module first, then load it with the firmware image path.
+OTA is requested with the host driver's `ota_file` module parameter. Build the matching SDIO, SPI, or USB module first, then load it with the firmware image path.
 
 SDIO example:
 
 ```sh
 cd host
-sudo insmod ./esp32_sdio.ko resetpin=GPIO_NUMBER ota_file=/path/to/firmware.bin
+sudo insmod ./esp32_sdio.ko ota_file=/path/to/firmware.bin
 ```
 
 SPI example:
 
 ```sh
 cd host
-sudo insmod ./esp32_spi.ko resetpin=GPIO_NUMBER ota_file=/path/to/firmware.bin
+sudo insmod ./esp32_spi.ko ota_file=/path/to/firmware.bin
 ```
 
-Replace `GPIO_NUMBER` with the Linux GPIO connected to ESP reset/enable. For SPI, the required Handshake and Data Ready GPIOs must also be configured and connected.
+USB example:
+
+```sh
+cd host
+sudo insmod ./esp32_usb.ko ota_file=/path/to/firmware.bin
+```
+
+ESP-Hosted drivers do not use a `resetpin=` argument. For SPI, reset and sideband signals are configured in Device Tree; SDIO and USB use in-band control.
 
 If the ESP-Hosted module is already loaded, unload it before reloading with `ota_file=`. After the hosted link initializes, the host reads the image and sends it to ESP. ESP writes the OTA image and restarts; the hosted link must come back after that restart.
 

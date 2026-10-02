@@ -14,6 +14,7 @@ ESP firmware and the Linux host driver live at repository root:
 │   ├── include/                  Common host headers
 │   ├── sdio/                     SDIO transport implementation
 │   ├── spi/                      SPI transport implementation
+│   ├── usb/                      USB transport implementation
 │   ├── rpi_init.sh               Optional Raspberry Pi reference helper
 │   └── Makefile                  Out-of-tree kernel-module build
 ├── tools/                        Project utilities

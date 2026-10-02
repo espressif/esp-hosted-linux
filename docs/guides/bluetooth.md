@@ -2,7 +2,7 @@
 
 ESP-Hosted-Linux registers a standard Linux HCI controller when Bluetooth is enabled in ESP firmware. ESP32 supports BR/EDR and BLE; the other Bluetooth-capable targets in this repository use BLE. [Supported hardware](../reference/supported-hardware.md) has the target summary.
 
-## HCI over SDIO or SPI
+## HCI over SDIO, SPI, or USB
 
 When Bluetooth shares the hosted transport, the kernel driver registers HCI directly with the Linux Bluetooth stack.
 
@@ -21,7 +21,7 @@ sudo btmon
 
 ## HCI over UART
 
-Some setups keep Wi-Fi on SDIO/SPI and route Bluetooth HCI over UART. This needs matching configuration on both sides:
+Some setups keep Wi-Fi on SDIO/SPI/USB and route Bluetooth HCI over UART. This needs matching configuration on both sides:
 
 1. build ESP firmware with HCI UART enabled
 2. choose the UART baud rate and flow-control mode in ESP firmware

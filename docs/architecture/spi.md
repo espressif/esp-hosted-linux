@@ -14,7 +14,39 @@ Both signals must be assigned in the ESP firmware and Linux host configuration a
 
 Linux can start a transfer when it has data to send, but it waits for ESP readiness before clocking the bus.
 
-A Linux platform must map the SPI controller, chip select, reset GPIO, Handshake, and Data Ready through its normal device-tree/pinctrl or platform integration.
+A Linux platform maps the SPI controller, chip select, reset GPIO, Handshake, and Data Ready through Device Tree.
+
+## Device Tree integration
+
+The SPI host driver binds to an `espressif,esp32-spi` Device Tree node rather than using hard-coded GPIO numbers or kernel module parameters (`resetpin=` has been removed from the driver). The Device Tree node specifies:
+
+- `compatible = "espressif,esp32-spi"`: matches the Linux SPI driver
+- `reg`: SPI chip-select index on the controller
+- `spi-max-frequency`: controller and board safety maximum frequency (e.g. 30 MHz)
+- `spi-cpol`: standard Device Tree property selecting SPI mode 2 (CPOL=1, CPHA=0)
+- `reset-gpios`: GPIO descriptor for ESP reset/enable (active-low)
+- `handshake-gpios`: GPIO descriptor for Handshake interrupt input (active-high)
+- `data-ready-gpios`: GPIO descriptor for Data Ready interrupt input (active-high)
+
+Example Device Tree snippet:
+
+```dts
+&spi0 {
+    status = "okay";
+
+    esp32_spi: esp32_spi@0 {
+        compatible = "espressif,esp32-spi";
+        reg = <0>;
+        spi-max-frequency = <30000000>;
+        spi-cpol;
+        reset-gpios = <&gpio 6 GPIO_ACTIVE_LOW>;
+        handshake-gpios = <&gpio 22 GPIO_ACTIVE_HIGH>;
+        data-ready-gpios = <&gpio 27 GPIO_ACTIVE_HIGH>;
+    };
+};
+```
+
+The driver queries these pins via the standard Linux GPIO descriptor API (`devm_gpiod_get()`) and requests edge-triggered interrupts for Handshake and Data Ready based on the descriptor polarities.
 
 ## Transfer size, mode, and clock
 

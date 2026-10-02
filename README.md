@@ -4,7 +4,7 @@
 
 # ESP-Hosted-Linux
 
-ESP-Hosted-Linux runs Wi-Fi and Bluetooth on a supported Espressif SoC and exposes standard Linux WLAN and HCI interfaces on the host. Wi-Fi data and control travel over SDIO or SPI. Bluetooth HCI can share that link or use UART on supported setups.
+ESP-Hosted-Linux runs Wi-Fi and Bluetooth on a supported Espressif SoC and exposes standard Linux WLAN and HCI interfaces on the host. Wi-Fi data and control travel over SDIO, SPI, or USB. Bluetooth HCI can share that link or use UART on supported setups.
 
 Linux applications stay on normal interfaces: `cfg80211`/`nl80211` handle Wi-Fi control, network data uses the Linux network stack, and Bluetooth uses Linux HCI. Tools such as `wpa_supplicant`, `hostapd`, `iw`, and BlueZ work without a project-specific user-space API.
 
@@ -16,8 +16,8 @@ Linux applications stay on normal interfaces: `cfg80211`/`nl80211` handle Wi-Fi 
 
 - Standard Linux WLAN integration: `cfg80211`/`nl80211` control with a normal `wlanX` data path
 - Wi-Fi station and access-point modes through `wpa_supplicant` and `hostapd`
-- Bluetooth HCI over SDIO or SPI, with optional HCI-over-UART
-- SDIO and SPI transports between Linux and the ESP device
+- Bluetooth HCI over SDIO, SPI, or USB, with optional HCI-over-UART
+- SDIO, SPI, and USB transports between Linux and the ESP device
 - SDIO host sleep and ESP wakeup on supported Linux platforms
 - ESP firmware update from Linux over the hosted link
 - ESP firmware based on ESP-IDF
@@ -27,7 +27,8 @@ Linux applications stay on normal interfaces: `cfg80211`/`nl80211` handle Wi-Fi 
 | Transport | Supported ESP targets |
 |---|---|
 | **SDIO** | ESP32, ESP32-C5, ESP32-C6, ESP32-C61 |
-| **SPI** | ESP32, ESP32-S2, ESP32-S3, ESP32-C2, ESP32-C3, ESP32-C5, ESP32-C6, ESP32-C61 |
+| **SPI** | ESP32, ESP32-S2, ESP32-S3, ESP32-S31, ESP32-C2, ESP32-C3, ESP32-C5, ESP32-C6, ESP32-C61 |
+| **USB** | ESP32-S31 |
 
 Bluetooth and Wi-Fi PHY capabilities vary by target. [Supported hardware](docs/reference/supported-hardware.md) has the full target table and transport notes.
 
@@ -50,7 +51,7 @@ Peak values are maxima from available measurements and may come from different T
 1. Pick an ESP target and transport from [Supported hardware](docs/reference/supported-hardware.md).
 2. Connect the ESP device to the Linux host using [Hardware setup](docs/getting-started/hardware-setup.md).
 3. Build and flash ESP firmware using [Build, flash, and load](docs/getting-started/build-and-flash.md).
-4. Configure the host bus/GPIO integration, build the matching Linux module, and load it against the running kernel.
+4. Configure the host bus/Device Tree integration, build the matching Linux module, and load it against the running kernel.
 5. Continue with [Wi-Fi station](docs/guides/wifi-station.md), [Wi-Fi access point](docs/guides/wifi-access-point.md), or [Bluetooth](docs/guides/bluetooth.md).
 
 For the complete bring-up flow, follow [Quick start](docs/getting-started/quick-start.md). Platform integration details are in [Porting](docs/porting.md).

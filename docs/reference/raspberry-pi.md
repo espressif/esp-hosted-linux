@@ -6,7 +6,7 @@ This page collects the Raspberry Pi-specific pin mappings, boot configuration, U
 
 ## Pin numbering
 
-Pin numbers in the tables below are **physical 40-pin header numbers**. The `resetpin=` argument passed to the Linux module uses a **BCM GPIO number**. The project helper defaults to BCM6, which is physical pin 31.
+Pin numbers in the tables below are **physical 40-pin header numbers**. The `rpi_init.sh` helper uses **BCM GPIO numbers** when applying the SPI Device Tree overlay (`resetgpio=`, `handshakegpio=`, `datareadygpio=`). The helper defaults to BCM6 for reset (physical pin 31), BCM22 for Handshake (pin 15), and BCM27 for Data Ready (pin 13). Direct kernel module loading does not accept a `resetpin=` parameter.
 
 Raspberry Pi GPIO is 3.3 V logic. Do not connect ESP signals to 5 V logic.
 
@@ -96,9 +96,11 @@ From `host/`:
 ./rpi_init.sh sdio
 # or
 ./rpi_init.sh spi
+# or
+./rpi_init.sh usb
 ```
 
-The helper combines the common module build/load flow with Raspberry Pi-specific bus and GPIO setup. It uses BCM6 for ESP reset unless overridden.
+The helper combines the common module build/load flow with Raspberry Pi-specific bus and GPIO setup. For SPI, it compiles and applies the Device Tree overlay (`overlays/esp32-spi.dtbo` and `spidev_disabler.dtbo`) using BCM6 for ESP reset, BCM22 for Handshake, and BCM27 for Data Ready unless overridden. For SDIO, reset is handled in-band after enumeration. For USB, no GPIO or Device Tree setup is required; `./rpi_init.sh usb` builds and loads `esp32_usb.ko`, and the USB core binds the device when connected.
 
 Useful arguments include:
 
@@ -107,7 +109,9 @@ Useful arguments include:
 | `ap_support` | Build with access-point support |
 | `btuart` | Configure Raspberry Pi pins for 4-wire HCI UART |
 | `btuart_2pins` | Configure Raspberry Pi TX/RX pins for HCI UART without hardware flow control |
-| `resetpin=<BCM-number>` | Override the ESP reset GPIO; default is BCM6 |
+| `resetgpio=<BCM-number>` | Override ESP reset GPIO in SPI Device Tree overlay; default is BCM6 (`resetpin=` is accepted as an alias) |
+| `handshakegpio=<BCM-number>` | Override Handshake GPIO in SPI Device Tree overlay; default is BCM22 |
+| `datareadygpio=<BCM-number>` | Override Data Ready GPIO in SPI Device Tree overlay; default is BCM27 |
 | `rawtp_host_to_esp` | Run raw host-to-ESP transport traffic |
 | `rawtp_esp_to_host` | Run raw ESP-to-host transport traffic |
 | `ota_file=/path/to/firmware.bin` | Send a firmware image to ESP |

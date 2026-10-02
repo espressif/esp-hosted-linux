@@ -58,6 +58,12 @@ The interrupt path reads a combined register window and reuses the prefetched pa
 
 The host-sleep/wakeup implementation uses the SDIO power-save path plus a separate ESP-to-host wake GPIO. [Host sleep and ESP wakeup](../guides/host-sleep.md) covers that setup.
 
+## Reset and recovery
+
+ESP-Hosted SDIO does not accept or require a host GPIO module parameter (`resetpin=`). Once the SDIO function has enumerated, transport recovery and link reset use the in-band SDIO control protocol (`OPEN_DATA_PATH`, `CLOSE_DATA_PATH`, and the in-band SDIO reset handshake).
+
+If a custom board requires host-controlled power or reset before the SDIO function can enumerate, model that in the host platform's MMC Device Tree node (for example using `mmc-pwrseq-simple`).
+
 ## Hosted payload
 
 Wi-Fi data, HCI data, commands, responses, and events can share the SDIO link. The common header identifies interface and packet type. See [Architecture overview](overview.md#transport-payload).
