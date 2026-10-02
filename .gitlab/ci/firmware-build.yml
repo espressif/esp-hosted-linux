@@ -36,6 +36,8 @@ firmware_build:
         TRANSPORT: ["sdio", "spi"]
       - IDF_TARGET: ["esp32c5"]
         TRANSPORT: ["spi"]
+      - IDF_TARGET: ["esp32s31"]
+        TRANSPORT: ["spi", "usb"]
 
 # Preserve the old CI policy until ESP32-C5 SDIO is promoted to a hard gate.
 firmware_build_esp32c5_sdio:

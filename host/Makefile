@@ -49,6 +49,12 @@ ifeq ($(target), spi)
     module_objects += spi/esp_spi.o
 endif
 
+ifeq ($(target), usb)
+    ccflags-y += -I$(src)/usb
+    EXTRA_CFLAGS += -I$(M)/usb
+    module_objects += usb/esp_usb.o
+endif
+
 # Common source files
 module_objects += esp_bt.o main.o esp_cmd.o esp_utils.o esp_cfg80211.o esp_stats.o esp_debugfs.o esp_log.o
 CFLAGS_esp_log.o = -DDEBUG

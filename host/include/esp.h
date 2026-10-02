@@ -22,6 +22,7 @@
 
 #define ESP_IF_TYPE_SDIO        1
 #define ESP_IF_TYPE_SPI         2
+#define ESP_IF_TYPE_USB         3
 
 /* Network link status */
 #define ESP_LINK_DOWN           0
@@ -65,6 +66,7 @@ struct esp_adapter;
 
 #define MAX_COUNTRY_LEN 3
 #define ESP_TX_AGGR_SIZE_MAX       15872U
+#define ESP_USB_TX_AGGR_SIZE_MAX   16384U
 #define ESP_TX_AGGR_SIZE_ALIGN       512U
 
 enum adapter_flags_e {

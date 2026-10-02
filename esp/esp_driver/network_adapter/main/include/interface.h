@@ -63,6 +63,7 @@ typedef void *wlan_buf_handle_t;
 typedef enum {
     SDIO = 0,
     SPI = 1,
+    USB = 2,
 } transport_layer;
 
 typedef enum {

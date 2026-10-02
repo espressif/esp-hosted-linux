@@ -173,6 +173,10 @@ unload_esp_modules()
         echo "Unloading esp32_spi"
         run_root rmmod esp32_spi
     fi
+    if module_loaded esp32_usb; then
+        echo "Unloading esp32_usb"
+        run_root rmmod esp32_usb
+    fi
 }
 
 setup_spi()
@@ -248,16 +252,40 @@ setup_sdio()
     run_root insmod ./esp32_sdio.ko "${module_args[@]}"
 }
 
+setup_usb()
+{
+    local -a module_args
+
+    module_args=("raw_tp_mode=$RAW_TP_MODE")
+    if [ -n "$OTA_FILE" ]; then
+        module_args+=("ota_file=$OTA_FILE")
+    fi
+
+    # USB needs no Raspberry Pi GPIO or Device Tree setup. Loading the module
+    # is sufficient; the USB core binds it when the ESP32-S31 enumerates as
+    # 303a:4002.
+    run_root insmod ./esp32_usb.ko "${module_args[@]}"
+}
+
 wlan_init()
 {
     build_driver
     unload_esp_modules
 
-    if [ "$IF_TYPE" = "spi" ]; then
-        setup_spi
-    else
-        setup_sdio
-    fi
+    case "$IF_TYPE" in
+        spi)
+            setup_spi
+            ;;
+        sdio)
+            setup_sdio
+            ;;
+        usb)
+            setup_usb
+            ;;
+        *)
+            die "unsupported transport: $IF_TYPE"
+            ;;
+    esac
 
     if ! bringup_network_interface; then
         echo "WARNING: module loaded but wlan0 did not appear yet" >&2
@@ -283,7 +311,7 @@ usage()
 This script prepares a Raspberry Pi for ESP-Hosted bring-up.
 
 Usage:
-  ./rpi_init.sh [spi|sdio] [options]
+  ./rpi_init.sh [spi|sdio|usb] [options]
 
 Common options:
   btuart | btuart_4pins
@@ -306,6 +334,7 @@ Legacy:
 Examples:
   ./rpi_init.sh sdio
   ./rpi_init.sh spi
+  ./rpi_init.sh usb
   ./rpi_init.sh spi handshakegpio=5 datareadygpio=12
   ./rpi_init.sh spi resetgpio=6 handshakegpio=5 datareadygpio=12
 EOF
@@ -319,7 +348,7 @@ parse_arguments()
                 usage
                 exit 0
                 ;;
-            spi|sdio)
+            spi|sdio|usb)
                 IF_TYPE="$1"
                 ;;
             resetgpio=*)

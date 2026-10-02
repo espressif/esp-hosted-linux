@@ -113,7 +113,7 @@ void process_hci_rx_pkt(uint8_t *payload, uint16_t payload_len);
 
 void deinitialize_bluetooth(void);
 esp_err_t initialise_bluetooth(void);
-uint8_t get_bluetooth_capabilities(void);
+uint32_t get_bluetooth_capabilities(void);
 
 #endif /* CONFIG_BT_ENABLED */
 

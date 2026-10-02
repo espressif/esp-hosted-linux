@@ -259,10 +259,12 @@ int esp_init_bt(struct esp_adapter *adapter)
 
 	if (adapter->if_type == ESP_IF_TYPE_SDIO)
 		hdev->bus   = HCI_SDIO;
-    #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0))
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0))
 	else if (adapter->if_type == ESP_IF_TYPE_SPI)
 		hdev->bus   = HCI_SPI;
-    #endif
+#endif
+	else if (adapter->if_type == ESP_IF_TYPE_USB)
+		hdev->bus   = HCI_USB;
 
 	if (hdev->bus == INVALID_HDEV_BUS) {
 
@@ -270,6 +272,8 @@ int esp_init_bt(struct esp_adapter *adapter)
 			esp_err("Kernel version does not support HCI over SDIO BUS\n");
 		} else if (adapter->if_type == ESP_IF_TYPE_SPI) {
 			esp_err("Kernel version does not support HCI over SPI BUS\n");
+		} else if (adapter->if_type == ESP_IF_TYPE_USB) {
+			esp_err("Kernel version does not support HCI over USB BUS\n");
 		} else {
 			esp_err("HCI over expected BUS[%u] is not supported\n", adapter->if_type);
 		}
