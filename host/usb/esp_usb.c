@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * ESP32-S31 USB transport backend for the cfg80211 ESP-Hosted driver.
- *
- * Wire behavior follows the USB implementation proven on
- * feature/mac80211_new_implementation, adapted to this repository's
- * esp_payload_header/esp_if_ops ABI. RX URBs are preallocated and reused so
- * completion context never performs sleeping allocations.
  */
 
 #include <linux/module.h>
@@ -73,15 +68,6 @@ struct esp_usb_context {
 	u8 *rx_stream;
 	size_t rx_stream_len;
 	size_t rx_stream_cap;
-
-	atomic64_t rx_urbs_completed;
-	atomic64_t rx_bytes;
-	atomic64_t rx_bad_headers;
-	atomic64_t rx_stream_overflows;
-	atomic64_t tx_urbs_submitted;
-	atomic64_t tx_urbs_completed;
-	atomic64_t tx_bytes;
-	atomic64_t tx_errors;
 };
 
 static struct esp_adapter *s_adapter;
@@ -165,7 +151,6 @@ static bool esp_usb_parse_stream_locked(struct esp_usb_context *ctx)
 	while (ctx->rx_stream_len >= sizeof(*hdr)) {
 		hdr = (const struct esp_payload_header *)ctx->rx_stream;
 		if (!esp_usb_valid_header(ctx, hdr, &frame_len)) {
-			atomic64_inc(&ctx->rx_bad_headers);
 			memmove(ctx->rx_stream, ctx->rx_stream + 1,
 				ctx->rx_stream_len - 1);
 			ctx->rx_stream_len--;
@@ -200,10 +185,8 @@ static void esp_usb_ingest_stream(struct esp_usb_context *ctx,
 
 	spin_lock_irqsave(&ctx->rx_lock, flags);
 	while (len) {
-		if (ctx->rx_stream_len == ctx->rx_stream_cap) {
-			atomic64_inc(&ctx->rx_stream_overflows);
+		if (ctx->rx_stream_len == ctx->rx_stream_cap)
 			ctx->rx_stream_len = 0;
-		}
 
 		copy = min(len, ctx->rx_stream_cap - ctx->rx_stream_len);
 		memcpy(ctx->rx_stream + ctx->rx_stream_len, data, copy);
@@ -234,11 +217,8 @@ static void esp_usb_rx_complete(struct urb *urb)
 	    status == -ECONNRESET)
 		return;
 
-	atomic64_inc(&ctx->rx_urbs_completed);
-	if (!status && urb->actual_length > 0) {
-		atomic64_add(urb->actual_length, &ctx->rx_bytes);
+	if (!status && urb->actual_length > 0)
 		esp_usb_ingest_stream(ctx, slot->buf, urb->actual_length);
-	}
 
 	if (!ctx->running)
 		return;
@@ -313,12 +293,6 @@ static void esp_usb_tx_complete(struct urb *urb)
 	ctx = tx->ctx;
 
 	if (ctx) {
-		atomic64_inc(&ctx->tx_urbs_completed);
-		if (urb->status) {
-			atomic64_inc(&ctx->tx_errors);
-		} else {
-			atomic64_add(urb->actual_length, &ctx->tx_bytes);
-		}
 		atomic_dec(&ctx->tx_inflight);
 		if (ctx->running && !ctx->tx_quiesced && ctx->tx_wq)
 			queue_work(ctx->tx_wq, &ctx->tx_work);
@@ -364,7 +338,6 @@ static int esp_usb_submit_tx(struct esp_usb_context *ctx, struct sk_buff *skb)
 		return ret;
 	}
 
-	atomic64_inc(&ctx->tx_urbs_submitted);
 	return 0;
 }
 
@@ -446,9 +419,9 @@ static struct sk_buff *esp_usb_alloc_skb(u32 len)
 	u32 alloc_len;
 
 	/*
-	 * Match the alignment/headroom contract used by the existing SDIO/SPI
-	 * backends. Common TX code does not re-check alignment after calling the
-	 * transport allocator.
+	 * Keep the transport headroom and align the data pointer. Common TX
+	 * code does not re-check alignment after calling the transport
+	 * allocator.
 	 */
 	alloc_len = len + INTERFACE_HEADER_PADDING + SKB_DATA_ADDR_ALIGNMENT;
 	skb = netdev_alloc_skb(NULL, alloc_len);
@@ -485,8 +458,8 @@ static int esp_usb_rearm_rx(struct esp_usb_context *ctx)
 
 	/*
 	 * A failed completion-time resubmit leaves that persistent RX slot idle.
-	 * Kill all slots first, then re-arm the complete verified depth so recovery
-	 * cannot gradually degrade from 8 RX URBs to fewer URBs.
+	 * Kill all slots first, then re-arm all RX slots so recovery cannot
+	 * gradually degrade to fewer URBs.
 	 */
 	for (i = 0; i < ESP_USB_RX_URBS; i++) {
 		if (ctx->rx_slot[i].urb)
@@ -588,12 +561,6 @@ static int esp_usb_recover_transport(struct esp_adapter *adapter)
 	return esp_usb_vendor_request(ctx, ESP_USB_VENDOR_REQ_READY_REPLAY);
 }
 
-static int esp_usb_deinit_if(struct esp_adapter *adapter)
-{
-	(void)adapter;
-	return 0;
-}
-
 static struct esp_if_ops esp_usb_if_ops = {
 	.read = esp_usb_read,
 	.write = esp_usb_write,
@@ -601,7 +568,6 @@ static struct esp_if_ops esp_usb_if_ops = {
 	.quiesce_for_fw_reset = esp_usb_quiesce_for_fw_reset,
 	.reinit_after_fw_reset = esp_usb_reinit_after_fw_reset,
 	.recover_transport = esp_usb_recover_transport,
-	.deinit = esp_usb_deinit_if,
 };
 
 static int esp_usb_find_endpoints(struct esp_usb_context *ctx)

@@ -41,9 +41,6 @@ CONFIG_FREERTOS_PLACE_SNAPSHOT_FUNS_INTO_FLASH=y
 CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
 
 # TinyUSB vendor bulk support used by the ESP32-S31 USB transport.
-# Keeping these in the S31 target defaults makes a normal local idf.py
-# configuration compile the vendor class as well; the transport choice still
-# determines whether ESP-Hosted actually uses USB.
 CONFIG_TINYUSB_VENDOR_COUNT=1
 CONFIG_TINYUSB_VENDOR_RX_BUFSIZE=8192
 CONFIG_TINYUSB_VENDOR_TX_BUFSIZE=16384

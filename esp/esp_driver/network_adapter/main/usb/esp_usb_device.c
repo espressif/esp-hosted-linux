@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 /*
  * ESP32-S31 USB device transport for ESP-Hosted.
- *
- * This is the legacy esp_payload_header integration of the USB bulk transport
- * proven on feature/mac80211_new_implementation. USB is a byte stream, so RX
- * is explicitly de-framed before frames enter the existing interface layer.
  */
 
 #include "sdkconfig.h"
@@ -35,7 +31,7 @@
 #include "tusb.h"
 
 #if !defined(CONFIG_TINYUSB_VENDOR_COUNT) || (CONFIG_TINYUSB_VENDOR_COUNT < 1)
-#error "ESP32-S31 USB transport requires CONFIG_TINYUSB_VENDOR_COUNT >= 1; regenerate sdkconfig from the S31 defaults"
+#error "ESP32-S31 USB transport requires CONFIG_TINYUSB_VENDOR_COUNT >= 1"
 #endif
 
 
@@ -348,9 +344,9 @@ static esp_err_t usb_write_all(const uint8_t *data, size_t len)
     }
 
     /*
-     * Preserve the proven device-side short-packet behavior. A short logical
-     * frame ending exactly on a USB packet boundary gets one pad byte; the
-     * host byte-stream parser discards that byte before the next valid header.
+     * A short logical frame ending exactly on a USB packet boundary gets one
+     * pad byte; the host byte-stream parser discards that byte before the
+     * next valid header.
      */
     if ((len % s_usb.ep_mps) == 0 && len < ESP_USB_MAX_XFER) {
         const uint8_t pad = 0;

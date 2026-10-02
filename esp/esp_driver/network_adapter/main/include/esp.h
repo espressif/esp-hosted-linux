@@ -39,7 +39,6 @@ extern uint32_t sdio_tx_aggr_size;
 #define RX_BUF_SIZE              1600
 
 #elif defined CONFIG_ESP_USB_HOST_INTERFACE
-/* USB byte-stream framing is verified at a full 16 KiB window. */
 #define RX_BUF_SIZE              16384
 
 #else
