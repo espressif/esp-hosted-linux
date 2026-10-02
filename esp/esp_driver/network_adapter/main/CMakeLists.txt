@@ -3,8 +3,10 @@ set(COMPONENT_ADD_INCLUDEDIRS "./include")
 
 if(CONFIG_ESP_SDIO_HOST_INTERFACE)
     list(APPEND COMPONENT_SRCS sdio_slave_api.c)
-else(CONFIG_ESP_SPI_HOST_INTERFACE)
+elseif(CONFIG_ESP_SPI_HOST_INTERFACE)
     list(APPEND COMPONENT_SRCS spi_slave_api.c)
+elseif(CONFIG_ESP_USB_HOST_INTERFACE)
+    list(APPEND COMPONENT_SRCS usb/esp_usb_device.c)
 endif()
 
 

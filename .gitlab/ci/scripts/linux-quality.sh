@@ -56,7 +56,7 @@ fail_on_host_warning() {
 
 case "${MODE}" in
     warnings)
-        for transport in sdio spi; do
+        for transport in sdio spi usb; do
             build_one "${transport}" CC="ccache gcc" W=1
             fail_on_host_warning "${OUT}/${transport}.log" "W=1"
         done
@@ -65,7 +65,7 @@ case "${MODE}" in
     sparse)
         command -v sparse >/dev/null
 
-        for transport in sdio spi; do
+        for transport in sdio spi usb; do
             build_one "${transport}" CC="ccache gcc" C=2 CHECK=sparse
             fail_on_host_warning "${OUT}/${transport}.log" "sparse"
         done
@@ -102,7 +102,7 @@ case "${MODE}" in
 
         clang --version | head -1
 
-        for transport in sdio spi; do
+        for transport in sdio spi usb; do
             build_one "${transport}" \
                 CC="ccache clang" \
                 LD=ld.lld

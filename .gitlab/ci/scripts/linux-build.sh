@@ -44,8 +44,9 @@ require_kconfig CONFIG_CFG80211
 require_kconfig CONFIG_BT
 require_kconfig CONFIG_MMC
 require_kconfig CONFIG_SPI
+require_kconfig CONFIG_USB
 
-mkdir -p "${OUT_ROOT}/sdio" "${OUT_ROOT}/spi"
+mkdir -p "${OUT_ROOT}/sdio" "${OUT_ROOT}/spi" "${OUT_ROOT}/usb"
 
 build_transport() {
     local transport="$1"
@@ -90,6 +91,7 @@ build_transport() {
 
 build_transport sdio
 build_transport spi
+build_transport usb
 
 make -C "${HOST_DIR}" \
     KERNEL="${KERNEL}" \
@@ -110,4 +112,4 @@ if command -v ccache >/dev/null 2>&1; then
     ccache -s || true
 fi
 
-echo "=== PASS: Linux ${KERNEL_VERSION} SDIO + SPI ==="
+echo "=== PASS: Linux ${KERNEL_VERSION} SDIO + SPI + USB ==="

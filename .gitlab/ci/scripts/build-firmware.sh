@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IDF_TARGET="${1:?Usage: build-firmware.sh <idf-target> <sdio|spi>}"
-TRANSPORT="${2:?Usage: build-firmware.sh <idf-target> <sdio|spi>}"
+IDF_TARGET="${1:?Usage: build-firmware.sh <idf-target> <sdio|spi|usb>}"
+TRANSPORT="${2:?Usage: build-firmware.sh <idf-target> <sdio|spi|usb>}"
 
-[[ "$TRANSPORT" == "sdio" || "$TRANSPORT" == "spi" ]] || {
-    echo "ERROR: transport must be sdio or spi" >&2
+[[ "$TRANSPORT" == "sdio" || "$TRANSPORT" == "spi" || "$TRANSPORT" == "usb" ]] || {
+    echo "ERROR: transport must be sdio, spi or usb" >&2
     exit 2
 }
+
+if [[ "$TRANSPORT" == "usb" && "$IDF_TARGET" != "esp32s31" ]]; then
+    echo "ERROR: USB transport is supported only for esp32s31" >&2
+    exit 2
+fi
 
 PROJECT_ROOT="${CI_PROJECT_DIR:-$(pwd)}"
 DRIVER_ROOT="${PROJECT_ROOT}/esp/esp_driver"
@@ -65,6 +70,13 @@ cd "$APP_ROOT"
 rm -rf build sdkconfig sdkconfig.old
 
 SDK_DEFAULTS="sdkconfig.defaults"
+IDF_PREVIEW_ARGS=()
+
+# ESP32-S31 is still a preview target in the pinned ESP-IDF v6.1 revision.
+# Keep the flag scoped to S31 so stable targets retain their normal behavior.
+if [[ "$IDF_TARGET" == "esp32s31" ]]; then
+    IDF_PREVIEW_ARGS=(--preview)
+fi
 
 if [[ "$TRANSPORT" == "spi" ]]; then
     [[ -f sdkconfig.ci ]] || {
@@ -72,7 +84,27 @@ if [[ "$TRANSPORT" == "spi" ]]; then
         exit 1
     }
 
-    SDK_DEFAULTS="sdkconfig.defaults;sdkconfig.ci"
+    if [[ "$IDF_TARGET" == "esp32s31" ]]; then
+        [[ -f sdkconfig.defaults.esp32s31 ]] || {
+            echo "ERROR: sdkconfig.defaults.esp32s31 is required for ESP32-S31 SPI" >&2
+            exit 1
+        }
+        SDK_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32s31;sdkconfig.ci"
+    else
+        SDK_DEFAULTS="sdkconfig.defaults;sdkconfig.ci"
+    fi
+elif [[ "$TRANSPORT" == "usb" ]]; then
+    [[ -f sdkconfig.defaults.esp32s31_usb ]] || {
+        echo "ERROR: sdkconfig.defaults.esp32s31_usb is required for USB" >&2
+        exit 1
+    }
+
+    [[ -f sdkconfig.defaults.esp32s31 ]] || {
+        echo "ERROR: sdkconfig.defaults.esp32s31 is required for USB" >&2
+        exit 1
+    }
+
+    SDK_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32s31;sdkconfig.defaults.esp32s31_usb"
 fi
 
 printf '%s\n' \
@@ -83,11 +115,11 @@ printf '%s\n' \
     "transport    : ${TRANSPORT}" \
     "sdk defaults : ${SDK_DEFAULTS}"
 
-idf.py \
+idf.py "${IDF_PREVIEW_ARGS[@]}" \
     -D "SDKCONFIG_DEFAULTS=${SDK_DEFAULTS}" \
     set-target "$IDF_TARGET"
 
-idf.py \
+idf.py "${IDF_PREVIEW_ARGS[@]}" \
     -D "SDKCONFIG_DEFAULTS=${SDK_DEFAULTS}" \
     build
 

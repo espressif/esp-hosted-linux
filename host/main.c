@@ -439,13 +439,16 @@ void print_capabilities(u32 cap)
 		esp_info("\t * WLAN on SDIO\n");
 	else if (cap & ESP_WLAN_SPI_SUPPORT)
 		esp_info("\t * WLAN on SPI\n");
+	else if (cap & ESP_WLAN_USB_SUPPORT)
+		esp_info("\t * WLAN on USB\n");
 
 	if (cap & ESP_WLAN_GCMP_SUPPORT)
 		esp_info("\t * GCMP\n");
 
 	if ((cap & ESP_BT_UART_SUPPORT) ||
 		    (cap & ESP_BT_SDIO_SUPPORT) ||
-		    (cap & ESP_BT_SPI_SUPPORT)) {
+		    (cap & ESP_BT_SPI_SUPPORT) ||
+		    (cap & ESP_BT_USB_SUPPORT)) {
 		esp_info("\t * BT/BLE\n");
 		if (cap & ESP_BT_UART_SUPPORT)
 			esp_info("\t   - HCI over UART\n");
@@ -453,6 +456,8 @@ void print_capabilities(u32 cap)
 			esp_info("\t   - HCI over SDIO\n");
 		if (cap & ESP_BT_SPI_SUPPORT)
 			esp_info("\t   - HCI over SPI\n");
+		if (cap & ESP_BT_USB_SUPPORT)
+			esp_info("\t   - HCI over USB\n");
 
 		if ((cap & ESP_BLE_ONLY_SUPPORT) && (cap & ESP_BR_EDR_ONLY_SUPPORT))
 			esp_info("\t   - BT/BLE dual mode\n");
@@ -466,7 +471,8 @@ void print_capabilities(u32 cap)
 static int init_bt(struct esp_adapter *adapter)
 {
 	if ((adapter->capabilities & ESP_BT_SPI_SUPPORT) ||
-	    (adapter->capabilities & ESP_BT_SDIO_SUPPORT)) {
+	    (adapter->capabilities & ESP_BT_SDIO_SUPPORT) ||
+	    (adapter->capabilities & ESP_BT_USB_SUPPORT)) {
 		msleep(200);
 		esp_info("ESP Bluetooth init\n");
 		return esp_init_bt(adapter);
@@ -696,7 +702,9 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 				adapter->tx_aggr_size = le32_to_cpu(rx_buf_size_le);
 			}
 			if (!adapter->tx_aggr_size ||
-			    adapter->tx_aggr_size > ESP_TX_AGGR_SIZE_MAX ||
+			    (adapter->if_type == ESP_IF_TYPE_USB ?
+			     adapter->tx_aggr_size > ESP_USB_TX_AGGR_SIZE_MAX :
+			     adapter->tx_aggr_size > ESP_TX_AGGR_SIZE_MAX) ||
 			    (adapter->if_type != ESP_IF_TYPE_SPI &&
 			     adapter->tx_aggr_size % ESP_TX_AGGR_SIZE_ALIGN)) {
 				esp_err("Invalid slave RX aggregate size: %u\n",
@@ -786,6 +794,13 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 	} else if (adapter->if_type == ESP_IF_TYPE_SDIO) {
 		if (!(adapter->capabilities & ESP_WLAN_SDIO_SUPPORT)) {
 			esp_err("Firmware does not advertise WLAN-over-SDIO capability (0x%x)\n",
+				adapter->capabilities);
+			ret = -EPROTO;
+			goto fail;
+		}
+	} else if (adapter->if_type == ESP_IF_TYPE_USB) {
+		if (!(adapter->capabilities & ESP_WLAN_USB_SUPPORT)) {
+			esp_err("Firmware does not advertise WLAN-over-USB capability (0x%x)\n",
 				adapter->capabilities);
 			ret = -EPROTO;
 			goto fail;

@@ -111,6 +111,8 @@ enum ESP_CAPABILITIES {
 	ESP_BT_SPI_SUPPORT = (1 << 6),
 	ESP_CHECKSUM_ENABLED = (1 << 7),
 	ESP_WLAN_GCMP_SUPPORT = (1 << 8),
+	ESP_WLAN_USB_SUPPORT = (1 << 9),
+	ESP_BT_USB_SUPPORT = (1 << 10),
 };
 
 typedef enum {

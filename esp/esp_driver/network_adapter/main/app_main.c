@@ -183,6 +183,9 @@ static uint32_t get_capabilities()
 #if CONFIG_ESP_SPI_HOST_INTERFACE
     ESP_LOGI(TAG, "- WLAN over SPI");
     cap |= ESP_WLAN_SPI_SUPPORT;
+#elif CONFIG_ESP_USB_HOST_INTERFACE
+    ESP_LOGI(TAG, "- WLAN over USB");
+    cap |= ESP_WLAN_USB_SUPPORT;
 #else
     ESP_LOGI(TAG, "- WLAN over SDIO");
     cap |= ESP_WLAN_SDIO_SUPPORT;
@@ -988,7 +991,7 @@ void app_main()
 #endif
 
     if_context = interface_insert_driver(event_handler);
-#if CONFIG_ESP_SPI_HOST_INTERFACE
+#if CONFIG_ESP_SPI_HOST_INTERFACE || CONFIG_ESP_USB_HOST_INTERFACE
     datapath = 1;
 #endif
 
