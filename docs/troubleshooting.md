@@ -2,7 +2,7 @@
 
 Start at the transport and work upward:
 
-**power/wiring → bus enumeration → ESP boot exchange → WLAN/HCI registration → Wi-Fi/Bluetooth behavior**
+**power/wiring → bus enumeration → ESP boot exchange → WLAN/HCI/RCP registration → Wi-Fi/Bluetooth/Thread behavior**
 
 If the bus is not working, debugging `wpa_supplicant` or BlueZ first will not help.
 
@@ -18,7 +18,7 @@ dmesg
 
 Also save the ESP serial log. Record ESP target, transport, firmware revision, Linux kernel, host board, and steps to reproduce.
 
-For Wi-Fi protocol failures, capture traffic over the air when possible. For Bluetooth, use `btmon`.
+For Wi-Fi protocol failures, capture traffic over the air when possible. For Bluetooth, use `btmon`. For Thread/RCP failures, save the `ot-daemon` log and the requested/active radio-service values.
 
 ## SDIO device is not detected
 
@@ -121,7 +121,14 @@ bluetoothctl list
 sudo btmon
 ```
 
-Confirm Bluetooth is enabled in ESP firmware and Linux has the `bluetooth` module.
+Confirm Bluetooth is enabled in ESP firmware and Linux has the `bluetooth` module. For hosted HCI, also verify that the active service contains `bt`:
+
+```sh
+cat /sys/module/<esp32-module>/parameters/radio_service
+cat /sys/module/<esp32-module>/parameters/radio_service_active
+```
+
+Replace `<esp32-module>` with `esp32_sdio`, `esp32_spi`, or `esp32_usb`.
 
 For UART HCI also check:
 
@@ -131,6 +138,23 @@ For UART HCI also check:
 - matching flow-control mode (`flow` vs `noflow`)
 - no serial console or onboard Bluetooth service owns the UART
 - Linux HCI-UART attachment completed successfully
+
+## IEEE 802.15.4 RCP device is missing or the host stack disconnects
+
+For the hosted RCP path, check that firmware advertises RCP availability and that the host requested the service:
+
+```sh
+cat /sys/module/<esp32-module>/parameters/radio_service
+cat /sys/module/<esp32-module>/parameters/radio_service_active
+ls -l /dev/esp_rcp0
+dmesg | grep -i -E 'rcp|radio service'
+```
+
+`/dev/esp_rcp0` is created only after `154` is active. A second process cannot open the device while another RCP owner is active; it receives `EBUSY`.
+
+The driver treats a live RCP session as a stateful stream. Closing the active RCP file, changing to a service set that removes RCP, or detecting ambiguous Spinel transport loss can restart the ESP firmware. A host stack using an old generation can see `ENODEV`; restart that process after the ESP link has recovered.
+
+If activation fails, collect both host `dmesg` and the ESP serial log. Firmware-side fatal recovery messages start with `RCP fatal recovery:`.
 
 ## Host and firmware do not complete the boot/command exchange
 
@@ -162,5 +186,5 @@ Include:
 - firmware/host commit or release
 - host `dmesg`
 - ESP serial log
-- relevant `wpa_supplicant`, `hostapd`, BlueZ, or `btmon` logs
+- relevant `wpa_supplicant`, `hostapd`, BlueZ, `btmon`, or `ot-daemon` logs
 - air capture for Wi-Fi protocol failures when available

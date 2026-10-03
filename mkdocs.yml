@@ -27,12 +27,14 @@ nav:
       - Wi-Fi station: guides/wifi-station.md
       - Wi-Fi access point: guides/wifi-access-point.md
       - Bluetooth: guides/bluetooth.md
+      - IEEE 802.15.4 RCP (Thread / Zigbee): guides/thread-rcp.md
       - Host sleep: guides/host-sleep.md
       - OTA firmware update: guides/ota.md
   - Architecture:
       - Overview: architecture/overview.md
       - SDIO transport: architecture/sdio.md
       - SPI transport: architecture/spi.md
+      - USB transport: architecture/usb.md
   - Reference:
       - Supported hardware: reference/supported-hardware.md
       - Performance: reference/performance.md

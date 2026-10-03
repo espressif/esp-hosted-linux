@@ -26,7 +26,7 @@ For SDIO, follow CMD/DAT pull-up requirements for the ESP target. Avoid long jum
 
 ## Device tree and pinctrl
 
-ESP-Hosted kernel drivers do not use hardcoded GPIOs or module arguments (`resetpin=` has been removed from all modules). All hardware signal mappings and pin configurations are owned by the platform's Device Tree.
+ESP-Hosted kernel drivers do not use a host `resetpin=` module argument. SPI GPIO mappings belong in Device Tree, and SDIO pin/reset sequencing belongs in the platform MMC/pinctrl description. USB uses normal USB enumeration and does not need an ESP-Hosted Device Tree node.
 
 ### SPI Device Tree binding
 
@@ -99,6 +99,10 @@ The USB transport uses standard Linux USB subsystem enumeration. When ESP32-S31 
 
 If Bluetooth uses UART, configure TX/RX and optional CTS/RTS pinctrl. Remove any serial console using that UART. Linux and ESP must use the same baud rate and flow-control mode.
 
+### OpenThread RCP UART
+
+ESP32-S31 can use a dedicated UART for OpenThread RCP instead of the hosted transport. Configure TX/RX pinctrl for the selected `CONFIG_ESP_THREAD_RCP_UART_TX_PIN`/`RX_PIN`, keep hardware flow control disabled, and do not share the UART with Bluetooth HCI. The default RCP UART port is UART2 at 460800 baud.
+
 ## Build for another kernel
 
 `host/Makefile` accepts `ARCH`, `CROSS_COMPILE`, and `KERNEL`.
@@ -112,7 +116,7 @@ make -C host target=sdio \
   KERNEL=/path/to/kernel/build
 ```
 
-Use `target=spi` for SPI.
+Use `target=spi` for SPI or `target=usb` for USB.
 
 The kernel build directory must be prepared for external modules and match the module ABI used on the target. [Supported hardware](reference/supported-hardware.md#kernel-compatibility) lists the source-compatibility range.
 
@@ -123,6 +127,10 @@ Choose the ESP transport under **Example Configuration → Transport layer**.
 SPI options include Handshake/Data Ready GPIOs, queue sizes, checksum, controller choice where available, and `ESP_SPI_DEASSERT_HS_ON_CS`.
 
 SDIO appears only on targets with SDIO-slave support. Checksum, speed, card-detect, and host-wakeup settings are also in project Kconfig.
+
+USB appears on ESP32-S31 and configures TinyUSB vendor bulk endpoints, buffer sizes, and in-band control.
+
+Wi-Fi is independent of the hosted secondary-radio selector. If the firmware includes hosted Bluetooth or OpenThread RCP, use the Linux module parameter `radio_service=bt`, `154`, or `bt+154` as required. Check `radio_service_active` before debugging HCI or RCP registration.
 
 Keep firmware settings and physical wiring in sync.
 
@@ -153,6 +161,24 @@ Then inspect `dmesg` for probe, interrupt, or CMD53 errors.
 If no SDIO function appears, fix power, pinmux, pull-ups, card-detect/controller setup, or wiring before changing ESP-Hosted command code.
 
 [SDIO transport](architecture/sdio.md) describes the counters and register interface.
+
+## USB bring-up
+
+Check enumeration first:
+
+```sh
+lsusb -d 303a:4002
+```
+
+Then verify that the host loaded `esp32_usb` and bound interface 0:
+
+```sh
+lsmod | grep esp32_usb
+```
+
+Inspect `dmesg` for bulk endpoint discovery and boot event reception. If the device does not enumerate, check the USB cable, host USB controller port power, and firmware USB PHY configuration.
+
+[USB transport](architecture/usb.md) describes endpoints, stream framing, and reset recovery.
 
 ## Performance tuning
 

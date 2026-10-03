@@ -32,9 +32,19 @@ For driver or firmware changes, run the build/test flow that covers the code you
 
 ## Documentation changes
 
-Edit Markdown under `docs/` and the top-level `README.md` when needed. Do not edit `docs-html/` by hand.
+Edit Markdown under `docs/` and the top-level `README.md` when needed. The active documentation validation checks local links/anchors and performs a strict MkDocs build; generated HTML is not currently committed by the validation job.
 
-Project automation rebuilds the static HTML documentation when documentation source changes. It also verifies that committed `docs-html/` matches a fresh strict build, so stale or hand-edited generated files cannot pass validation.
+To run the same source checks locally:
+
+```sh
+python3 -m venv .venv-docs
+. .venv-docs/bin/activate
+pip install -r .gitlab/ci/docs-requirements.txt
+python3 tools/check_docs.py
+mkdocs build --strict --site-dir /tmp/esp-hosted-docs-html
+```
+
+Do not hand-edit generated MkDocs output.
 
 ## Commit sign-off
 
@@ -52,11 +62,11 @@ Open a GitHub issue and include enough information to reproduce the problem:
 
 - ESP target and board/module
 - Linux host and kernel
-- SDIO/SPI/UART setup and bus clock or UART baud rate
+- SDIO/SPI/USB/UART setup and SDIO/SPI clock, USB speed, or UART baud rate
 - ESP-IDF/firmware and host-driver revision
 - host `dmesg`
 - ESP serial log
-- relevant `wpa_supplicant`, `hostapd`, or BlueZ logs
+- relevant `wpa_supplicant`, `hostapd`, BlueZ/`btmon`, or OpenThread/`ot-daemon` logs
 - packet capture when the failure is protocol-related
 - clear reproduction steps
 

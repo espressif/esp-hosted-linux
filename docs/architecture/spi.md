@@ -63,7 +63,7 @@ Linux starts SPI at 10 MHz so the boot exchange can begin. Firmware includes its
 5. Both sides inspect the hosted header. A zero payload length means no packet in that direction.
 6. ESP prepares the next transaction.
 
-Linux keeps internal/control traffic, HCI traffic, and normal data in separate priority queues before sending them over SPI.
+Linux keeps control traffic, hosted Bluetooth HCI, OpenThread RCP, and normal Wi-Fi data in the ESP-Hosted priority queues before sending them over SPI.
 
 ## Sideband interrupts
 
@@ -84,6 +84,8 @@ Raise SPI speed only after repeated error-free transfers. Maximum stable speed d
 With jumper wires, shorten connections and reduce clock speed before treating corruption as a hosted-protocol problem.
 
 ## Hosted payload
+
+Wi-Fi data, hosted Bluetooth HCI, OpenThread RCP, commands, responses, and events use the common ESP-Hosted framing on SPI. Bluetooth and RCP traffic are present only when their runtime services are active.
 
 SPI uses the common header described in [Architecture overview](overview.md#transport-payload).
 

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1120" height="560" viewBox="0 0 1120 560" role="img" aria-labelledby="title desc">
   <title id="title">ESP-Hosted-Linux system architecture</title>
-  <desc id="desc">Linux applications use standard networking, cfg80211 nl80211, and Bluetooth HCI interfaces. ESP-Hosted-Linux bridges those kernel paths over SDIO or SPI to ESP-Hosted firmware, which connects to the ESP Wi-Fi and Bluetooth controller.</desc>
+  <desc id="desc">Linux applications use standard networking, cfg80211 nl80211, Bluetooth HCI, and an OpenThread RCP character device. ESP-Hosted-Linux carries those paths over SDIO, SPI, or USB to ESP firmware and the Wi-Fi, Bluetooth, and IEEE 802.15.4 radios.</desc>
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto-start-reverse" markerUnits="strokeWidth">
       <path d="M0,0 L0,6 L9,3 z" fill="#555"/>
@@ -25,20 +25,20 @@
   <rect class="group" x="25" y="25" width="650" height="510"/>
   <text class="groupLabel" x="50" y="60">Linux host</text>
 
-  <rect class="box" x="150" y="85" width="400" height="80"/>
+  <rect class="box" x="120" y="85" width="460" height="80"/>
   <text class="label" x="350" y="118">User space</text>
-  <text class="small" x="350" y="143">applications · wpa_supplicant · hostapd · iw · BlueZ</text>
+  <text class="small" x="350" y="143">applications · wpa_supplicant · hostapd · iw · BlueZ · ot-daemon</text>
 
-  <rect class="box" x="120" y="205" width="460" height="90"/>
-  <text class="label" x="350" y="238">Linux networking and Bluetooth</text>
-  <text class="small" x="350" y="265">network stack · cfg80211 / nl80211 · HCI</text>
+  <rect class="box" x="100" y="205" width="500" height="90"/>
+  <text class="label" x="350" y="238">Linux networking, Bluetooth, and RCP interfaces</text>
+  <text class="small" x="350" y="265">network stack · cfg80211 / nl80211 · HCI · /dev/esp_rcp0</text>
 
-  <rect class="box hosted" x="145" y="335" width="410" height="85"/>
+  <rect class="box hosted" x="120" y="335" width="460" height="85"/>
   <text class="label" x="350" y="368">ESP-Hosted-Linux host driver</text>
-  <text class="small" x="350" y="394">WLAN netdev · Wi-Fi control · hosted HCI</text>
+  <text class="small" x="350" y="394">WLAN netdev · Wi-Fi control · hosted HCI · Thread RCP stream</text>
 
-  <rect class="box" x="225" y="455" width="250" height="60"/>
-  <text class="label" x="350" y="493">Host SDIO / SPI</text>
+  <rect class="box" x="210" y="455" width="280" height="60"/>
+  <text class="label" x="350" y="493">Host SDIO / SPI / USB</text>
 
   <path class="bi" d="M350 165 V205"/>
   <path class="bi" d="M350 295 V335"/>
@@ -47,18 +47,18 @@
   <rect class="group espGroup" x="735" y="25" width="360" height="510"/>
   <text class="groupLabel espTitle" x="760" y="60">ESP device</text>
 
-  <rect class="box" x="790" y="95" width="250" height="85"/>
-  <text class="label" x="915" y="128">Wi-Fi / Bluetooth</text>
-  <text class="small" x="915" y="154">ESP-IDF radio / controller</text>
+  <rect class="box" x="775" y="95" width="280" height="85"/>
+  <text class="label" x="915" y="128">Wi-Fi / Bluetooth / 802.15.4</text>
+  <text class="small" x="915" y="154">ESP-IDF radio · controller · OpenThread RCP</text>
 
-  <rect class="box hosted" x="790" y="235" width="250" height="90"/>
+  <rect class="box hosted" x="770" y="235" width="290" height="90"/>
   <text class="label" x="915" y="270">ESP-Hosted firmware</text>
-  <text class="small" x="915" y="296">commands · events · data / HCI forwarding</text>
+  <text class="small" x="915" y="296">commands · events · WLAN / HCI / RCP forwarding</text>
 
-  <rect class="box" x="790" y="455" width="250" height="60"/>
-  <text class="label" x="915" y="493">ESP SDIO / SPI peripheral</text>
+  <rect class="box" x="775" y="455" width="280" height="60"/>
+  <text class="label" x="915" y="493">ESP SDIO / SPI / USB</text>
 
   <path class="bi" d="M915 180 V235"/>
   <path class="bi" d="M915 325 V455"/>
-  <path class="transport" d="M475 485 H790"/>
+  <path class="transport" d="M490 485 H775"/>
 </svg>

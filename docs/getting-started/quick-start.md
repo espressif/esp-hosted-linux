@@ -8,12 +8,12 @@ You need:
 
 - a supported ESP target and SDIO, SPI, or USB transport
 - a Linux host with a compiler, `make`, and headers/build tree for its running kernel
-- for SDIO and SPI, transport wiring plus a host-controlled ESP reset signal
+- for SDIO, the bus wiring and any platform-specific power-sequence/reset signal required before enumeration
 - for SPI, assigned and connected **Handshake** and **Data Ready** GPIOs
 - for USB, a standard USB connection between host and ESP
 - a serial connection for ESP flashing and logs
 - Git and the tools required by ESP-IDF
-- `iw` for Wi-Fi bring-up; BlueZ tools if you plan to use Bluetooth
+- `iw` for Wi-Fi bring-up, BlueZ tools for Bluetooth, and OpenThread POSIX (`ot-daemon` and `ot-ctl`) for Thread RCP bring-up
 
 Pick the target and transport from [Supported hardware](../reference/supported-hardware.md), then follow [Hardware setup](hardware-setup.md).
 
@@ -73,19 +73,38 @@ make target=spi
 make target=usb
 ```
 
-Load the required Linux subsystems and the matching ESP-Hosted module:
+Load the required Linux subsystems and one ESP-Hosted transport module:
 
 ```sh
 sudo modprobe bluetooth
 sudo modprobe cfg80211
+
+# Choose one:
 sudo insmod ./esp32_sdio.ko
-# or for SPI:
 sudo insmod ./esp32_spi.ko
-# or for USB:
 sudo insmod ./esp32_usb.ko
 ```
 
+The commands above select the default secondary-radio service (`none`). If Bluetooth or Thread is needed immediately, add `radio_service=` to the one module command you use instead of inserting the module a second time.
+
 ESP-Hosted kernel drivers do not take a `resetpin=` module argument. For SDIO and USB, reset and recovery are handled in-band. For SPI, reset, Handshake, and Data Ready GPIOs are defined in Device Tree under the `espressif,esp32-spi` node (see [SPI Device Tree](../architecture/spi.md#device-tree-integration) and [Raspberry Pi reference](../reference/raspberry-pi.md)).
+
+Wi-Fi is independent of the secondary-radio selection. Current firmware keeps hosted Bluetooth and Thread off until requested with `radio_service`:
+
+| Value | Hosted secondary services |
+|---|---|
+| `none` | none (Wi-Fi only) |
+| `bt` | Bluetooth HCI |
+| `154` | IEEE 802.15.4 RCP |
+| `bt+154` | Bluetooth HCI and IEEE 802.15.4 RCP |
+
+For example, use this as the USB module-load command when both hosted Bluetooth and Thread are required:
+
+```sh
+sudo insmod ./esp32_usb.ko radio_service=bt+154
+```
+
+The same parameter is available on the SDIO and SPI modules when firmware advertises the requested service. On an already loaded module, change it through `/sys/module/<module>/parameters/radio_service`.
 
 ## 4. Check bring-up
 
@@ -96,7 +115,17 @@ iw dev
 ip link
 ```
 
-You should see a `wlanX` interface created by ESP-Hosted-Linux. Check module state and kernel logs if it is missing:
+A successful Wi-Fi bring-up creates a `wlanX` interface. If `radio_service` includes `bt`, Linux also registers an HCI controller. If it includes `154`, the driver creates `/dev/esp_rcp0` after firmware confirms RCP activation.
+
+For example, with USB:
+
+```sh
+cat /sys/module/esp32_usb/parameters/radio_service_active
+ls -l /dev/esp_rcp0
+bluetoothctl list
+```
+
+Check module state and kernel logs if an expected interface is missing:
 
 ```sh
 lsmod | grep esp32
@@ -105,9 +134,10 @@ dmesg | tail -n 100
 
 If the ESP boot event never reaches Linux, start with [Troubleshooting](../troubleshooting.md).
 
-## 5. Use Wi-Fi or Bluetooth
+## 5. Use Wi-Fi, Bluetooth, or Thread
 
 - [Wi-Fi station](../guides/wifi-station.md)
 - [Wi-Fi access point](../guides/wifi-access-point.md)
 - [Bluetooth](../guides/bluetooth.md)
+- [IEEE 802.15.4 RCP (Thread / Zigbee)](../guides/thread-rcp.md)
 - [OTA firmware update](../guides/ota.md)

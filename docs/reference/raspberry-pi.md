@@ -60,6 +60,15 @@ dtoverlay=sdio,poll_once=off
 
 Reboot after changing it.
 
+## USB reference connection
+
+ESP32-S31 provides a native USB 2.0 High-Speed bulk interface. Connect the ESP32-S31 USB port directly to any available USB port on the Raspberry Pi using a standard USB cable.
+
+- No Raspberry Pi GPIOs, Device Tree overlays, or external D+/D- pull-ups are required.
+- VBUS is present on the normal USB cable; power the ESP board according to its board design.
+- Ready replay and firmware restart requests are communicated in-band with USB vendor control transfers.
+- Verify USB enumeration with `lsusb -d 303a:4002`.
+
 ## Bluetooth HCI over UART
 
 If Bluetooth HCI uses UART, connect the Raspberry Pi UART to the ESP-side pins listed in [Hardware setup](../getting-started/hardware-setup.md#bluetooth-hci-over-uart).
@@ -117,6 +126,18 @@ Useful arguments include:
 | `ota_file=/path/to/firmware.bin` | Send a firmware image to ESP |
 
 Run `./rpi_init.sh --help` for the complete argument list.
+
+### Select hosted Bluetooth or Thread
+
+`rpi_init.sh` loads the selected transport module with the default secondary-radio request (`none`). After bring-up, select hosted Bluetooth, Thread RCP, or both through sysfs:
+
+```sh
+# USB example
+echo bt+154 | sudo tee /sys/module/esp32_usb/parameters/radio_service
+cat /sys/module/esp32_usb/parameters/radio_service_active
+```
+
+Use `esp32_spi` or `esp32_sdio` in the path for those transports.
 
 ## Verify bring-up
 

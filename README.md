@@ -4,9 +4,9 @@
 
 # ESP-Hosted-Linux
 
-ESP-Hosted-Linux runs Wi-Fi and Bluetooth on a supported Espressif SoC and exposes standard Linux WLAN and HCI interfaces on the host. Wi-Fi data and control travel over SDIO, SPI, or USB. Bluetooth HCI can share that link or use UART on supported setups.
+ESP-Hosted-Linux runs Wi-Fi and Bluetooth on supported Espressif SoCs. On targets with an IEEE 802.15.4 radio, it can also expose an IEEE 802.15.4 Radio Co-Processor (RCP) to the host. The firmware backend uses ESP-IDF's OpenThread RCP and HDLC-framed Spinel; compatible Thread and Zigbee Radio Spinel host stacks can use the same RCP interface. Wi-Fi data and control use SDIO, SPI, or USB. Hosted Bluetooth HCI and RCP traffic can share that transport. Bluetooth HCI can use UART on supported targets, and ESP32-S31 can place the RCP on a dedicated UART.
 
-Linux applications stay on normal interfaces: `cfg80211`/`nl80211` handle Wi-Fi control, network data uses the Linux network stack, and Bluetooth uses Linux HCI. Tools such as `wpa_supplicant`, `hostapd`, `iw`, and BlueZ work without a project-specific user-space API.
+Linux uses its normal interfaces: `cfg80211`/`nl80211` and a `wlanX` netdev for Wi-Fi, Linux HCI for Bluetooth, and `/dev/esp_rcp0` for the hosted OpenThread Spinel stream. Existing tools such as `wpa_supplicant`, `hostapd`, `iw`, BlueZ, and OpenThread POSIX (`ot-daemon`) are used on the host.
 
 <p align="center">
   <img src="docs/assets/system-architecture.svg" width="820" alt="ESP-Hosted-Linux architecture">
@@ -17,6 +17,7 @@ Linux applications stay on normal interfaces: `cfg80211`/`nl80211` handle Wi-Fi 
 - Standard Linux WLAN integration: `cfg80211`/`nl80211` control with a normal `wlanX` data path
 - Wi-Fi station and access-point modes through `wpa_supplicant` and `hostapd`
 - Bluetooth HCI over SDIO, SPI, or USB, with optional HCI-over-UART
+- IEEE 802.15.4 RCP byte-stream endpoint (`/dev/esp_rcp0`) over supported SDIO, SPI, or USB paths for compatible Thread or Zigbee Radio Spinel host stacks; hosted Bluetooth and the RCP are runtime-selectable secondary services
 - SDIO, SPI, and USB transports between Linux and the ESP device
 - SDIO host sleep and ESP wakeup on supported Linux platforms
 - ESP firmware update from Linux over the hosted link
@@ -52,15 +53,15 @@ Peak values are maxima from available measurements and may come from different T
 2. Connect the ESP device to the Linux host using [Hardware setup](docs/getting-started/hardware-setup.md).
 3. Build and flash ESP firmware using [Build, flash, and load](docs/getting-started/build-and-flash.md).
 4. Configure the host bus/Device Tree integration, build the matching Linux module, and load it against the running kernel.
-5. Continue with [Wi-Fi station](docs/guides/wifi-station.md), [Wi-Fi access point](docs/guides/wifi-access-point.md), or [Bluetooth](docs/guides/bluetooth.md).
+5. Continue with [Wi-Fi station](docs/guides/wifi-station.md), [Wi-Fi access point](docs/guides/wifi-access-point.md), [Bluetooth](docs/guides/bluetooth.md), or [IEEE 802.15.4 RCP (Thread / Zigbee)](docs/guides/thread-rcp.md).
 
 For the complete bring-up flow, follow [Quick start](docs/getting-started/quick-start.md). Platform integration details are in [Porting](docs/porting.md).
 
 ## 📚 Documentation
 
 - **Getting started** — [Quick start](docs/getting-started/quick-start.md), [hardware setup](docs/getting-started/hardware-setup.md), [build and flash](docs/getting-started/build-and-flash.md)
-- **Wi-Fi and Bluetooth** — [Station](docs/guides/wifi-station.md), [access point](docs/guides/wifi-access-point.md), [Bluetooth](docs/guides/bluetooth.md), [host sleep](docs/guides/host-sleep.md), [OTA](docs/guides/ota.md)
-- **Architecture** — [Overview](docs/architecture/overview.md), [SDIO](docs/architecture/sdio.md), [SPI](docs/architecture/spi.md)
+- **Wireless guides** — [Station](docs/guides/wifi-station.md), [access point](docs/guides/wifi-access-point.md), [Bluetooth](docs/guides/bluetooth.md), [IEEE 802.15.4 RCP (Thread / Zigbee)](docs/guides/thread-rcp.md), [host sleep](docs/guides/host-sleep.md), [OTA](docs/guides/ota.md)
+- **Architecture** — [Overview](docs/architecture/overview.md), [SDIO](docs/architecture/sdio.md), [SPI](docs/architecture/spi.md), [USB](docs/architecture/usb.md)
 - **Reference** — [Supported hardware](docs/reference/supported-hardware.md), [performance](docs/reference/performance.md), [repository layout](docs/reference/repository-layout.md), [Raspberry Pi reference setup](docs/reference/raspberry-pi.md)
 - **Platform work** — [Porting](docs/porting.md), [troubleshooting](docs/troubleshooting.md)
 - **Migration** — [Move from `esp_hosted`](docs/migration.md), [repository origin](ORIGIN.md)

@@ -38,7 +38,7 @@ If the ESP-Hosted module is already loaded, unload it before reloading with `ota
 
 ## After updating
 
-Check the ESP firmware version/log after restart and confirm the Linux WLAN/HCI interfaces return.
+Check the ESP firmware version/log after restart and confirm the configured Linux WLAN, HCI, and RCP endpoints return.
 
 If the update fails, identify which stage failed: opening the image, sending data, writing ESP flash, booting the new image, or re-establishing the hosted link.
 
