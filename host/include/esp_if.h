@@ -30,6 +30,7 @@ struct esp_if_ops {
 	/* Host caused or observed a firmware reincarnation: rebase then OPEN. */
 	void (*note_fw_reset)(struct esp_adapter *adapter);
 	void (*flush_bt_traffic)(struct esp_adapter *adapter);
+	void (*flush_rcp_traffic)(struct esp_adapter *adapter);
 	int (*deinit)(struct esp_adapter *adapter);
 };
 

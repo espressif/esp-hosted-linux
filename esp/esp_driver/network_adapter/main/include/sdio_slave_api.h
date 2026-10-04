@@ -17,9 +17,12 @@
 #ifndef __SDIO_SLAVE_API_H
 #define __SDIO_SLAVE_API_H
 
-#if CONFIG_SOC_SDIO_SLAVE_SUPPORTED
-#else
+#include "esp_err.h"
+
+#if !CONFIG_SOC_SDIO_SLAVE_SUPPORTED
 #error "SDIO is not supported for this target. Please use SPI"
 #endif
+
+esp_err_t sdio_prepare_fatal_reboot(void);
 
 #endif

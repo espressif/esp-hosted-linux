@@ -31,6 +31,9 @@
 #include "esp_private/wifi.h"
 #include "esp.h"
 #include "interface.h"
+#if CONFIG_ESP_SDIO_HOST_INTERFACE
+#include "sdio_slave_api.h"
+#endif
 #include "esp_wpa.h"
 #include "app_main.h"
 #include "esp_wifi.h"
@@ -45,6 +48,12 @@
 #endif
 #endif
 #include "endian.h"
+#ifdef CONFIG_ESP_HOSTED_RCP
+#include "esp_rcp.h"
+#endif
+#ifdef CONFIG_ESP_THREAD_RCP_UART
+#include "thread_rcp_uart.h"
+#endif
 
 #include "slave_bt.c"
 #include "stats.h"
@@ -87,6 +96,217 @@ interface_context_t *if_context = NULL;
 interface_handle_t *if_handle = NULL;
 
 QueueHandle_t to_host_queue[MAX_PRIORITY_QUEUES] = {NULL};
+
+#ifdef CONFIG_ESP_HOSTED_RCP
+static portMUX_TYPE s_rcp_fatal_mux = portMUX_INITIALIZER_UNLOCKED;
+static bool s_rcp_fatal_pending;
+static TaskHandle_t s_rcp_fatal_task;
+static const char *s_rcp_fatal_reason;
+
+static void esp_hosted_rcp_fatal_restart_task(void *arg)
+{
+    (void)arg;
+
+    for (;;) {
+        const char *reason;
+
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        portENTER_CRITICAL(&s_rcp_fatal_mux);
+        reason = s_rcp_fatal_reason;
+        portEXIT_CRITICAL(&s_rcp_fatal_mux);
+
+        ESP_LOGE(TAG, "RCP fatal recovery: %s",
+                 reason ? reason : "unspecified failure");
+
+        /*
+         * Yield one tick so the task that detected the failure can return its
+         * current RX/TX buffer before the transport is quiesced.
+         */
+        vTaskDelay(1);
+
+        datapath = 0;
+        if (if_handle)
+            if_handle->state = DEACTIVE;
+
+#if CONFIG_ESP_SDIO_HOST_INTERFACE
+        {
+            esp_err_t ret = sdio_prepare_fatal_reboot();
+
+            if (ret != ESP_OK)
+                ESP_LOGE(TAG, "RCP pre-reboot SDIO quiesce failed: %s",
+                         esp_err_to_name(ret));
+        }
+#endif
+
+        esp_restart();
+    }
+}
+
+static esp_err_t esp_hosted_rcp_fatal_worker_init(void)
+{
+    if (s_rcp_fatal_task)
+        return ESP_OK;
+
+    if (xTaskCreate(esp_hosted_rcp_fatal_restart_task, "rcp_fatal",
+                    TASK_DEFAULT_STACK_SIZE, NULL,
+                    TASK_DEFAULT_PRIO + 2, &s_rcp_fatal_task) != pdTRUE) {
+        s_rcp_fatal_task = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
+    return ESP_OK;
+}
+
+void esp_hosted_rcp_fatal_restart(const char *reason)
+{
+    TaskHandle_t task = NULL;
+    bool schedule = false;
+
+    portENTER_CRITICAL(&s_rcp_fatal_mux);
+    if (s_rcp_fatal_task && !s_rcp_fatal_pending) {
+        s_rcp_fatal_pending = true;
+        s_rcp_fatal_reason = reason;
+        task = s_rcp_fatal_task;
+        schedule = true;
+    }
+    portEXIT_CRITICAL(&s_rcp_fatal_mux);
+
+    if (!schedule) {
+        if (!s_rcp_fatal_task)
+            ESP_LOGE(TAG, "RCP fatal worker unavailable; RCP must remain disabled");
+        return;
+    }
+
+    /*
+     * Close the datapath synchronously. The pre-created recovery worker then
+     * performs ownership cleanup without allocating memory in the failure path.
+     */
+    datapath = 0;
+    if (if_handle)
+        if_handle->state = DEACTIVE;
+
+    xTaskNotifyGive(task);
+}
+#endif
+
+
+static uint8_t s_radio_service = ESP_RADIO_SERVICE_NONE;
+static bool s_radio_service_command_seen;
+
+void esp_radio_service_snapshot(uint8_t *active, uint64_t *rcp_nonce)
+{
+    if (active)
+        *active = s_radio_service;
+    if (rcp_nonce) {
+#ifdef CONFIG_ESP_HOSTED_RCP
+        *rcp_nonce = (s_radio_service & ESP_RADIO_SERVICE_IEEE802154) ?
+            esp_hosted_rcp_session_nonce() : 0;
+#else
+        *rcp_nonce = 0;
+#endif
+    }
+}
+
+esp_err_t esp_radio_service_apply(uint8_t requested, uint8_t *active,
+                                  uint8_t *flags, uint64_t *rcp_nonce)
+{
+    esp_err_t ret = ESP_OK;
+    uint8_t add_mask;
+#ifdef CONFIG_BT_ENABLED
+    bool bt_started_now = false;
+#endif
+
+    if (requested & ~ESP_RADIO_SERVICE_MASK)
+        return ESP_ERR_INVALID_ARG;
+
+    s_radio_service_command_seen = true;
+
+    if (flags)
+        *flags = 0;
+
+    if (requested == s_radio_service) {
+        esp_radio_service_snapshot(active, rcp_nonce);
+        return ESP_OK;
+    }
+
+    /*
+     * Adding a radio service is safe in-place: the IDF coexistence arbiter
+     * handles Wi-Fi, Bluetooth and IEEE 802.15.4 sharing the S31 RF.
+     *
+     * Removing a running service still crosses controller/OpenThread lifetime
+     * boundaries. Keep that transition fail-closed via the existing controlled
+     * firmware reincarnation until every backend has a proven hot-stop path.
+     */
+    if (s_radio_service & ~requested) {
+        if (flags)
+            *flags |= ESP_RADIO_SERVICE_F_RESTART_REQUIRED;
+        esp_radio_service_snapshot(active, rcp_nonce);
+        return ESP_OK;
+    }
+
+    add_mask = requested & ~s_radio_service;
+
+    if (add_mask & ESP_RADIO_SERVICE_BT) {
+#if defined(CONFIG_BT_ENABLED) && defined(BLUETOOTH_HCI)
+        ret = initialise_bluetooth();
+        if (ret != ESP_OK)
+            goto out;
+        s_radio_service |= ESP_RADIO_SERVICE_BT;
+        bt_started_now = true;
+#else
+        /*
+         * HCI-over-UART is a physically independent interface. It is started
+         * at boot and is deliberately outside ESP-Hosted radio-service
+         * control.
+         */
+        ret = ESP_ERR_NOT_SUPPORTED;
+        goto out;
+#endif
+    }
+
+    if (add_mask & ESP_RADIO_SERVICE_IEEE802154) {
+#ifdef CONFIG_ESP_HOSTED_RCP
+        ret = esp_hosted_rcp_fatal_worker_init();
+        if (ret != ESP_OK)
+            goto rollback_bt;
+
+        ret = esp_hosted_rcp_init();
+        if (ret != ESP_OK)
+            goto rollback_bt;
+
+#if defined(CONFIG_ESP_HOSTED_RCP_OPENTHREAD)
+        ret = esp_hosted_rcp_openthread_start();
+        if (ret != ESP_OK) {
+            esp_hosted_rcp_deinit();
+            goto rollback_bt;
+        }
+#elif !defined(CONFIG_ESP_HOSTED_RCP_LOOPBACK_TEST)
+        esp_hosted_rcp_deinit();
+        ret = ESP_ERR_NOT_SUPPORTED;
+        goto rollback_bt;
+#endif
+        s_radio_service |= ESP_RADIO_SERVICE_IEEE802154;
+#else
+        ret = ESP_ERR_NOT_SUPPORTED;
+        goto rollback_bt;
+#endif
+    }
+
+    goto out;
+
+rollback_bt:
+#ifdef CONFIG_BT_ENABLED
+    if (bt_started_now) {
+        deinitialize_bluetooth();
+        s_radio_service &= ~ESP_RADIO_SERVICE_BT;
+    }
+#endif
+
+out:
+    esp_radio_service_snapshot(active, rcp_nonce);
+    return ret;
+}
 
 /* send_task handle so producers can wake it via xTaskNotifyGive instead of
  * the send_task polling every tick (vTaskDelay(1)). NULL until the task starts. */
@@ -174,6 +394,22 @@ uint8_t dev_mac[MAC_ADDR_LEN] = {0};
 #if CONFIG_ESP_SDIO_HOST_INTERFACE
 extern void wake_host();
 #endif
+
+static uint32_t get_extended_capabilities(void)
+{
+    uint32_t cap = 0;
+
+#if defined(CONFIG_ESP_HOSTED_RCP) || \
+    (defined(CONFIG_BT_ENABLED) && defined(BLUETOOTH_HCI))
+    cap |= ESP_EXT_CAP_RADIO_SERVICE_CTRL;
+    ESP_LOGI(TAG, "- Runtime-selectable ESP-Hosted secondary-radio services");
+#endif
+#ifdef CONFIG_ESP_HOSTED_RCP
+    cap |= ESP_EXT_CAP_RCP_AVAILABLE;
+    ESP_LOGI(TAG, "   - IEEE 802.15.4 RCP available for runtime activation");
+#endif
+    return cap;
+}
 
 static uint32_t get_capabilities()
 {
@@ -423,6 +659,18 @@ void process_tx_pkt(interface_buffer_handle_t *buf_handle)
             ESP_LOGE(TAG, "E2H_TRANSPORT_WRITE_FAILED if=%u pkt=%u len=%u ret=%"PRId32,
                      buf_handle->if_type, buf_handle->pkt_type,
                      buf_handle->payload_len, ret);
+#ifdef CONFIG_ESP_HOSTED_RCP
+            if (buf_handle->if_type == ESP_RCP_IF) {
+                /*
+                 * Spinel is a stateful byte stream. Once an RCP packet has
+                 * been handed to the physical transport, retrying it cannot
+                 * prove whether the host consumed any/all bytes. Fail the
+                 * firmware incarnation instead of silently desynchronizing.
+                 */
+                ESP_LOGE(TAG, "RCP transport delivery ambiguous");
+                esp_hosted_rcp_fatal_restart("E2H transport delivery failed");
+            }
+#endif
         } else if (ret > 0 && cmd_response) {
             ESP_LOGD(TAG, "CMD_RESP_TRANSPORT_OK code=%u seq=%u bytes=%"PRId32,
                      cmd_code, cmd_seq, ret);
@@ -703,6 +951,24 @@ void process_priv_commamd(uint8_t if_type, uint8_t *payload, uint16_t payload_le
     esp_cmd_dispatch(if_type, payload, payload_len);
 }
 
+static bool esp_rcp_fail_corrupt_h2e(
+    const struct esp_payload_header *header, const char *reason)
+{
+#ifdef CONFIG_ESP_HOSTED_RCP
+    if (esp_hosted_rcp_fail_closed_required()) {
+        ESP_LOGE(TAG, "RCP H2E stream may be truncated: %s if=%u type=%u",
+                 reason, header ? header->if_type : 0xff,
+                 header ? header->packet_type : 0xff);
+        esp_hosted_rcp_fatal_restart(reason);
+        return true;
+    }
+#else
+    (void)header;
+    (void)reason;
+#endif
+    return false;
+}
+
 void process_rx_pkt(interface_buffer_handle_t *buf_handle)
 {
     static const struct esp_payload_header zero_padding_header;
@@ -738,6 +1004,8 @@ void process_rx_pkt(interface_buffer_handle_t *buf_handle)
                      pos, buf_handle->payload_len, header->if_type,
                      header->packet_type, offset, header->flags,
                      le16toh(header->checksum));
+            if (esp_rcp_fail_corrupt_h2e(header, "zero H2E payload"))
+                goto done;
             break;
         }
         if (!ESP_OFFSET_VALID(offset)) {
@@ -746,6 +1014,8 @@ void process_rx_pkt(interface_buffer_handle_t *buf_handle)
                      "len=%u offset=%u if=%u type=%u",
                      pos, buf_handle->payload_len, payload_len, offset,
                      header->if_type, header->packet_type);
+            if (esp_rcp_fail_corrupt_h2e(header, "invalid H2E offset"))
+                goto done;
             break;
         }
 
@@ -758,6 +1028,8 @@ void process_rx_pkt(interface_buffer_handle_t *buf_handle)
                      pos, buf_handle->payload_len, payload_len, offset,
                      frame_len, RX_BUF_SIZE, header->if_type,
                      header->packet_type);
+            if (esp_rcp_fail_corrupt_h2e(header, "H2E frame out of bounds"))
+                goto done;
             break;
         }
 
@@ -773,6 +1045,8 @@ void process_rx_pkt(interface_buffer_handle_t *buf_handle)
                      pos, buf_handle->payload_len, payload_len, offset,
                      header->if_type, header->packet_type, checksum,
                      rx_checksum);
+            if (esp_rcp_fail_corrupt_h2e(header, "H2E checksum mismatch"))
+                goto done;
             break;
         }
 #endif
@@ -785,6 +1059,41 @@ void process_rx_pkt(interface_buffer_handle_t *buf_handle)
 #endif
         /*ESP_LOG_BUFFER_HEXDUMP("SDIO Rx", payload, payload_len, ESP_LOG_INFO);*/
 
+#ifdef CONFIG_ESP_HOSTED_RCP
+        if (header->if_type == ESP_RCP_IF) {
+            if (header->packet_type == PACKET_TYPE_RCP_SESSION) {
+                if (payload_len == sizeof(struct esp_rcp_session_marker)) {
+                    const struct esp_rcp_session_marker *marker =
+                        (const struct esp_rcp_session_marker *)payload;
+                    uint64_t nonce_le;
+                    esp_err_t session_ret;
+
+                    memcpy(&nonce_le, &marker->nonce, sizeof(nonce_le));
+                    session_ret = esp_hosted_rcp_session_start_from_host(
+                        marker->version, le64toh(nonce_le));
+                    if (session_ret != ESP_OK) {
+                        ESP_LOGE(TAG, "RCP session marker processing failed: %s",
+                                 esp_err_to_name(session_ret));
+                        esp_hosted_rcp_fatal_restart(
+                            "H2E RCP session marker processing failed");
+                        goto done;
+                    }
+                } else {
+                    ESP_LOGW(TAG, "Ignoring stale RCP session marker len=%u",
+                             payload_len);
+                }
+            } else if (header->packet_type != PACKET_TYPE_DATA) {
+                ESP_LOGE(TAG, "Invalid RCP packet type=%u",
+                         header->packet_type);
+                esp_hosted_rcp_fatal_restart("invalid H2E RCP packet type");
+                goto done;
+            } else if (esp_hosted_rcp_rx_from_host(payload, payload_len) != ESP_OK) {
+                ESP_LOGE(TAG, "RCP RX queue overflow/unavailable");
+                esp_hosted_rcp_fatal_restart("H2E RCP queue overflow/unavailable");
+                goto done;
+            }
+        } else
+#endif
         if (header->packet_type == PACKET_TYPE_COMMAND_REQUEST) {
             /* Process command Request */
             /*ESP_LOG_BUFFER_HEXDUMP("Rx Cmd", payload, payload_len, ESP_LOG_INFO);*/
@@ -831,8 +1140,30 @@ void process_rx_pkt(interface_buffer_handle_t *buf_handle)
             }
 #if defined(CONFIG_BT_ENABLED) && BLUETOOTH_HCI
             else if (header->if_type == ESP_HCI_IF) {
-                /*ESP_LOG_BUFFER_HEXDUMP("H->S BT", payload, payload_len, ESP_LOG_INFO);*/
-                process_hci_rx_pkt(payload, payload_len);
+                /*
+                 * Backward compatibility: pre-runtime hosts create hciX from
+                 * the legacy BT capability bits and immediately send HCI.
+                 * If no runtime-selection command has been seen, activate BT
+                 * lazily on that first packet. New hosts always send SET
+                 * RADIO_SERVICE (including "none"), so they retain default-off.
+                 */
+                if (!(s_radio_service & ESP_RADIO_SERVICE_BT) &&
+                    !s_radio_service_command_seen) {
+                    esp_err_t bt_ret = initialise_bluetooth();
+
+                    if (bt_ret == ESP_OK) {
+                        s_radio_service |= ESP_RADIO_SERVICE_BT;
+                        ESP_LOGI(TAG, "Legacy host detected; Bluetooth activated lazily");
+                    } else {
+                        ESP_LOGE(TAG, "Legacy BT activation failed: %s",
+                                 esp_err_to_name(bt_ret));
+                    }
+                }
+                if (s_radio_service & ESP_RADIO_SERVICE_BT)
+                    process_hci_rx_pkt(payload, payload_len);
+                else
+                    ESP_LOGW(TAG, "Dropping HCI while radio service mask=0x%02x",
+                             s_radio_service);
             }
 #endif
             else if (header->if_type == ESP_TEST_IF) {
@@ -844,6 +1175,7 @@ void process_rx_pkt(interface_buffer_handle_t *buf_handle)
     }
     print_h2e_stats();
 
+done:
     /* Free buffer handle */
     if (buf_handle->free_buf_handle && buf_handle->priv_buffer_handle) {
         buf_handle->free_buf_handle(buf_handle->priv_buffer_handle);
@@ -952,7 +1284,7 @@ void app_main()
     esp_err_t ret;
     uint8_t prio_q_idx = 0;
     uint32_t capa = 0;
-
+    uint32_t ext_capa = 0;
 #ifdef CONFIG_BT_ENABLED
     uint8_t mac[MAC_ADDR_LEN] = {0};
 #endif
@@ -972,6 +1304,15 @@ void app_main()
     ret = initialise_wifi();
     ESP_ERROR_CHECK(ret);
 
+#ifdef CONFIG_ESP_THREAD_RCP_UART
+    /*
+     * Dedicated Thread RCP is independent of the ESP-Hosted data path and
+     * starts at boot, just like a standalone RCP image.
+     */
+    ret = esp_thread_rcp_uart_start();
+    ESP_ERROR_CHECK(ret);
+#endif
+
     init_sem = xSemaphoreCreateBinary();
     if (init_sem == NULL) {
         ESP_LOGE(TAG, "Failed to create init semaphore\n");
@@ -979,8 +1320,17 @@ void app_main()
     }
 
 #ifdef CONFIG_BT_ENABLED
-    initialise_bluetooth();
+#ifdef BLUETOOTH_UART
+    /*
+     * Preserve the legacy independent HCI-over-UART product mode. There is no
+     * ESP-Hosted HCI endpoint in this configuration, so the controller must be
+     * available without a Hosted radio-service command.
+     */
+    ret = initialise_bluetooth();
+    ESP_ERROR_CHECK(ret);
+#endif
 
+    /* Hosted HCI stays runtime-selectable; UART HCI is already active above. */
     ret = esp_read_mac(mac, ESP_MAC_BT);
     if (ret) {
         ESP_LOGE(TAG, "Failed to read BT Mac addr\n");
@@ -1021,9 +1371,14 @@ void app_main()
 
     set_gpio_cd_pin();
 
+    /* Advertise support only. The host selects the secondary radio at runtime. */
+    ext_capa = get_extended_capabilities();
+
     /* send capabilities to host */
     if (datapath || xSemaphoreTake(init_sem, portMAX_DELAY)) {
-        send_bootup_event_to_host(capa);
+        ret = send_bootup_event_to_host(capa, ext_capa);
+        if (ret != ESP_OK)
+            ESP_LOGE(TAG, "Failed to publish boot event: %s", esp_err_to_name(ret));
     }
 
     debug_set_wifi_logging();

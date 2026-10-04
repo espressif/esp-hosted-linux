@@ -143,6 +143,105 @@ menu "Example Configuration"
         help
             Enable/disable sleeps while OTA operations
 
+    config ESP_HOSTED_RCP
+        bool "IEEE 802.15.4 RCP byte stream over ESP-Hosted"
+        depends on SOC_IEEE802154_SUPPORTED
+        default y if IDF_TARGET_ESP32S31
+        default n
+        help
+            Add a stack-agnostic Spinel/HDLC byte-stream channel over the
+            selected ESP-Hosted SDIO/SPI/USB transport. This is the preferred
+            ESP32-S31 product transport whenever ESP-Hosted is used: it reuses
+            the existing framed, flow-controlled host bus and avoids a separate
+            UART integration. Dedicated Thread UART RCP remains available as an
+            explicit opt-in for products that intentionally keep radio host
+            interfaces physically separate.
+
+    config ESP_HOSTED_RCP_LOOPBACK_TEST
+        bool "RCP transport loopback test backend"
+        depends on ESP_HOSTED_RCP
+        default n
+        help
+            Echo Host-to-ESP RCP bytes back to the host instead of passing
+            them to a radio backend. Test-only; validates the Hosted byte
+            stream over SDIO/SPI/USB without an ESP-IDF custom RCP transport.
+
+    config ESP_HOSTED_RCP_LOOPBACK_DELAY_MS
+        int "RCP loopback response delay (test only)"
+        depends on ESP_HOSTED_RCP_LOOPBACK_TEST
+        range 0 1000
+        default 0
+        help
+            Delay each loopback response to exercise close/reopen session
+            boundaries with a deterministic late firmware response. This has
+            no effect unless the test-only loopback backend is enabled.
+
+    config ESP_HOSTED_RCP_OPENTHREAD
+        bool "Bind Hosted RCP stream to ESP-IDF OpenThread RCP"
+        depends on ESP_HOSTED_RCP && !ESP_HOSTED_RCP_LOOPBACK_TEST
+        depends on OPENTHREAD_ENABLED && OPENTHREAD_RADIO && OPENTHREAD_RCP_CUSTOM
+        default y
+        help
+            Run the ESP-IDF OpenThread radio co-processor on the native
+            IEEE 802.15.4 radio and carry its HDLC-framed Spinel stream over
+            ESP_RCP_IF. Thread/Zigbee policy remains on the host.
+
+    config ESP_HOSTED_RCP_RX_QUEUE_SIZE
+        int "RCP Host-to-ESP queued chunks"
+        depends on ESP_HOSTED_RCP
+        range 4 64
+        default 16
+        help
+            Number of complete Hosted RCP chunks buffered for the RCP backend.
+            Overflow is session-fatal rather than silently dropping Spinel bytes.
+
+    config ESP_THREAD_RCP_UART
+        bool "Expose OpenThread RCP over a dedicated UART (explicit opt-in)"
+        depends on IDF_TARGET_ESP32S31 && SOC_IEEE802154_SUPPORTED
+        depends on OPENTHREAD_ENABLED && OPENTHREAD_RADIO && OPENTHREAD_RCP_UART
+        depends on !ESP_HOSTED_RCP
+        default n
+        help
+            Start the native IEEE 802.15.4 OpenThread RCP on a UART that is
+            independent of ESP-Hosted. Prefer ESP_HOSTED_RCP when SDIO/SPI/USB
+            is available. Enable this only when the customer intentionally
+            requires a physically separate Thread interface (or does not use
+            an ESP-Hosted RCP path). Select OPENTHREAD_RCP_UART instead of
+            OPENTHREAD_RCP_CUSTOM before enabling this option.
+
+    config ESP_THREAD_RCP_UART_PORT
+        int "Dedicated Thread RCP UART port"
+        depends on ESP_THREAD_RCP_UART
+        range 0 3
+        default 2
+        help
+            ESP32-S31 high-performance UART used for Thread Spinel. UART2 is
+            the default so Bluetooth HCI can independently use UART1.
+
+    config ESP_THREAD_RCP_UART_BAUD
+        int "Dedicated Thread RCP UART baud rate"
+        depends on ESP_THREAD_RCP_UART
+        range 115200 5000000
+        default 460800
+
+    config ESP_THREAD_RCP_UART_TX_PIN
+        int "Dedicated Thread RCP UART TX GPIO"
+        depends on ESP_THREAD_RCP_UART
+        range -1 61
+        default -1
+        help
+            GPIO routed to Thread RCP UART TX. -1 keeps the UART's existing
+            pin routing.
+
+    config ESP_THREAD_RCP_UART_RX_PIN
+        int "Dedicated Thread RCP UART RX GPIO"
+        depends on ESP_THREAD_RCP_UART
+        range -1 61
+        default -1
+        help
+            GPIO routed to Thread RCP UART RX. -1 keeps the UART's existing
+            pin routing.
+
     config ESP_SERIAL_DEBUG
         bool "Debug Serial driver data path"
         default 0

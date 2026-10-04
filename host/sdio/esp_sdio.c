@@ -19,6 +19,7 @@
 #include "esp_if.h"
 #include "esp_sdio_api.h"
 #include "esp_bt_api.h"
+#include "esp_rcp_api.h"
 #include "esp_cmd.h"
 #include "esp_api.h"
 #include <linux/kthread.h>
@@ -718,9 +719,12 @@ static void esp_sdio_note_fw_reset(struct esp_adapter *adapter)
 
 
 static DEFINE_MUTEX(esp_sdio_handshake_mutex);
-static atomic_t esp_sdio_hci_write_ambiguous = ATOMIC_INIT(0);
+static atomic_t esp_sdio_stateful_write_ambiguous = ATOMIC_INIT(0);
 
-static bool esp_sdio_aggr_has_hci_command(const u8 *data, u16 size)
+#define ESP_SDIO_STATEFUL_HCI BIT(0)
+#define ESP_SDIO_STATEFUL_RCP BIT(1)
+
+static bool esp_sdio_aggr_has_stateful(const u8 *data, u16 size)
 {
 	u32 pos = 0;
 
@@ -738,7 +742,7 @@ static bool esp_sdio_aggr_has_hci_command(const u8 *data, u16 size)
 		frame_len = (u32)offset + len;
 		if (frame_len > size - pos)
 			return true;
-		if (header->if_type == ESP_HCI_IF)
+		if (header->if_type == ESP_HCI_IF || header->if_type == ESP_RCP_IF)
 			return true;
 		pos += ALIGN(frame_len, 4);
 	}
@@ -748,17 +752,17 @@ static bool esp_sdio_aggr_has_hci_command(const u8 *data, u16 size)
 static int esp_sdio_write_block_guard(struct esp_sdio_context *context, u32 reg,
 		u8 *data, u16 size, u8 lock)
 {
-	bool hci_cmd = esp_sdio_aggr_has_hci_command(data, size);
+	bool stateful = esp_sdio_aggr_has_stateful(data, size);
 	int ret = esp_write_block(context, reg, data, size, lock);
 
-	if (ret && hci_cmd)
-		atomic_set(&esp_sdio_hci_write_ambiguous, 1);
+	if (ret && stateful)
+		atomic_set(&esp_sdio_stateful_write_ambiguous, 1);
 	return ret;
 }
 
 static void esp_sdio_schedule_transport_guard(struct esp_adapter *adapter)
 {
-	if (atomic_xchg(&esp_sdio_hci_write_ambiguous, 0)) {
+	if (atomic_xchg(&esp_sdio_stateful_write_ambiguous, 0)) {
 		esp_schedule_fw_reset_recovery(adapter);
 		esp_request_firmware_restart(adapter);
 		return;
@@ -768,7 +772,7 @@ static void esp_sdio_schedule_transport_guard(struct esp_adapter *adapter)
 
 static void esp_sdio_schedule_fw_guard(struct esp_adapter *adapter)
 {
-	atomic_set(&esp_sdio_hci_write_ambiguous, 0);
+	atomic_set(&esp_sdio_stateful_write_ambiguous, 0);
 	esp_schedule_fw_reset_recovery(adapter);
 }
 
@@ -1121,7 +1125,7 @@ static int esp_sdio_recover_transport(struct esp_adapter *adapter)
 	return ret;
 }
 
-static void esp_sdio_flush_bt_traffic(struct esp_adapter *adapter)
+static void esp_sdio_flush_if_traffic(struct esp_adapter *adapter, u8 if_type)
 {
 	struct esp_sdio_context *context = adapter ? adapter->if_context : NULL;
 	struct sk_buff *skb, *tmp;
@@ -1140,7 +1144,7 @@ static void esp_sdio_flush_bt_traffic(struct esp_adapter *adapter)
 			if (skb->len < sizeof(*header))
 				continue;
 			header = (struct esp_payload_header *)skb->data;
-			if (header->if_type == ESP_HCI_IF) {
+			if (header->if_type == if_type) {
 				__skb_unlink(skb, &context->tx_q[prio]);
 				if (atomic_read(&tx_pending))
 					atomic_dec(&tx_pending);
@@ -1151,13 +1155,21 @@ static void esp_sdio_flush_bt_traffic(struct esp_adapter *adapter)
 		spin_unlock_irqrestore(&context->tx_q[prio].lock, flags);
 	}
 
-	if (atomic_read(&context->tx_aggr_has_hci)) {
-		wait_event_timeout(context->tx_aggr_waitq,
-				   atomic_read(&context->tx_aggr_has_hci) == 0,
-				   msecs_to_jiffies(100));
-		if (atomic_read(&context->tx_aggr_has_hci)) {
-			esp_schedule_fw_reset_recovery(adapter);
-			esp_request_firmware_restart(adapter);
+	{
+		u32 stateful_bit = if_type == ESP_HCI_IF ? ESP_SDIO_STATEFUL_HCI :
+				   if_type == ESP_RCP_IF ? ESP_SDIO_STATEFUL_RCP : 0;
+
+		if (stateful_bit &&
+		    (atomic_read(&context->tx_aggr_stateful_mask) & stateful_bit)) {
+			wait_event_timeout(context->tx_aggr_stateful_waitq,
+				!(atomic_read(&context->tx_aggr_stateful_mask) &
+				  stateful_bit),
+				msecs_to_jiffies(100));
+			if (atomic_read(&context->tx_aggr_stateful_mask) &
+			    stateful_bit) {
+				esp_schedule_fw_reset_recovery(adapter);
+				esp_request_firmware_restart(adapter);
+			}
 		}
 	}
 
@@ -1167,7 +1179,7 @@ static void esp_sdio_flush_bt_traffic(struct esp_adapter *adapter)
 		if (skb->len < sizeof(*header))
 			continue;
 		header = (struct esp_payload_header *)skb->data;
-		if (header->if_type == ESP_HCI_IF) {
+		if (header->if_type == if_type) {
 			__skb_unlink(skb, &context->rx_q);
 			__skb_queue_tail(&free_q, skb);
 		}
@@ -1176,6 +1188,16 @@ static void esp_sdio_flush_bt_traffic(struct esp_adapter *adapter)
 
 	while ((skb = __skb_dequeue(&free_q)) != NULL)
 		dev_kfree_skb(skb);
+}
+
+static void esp_sdio_flush_bt_traffic(struct esp_adapter *adapter)
+{
+	esp_sdio_flush_if_traffic(adapter, ESP_HCI_IF);
+}
+
+static void esp_sdio_flush_rcp_traffic(struct esp_adapter *adapter)
+{
+	esp_sdio_flush_if_traffic(adapter, ESP_RCP_IF);
 }
 
 static struct esp_if_ops if_ops = {
@@ -1187,6 +1209,7 @@ static struct esp_if_ops if_ops = {
 	.recover_transport = esp_sdio_recover_transport,
 	.note_fw_reset	= esp_sdio_note_fw_reset,
 	.flush_bt_traffic = esp_sdio_flush_bt_traffic,
+	.flush_rcp_traffic = esp_sdio_flush_rcp_traffic,
 };
 
 static int get_firmware_data(struct esp_sdio_context *context)
@@ -1272,6 +1295,18 @@ static int init_context(struct esp_sdio_context *context)
 	context->adapter->if_type = ESP_IF_TYPE_SDIO;
 
 	return ret;
+}
+
+static void esp_sdio_fail_rcp_rx(struct esp_adapter *adapter,
+		const char *reason)
+{
+	if (!adapter || !esp_rcp_fail_closed_required(adapter))
+		return;
+
+	esp_err("RCP SDIO RX stream may be truncated: %s; resetting session\n",
+		reason);
+	esp_schedule_fw_reset_recovery(adapter);
+	esp_request_firmware_restart(adapter);
 }
 
 static struct sk_buff *read_packet(struct esp_adapter *adapter)
@@ -1405,6 +1440,7 @@ static struct sk_buff *read_packet(struct esp_adapter *adapter)
 			"offset=%u if=%u pkt=%u rx_byte_count=%u\n",
 			len_from_slave, offset, header->if_type,
 			header->packet_type, context->rx_byte_count);
+		esp_sdio_fail_rcp_rx(context->adapter, "zero payload");
 		dev_kfree_skb(skb);
 		return NULL;
 	}
@@ -1415,6 +1451,7 @@ static struct sk_buff *read_packet(struct esp_adapter *adapter)
 			len_from_slave, len, offset, header->if_type,
 			header->packet_type, esp_wire_le16_to_cpu(header->checksum),
 			context->rx_byte_count);
+		esp_sdio_fail_rcp_rx(context->adapter, "invalid length/offset");
 		dev_kfree_skb(skb);
 		return NULL;
 	}
@@ -1425,6 +1462,7 @@ static struct sk_buff *read_packet(struct esp_adapter *adapter)
 			"rx_byte_count=%u\n",
 			len_from_slave, len, offset, frame_len, header->if_type,
 			header->packet_type, context->rx_byte_count);
+		esp_sdio_fail_rcp_rx(context->adapter, "truncated frame");
 		dev_kfree_skb(skb);
 		return NULL;
 	}
@@ -1450,6 +1488,8 @@ static struct sk_buff *read_packet(struct esp_adapter *adapter)
 				"rx_byte_count=%u\n",
 				len_from_slave, pos_in_aggr, offset, header->if_type,
 				header->packet_type, context->rx_byte_count);
+			esp_sdio_fail_rcp_rx(context->adapter,
+					     "zero payload in aggregate");
 			break;
 		}
 		if (len > ESP_RX_BUFFER_SIZE || !ESP_OFFSET_VALID(offset)) {
@@ -1460,6 +1500,8 @@ static struct sk_buff *read_packet(struct esp_adapter *adapter)
 				header->if_type, header->packet_type,
 				esp_wire_le16_to_cpu(header->checksum),
 				context->rx_byte_count);
+			esp_sdio_fail_rcp_rx(context->adapter,
+					     "invalid aggregate length/offset");
 			break;
 		}
 		frame_len = len + offset;
@@ -1471,12 +1513,16 @@ static struct sk_buff *read_packet(struct esp_adapter *adapter)
 				len_from_slave, pos_in_aggr, len, offset, frame_len,
 					header->if_type, header->packet_type,
 					context->rx_byte_count);
+			esp_sdio_fail_rcp_rx(context->adapter,
+					     "truncated aggregate frame");
 			break;
 		}
 
 		frame_skb = esp_if_alloc_skb(adapter, frame_len);
 		if (!frame_skb) {
 			esp_err("SKB alloc failed for aggregate frame\n");
+			esp_sdio_fail_rcp_rx(context->adapter,
+					     "aggregate frame allocation failure");
 			break;
 		}
 		skb_put(frame_skb, frame_len);
@@ -1558,7 +1604,8 @@ static int write_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 
 	if (payload_header->if_type == ESP_INTERNAL_IF)
 		prio = PRIO_Q_HIGH;
-	else if (payload_header->if_type == ESP_HCI_IF)
+	else if (payload_header->if_type == ESP_HCI_IF ||
+		 payload_header->if_type == ESP_RCP_IF)
 		prio = PRIO_Q_MID;
 	else
 		prio = PRIO_Q_LOW;
@@ -1702,7 +1749,7 @@ static bool sdio_cmd_is_current(struct esp_adapter *adapter, u8 cmd_code,
 
 static void sdio_fail_abandoned_cmd(struct esp_adapter *adapter, bool has_cmd,
 				    u8 cmd_code, u16 cmd_seq, int error,
-				    bool has_hci, u32 raw_tp_frames)
+				    u8 stateful_mask, u32 raw_tp_frames)
 {
 	if (!adapter)
 		return;
@@ -1712,13 +1759,13 @@ static void sdio_fail_abandoned_cmd(struct esp_adapter *adapter, bool has_cmd,
 #endif
 	if (has_cmd && sdio_cmd_is_current(adapter, cmd_code, cmd_seq))
 		esp_cmd_transport_failed(adapter, cmd_code, cmd_seq, error);
-	if (has_hci) {
+	if (stateful_mask) {
 		struct esp_sdio_context *context = adapter->if_context;
 		esp_schedule_fw_reset_recovery(adapter);
 		esp_request_firmware_restart(adapter);
 		if (context) {
-			atomic_set(&context->tx_aggr_has_hci, 0);
-			wake_up(&context->tx_aggr_waitq);
+			atomic_set(&context->tx_aggr_stateful_mask, 0);
+			wake_up(&context->tx_aggr_stateful_waitq);
 		}
 	}
 }
@@ -1752,7 +1799,7 @@ static int tx_process(void *data)
 	unsigned long credit_next_warn;
 	bool flush_after_pkt = false;
 	bool aggr_has_cmd = false;
-	bool aggr_has_hci = false;
+	u8 aggr_stateful_mask = 0;
 	bool drop_stale_cmd = false;
 	int prio = -1;
 	unsigned long qflags;
@@ -1795,7 +1842,7 @@ static int tx_process(void *data)
 		raw_tp_run_id = 0;
 		raw_tp_first_seq = esp_raw_tp_tx_seq_get();
 		aggr_has_cmd = false;
-		aggr_has_hci = false;
+		aggr_stateful_mask = 0;
 		aggr_cmd_code = 0;
 		aggr_cmd_seq = 0;
 		drop_stale_cmd = false;
@@ -1878,6 +1925,7 @@ static int tx_process(void *data)
 			len_to_send = (frame_len + 3) & ~3;
 			flush_after_pkt = sdio_get_cmd_info(tx_skb, &aggr_cmd_code,
 					&aggr_cmd_seq) ||
+				payload_header->if_type == ESP_RCP_IF ||
 				(prio == PRIO_Q_LOW &&
 				 esp_wire_le16_to_cpu(payload_header->len) <=
 				 ESP_HOST_TX_LATENCY_BYPASS_SIZE);
@@ -1890,10 +1938,13 @@ static int tx_process(void *data)
 				break;
 			}
 
-			if (payload_header->if_type == ESP_HCI_IF) {
-				aggr_has_hci = true;
-				atomic_set(&context->tx_aggr_has_hci, 1);
-			}
+			if (payload_header->if_type == ESP_HCI_IF)
+				aggr_stateful_mask |= ESP_SDIO_STATEFUL_HCI;
+			else if (payload_header->if_type == ESP_RCP_IF)
+				aggr_stateful_mask |= ESP_SDIO_STATEFUL_RCP;
+			if (aggr_stateful_mask)
+				atomic_set(&context->tx_aggr_stateful_mask,
+					   aggr_stateful_mask);
 
 			tx_skb = __skb_dequeue(&(context->tx_q[prio]));
 			if (tx_skb)
@@ -2037,7 +2088,7 @@ static int tx_process(void *data)
 		if (kthread_should_stop()) {
 			sdio_fail_abandoned_cmd(adapter, aggr_has_cmd,
 					aggr_cmd_code, aggr_cmd_seq, -ESHUTDOWN,
-					aggr_has_hci, raw_tp_frames);
+					aggr_stateful_mask, raw_tp_frames);
 			break;
 		}
 		if (drop_stale_cmd) {
@@ -2046,7 +2097,7 @@ static int tx_process(void *data)
 				jiffies_to_msecs(jiffies - credit_wait_start),
 				buf_needed, credit_available);
 			sdio_fail_abandoned_cmd(adapter, false, 0, 0, -ETIMEDOUT,
-					aggr_has_hci, raw_tp_frames);
+					aggr_stateful_mask, raw_tp_frames);
 			sdio_buf_available = 0;
 			continue;
 		}
@@ -2056,7 +2107,7 @@ static int tx_process(void *data)
 			sdio_fail_abandoned_cmd(adapter, aggr_has_cmd,
 					aggr_cmd_code, aggr_cmd_seq,
 					ret < 0 ? ret : -EIO,
-					aggr_has_hci, raw_tp_frames);
+					aggr_stateful_mask, raw_tp_frames);
 			sdio_buf_available = 0;
 			continue;
 		}
@@ -2086,7 +2137,7 @@ static int tx_process(void *data)
 			/* The credit cache was reserved above, but this aggregate is not
 			 * written. Force the next TX to refresh authoritative TOKEN state. */
 			sdio_fail_abandoned_cmd(adapter, false, 0, 0, -EIO,
-					aggr_has_hci, raw_tp_frames);
+					aggr_stateful_mask, raw_tp_frames);
 			sdio_buf_available = 0;
 			continue;
 		}
@@ -2101,7 +2152,7 @@ static int tx_process(void *data)
 			sdio_fail_abandoned_cmd(adapter, aggr_has_cmd,
 					aggr_cmd_code, aggr_cmd_seq,
 					kthread_should_stop() ? -ESHUTDOWN : -EIO,
-					aggr_has_hci, raw_tp_frames);
+					aggr_stateful_mask, raw_tp_frames);
 			sdio_buf_available = 0;
 			continue;
 		}
@@ -2109,7 +2160,7 @@ static int tx_process(void *data)
 		if (!context->func) {
 			sdio_fail_abandoned_cmd(adapter, aggr_has_cmd,
 					aggr_cmd_code, aggr_cmd_seq, -ENODEV,
-					aggr_has_hci, raw_tp_frames);
+					aggr_stateful_mask, raw_tp_frames);
 			sdio_buf_available = 0;
 			continue;
 		}
@@ -2126,7 +2177,7 @@ static int tx_process(void *data)
 			atomic_set(&tx_in_flight, 0);
 			sdio_fail_abandoned_cmd(adapter, aggr_has_cmd,
 					aggr_cmd_code, aggr_cmd_seq, -EAGAIN,
-					aggr_has_hci, raw_tp_frames);
+					aggr_stateful_mask, raw_tp_frames);
 			sdio_buf_available = 0;
 			continue;
 		}
@@ -2168,12 +2219,12 @@ static int tx_process(void *data)
 					raw_tp_frames, ret);
 			}
 #endif
-			if (aggr_has_hci) {
+			if (aggr_stateful_mask) {
 				esp_schedule_fw_reset_recovery(adapter);
 				esp_request_firmware_restart(adapter);
-				aggr_has_hci = false;
-				atomic_set(&context->tx_aggr_has_hci, 0);
-				wake_up(&context->tx_aggr_waitq);
+				aggr_stateful_mask = 0;
+				atomic_set(&context->tx_aggr_stateful_mask, 0);
+				wake_up(&context->tx_aggr_stateful_waitq);
 			}
 			if (aggr_has_cmd) {
 				esp_sdio_request_fw_reset_recovery();
@@ -2186,10 +2237,10 @@ static int tx_process(void *data)
 			continue;
 		}
 
-		if (aggr_has_hci) {
-			aggr_has_hci = false;
-			atomic_set(&context->tx_aggr_has_hci, 0);
-			wake_up(&context->tx_aggr_waitq);
+		if (aggr_stateful_mask) {
+			aggr_stateful_mask = 0;
+			atomic_set(&context->tx_aggr_stateful_mask, 0);
+			wake_up(&context->tx_aggr_stateful_waitq);
 		}
 
 #if TEST_RAW_TP
@@ -2239,8 +2290,8 @@ static struct esp_sdio_context *init_sdio_func(struct sdio_func *func, int *sdio
 	context->irq_claimed = false;
 	INIT_DELAYED_WORK(&context->rx_len_retry_work, esp_sdio_rx_len_retry_work);
 	init_waitqueue_head(&context->tx_waitq);
-	atomic_set(&context->tx_aggr_has_hci, 0);
-	init_waitqueue_head(&context->tx_aggr_waitq);
+	atomic_set(&context->tx_aggr_stateful_mask, 0);
+	init_waitqueue_head(&context->tx_aggr_stateful_waitq);
 
 	sdio_claim_host(func);
 

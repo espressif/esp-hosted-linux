@@ -14,6 +14,7 @@
 #include "esp_if.h"
 #include "esp_api.h"
 #include "esp_bt_api.h"
+#include "esp_rcp_api.h"
 #include "esp_kernel_port.h"
 #include "esp_stats.h"
 #include "esp_utils.h"
@@ -246,7 +247,7 @@ static int esp_spi_recover_transport(struct esp_adapter *adapter)
 	return 0;
 }
 
-static void esp_spi_flush_bt_traffic(struct esp_adapter *adapter)
+static void esp_spi_flush_if_traffic(struct esp_adapter *adapter, u8 if_type)
 {
 	struct sk_buff *skb, *tmp;
 	struct sk_buff_head free_q;
@@ -263,7 +264,7 @@ static void esp_spi_flush_bt_traffic(struct esp_adapter *adapter)
 			if (skb->len < sizeof(*header))
 				continue;
 			header = (struct esp_payload_header *)skb->data;
-			if (header->if_type == ESP_HCI_IF) {
+			if (header->if_type == if_type) {
 				__skb_unlink(skb, &spi_context.tx_q[q]);
 				if (atomic_read(&tx_pending) > 0)
 					atomic_dec(&tx_pending);
@@ -283,7 +284,7 @@ static void esp_spi_flush_bt_traffic(struct esp_adapter *adapter)
 			if (skb->len < sizeof(*header))
 				continue;
 			header = (struct esp_payload_header *)skb->data;
-			if (header->if_type == ESP_HCI_IF) {
+			if (header->if_type == if_type) {
 				__skb_unlink(skb, &spi_context.rx_q[q]);
 				__skb_queue_tail(&free_q, skb);
 			}
@@ -307,6 +308,16 @@ static void esp_spi_flush_bt_traffic(struct esp_adapter *adapter)
 		if (has_work)
 			esp_spi_kick();
 	}
+}
+
+static void esp_spi_flush_bt_traffic(struct esp_adapter *adapter)
+{
+	esp_spi_flush_if_traffic(adapter, ESP_HCI_IF);
+}
+
+static void esp_spi_flush_rcp_traffic(struct esp_adapter *adapter)
+{
+	esp_spi_flush_if_traffic(adapter, ESP_RCP_IF);
 }
 
 static void esp_spi_restore_startup_clock(void)
@@ -435,6 +446,7 @@ static struct esp_if_ops if_ops = {
 	.reset_target = esp_spi_reset_target,
 	.recover_transport = esp_spi_recover_transport,
 	.flush_bt_traffic = esp_spi_flush_bt_traffic,
+	.flush_rcp_traffic = esp_spi_flush_rcp_traffic,
 };
 
 static void open_data_path(void)
@@ -554,7 +566,8 @@ static int write_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 
 	if (payload_header->if_type == ESP_INTERNAL_IF)
 		prio = PRIO_Q_HIGH;
-	else if (payload_header->if_type == ESP_HCI_IF)
+	else if (payload_header->if_type == ESP_HCI_IF ||
+		 payload_header->if_type == ESP_RCP_IF)
 		prio = PRIO_Q_MID;
 	else
 		prio = PRIO_Q_LOW;
@@ -654,17 +667,17 @@ static bool spi_get_cmd_info(struct sk_buff *skb, u8 *cmd_code, u16 *cmd_seq)
 	return true;
 }
 
-static bool spi_is_hci_packet(const struct sk_buff *skb)
+static bool spi_is_stateful_packet(const struct sk_buff *skb)
 {
 	const struct esp_payload_header *header;
 
 	if (!skb || skb->len < sizeof(*header))
 		return false;
 	header = (const struct esp_payload_header *)skb->data;
-	return header->if_type == ESP_HCI_IF;
+	return header->if_type == ESP_HCI_IF || header->if_type == ESP_RCP_IF;
 }
 
-static void spi_notify_tx_lost(bool is_cmd, bool is_hci_pkt,
+static void spi_notify_tx_lost(bool is_cmd, bool is_stateful_pkt,
 		u8 cmd_code, u16 cmd_seq, int err, bool recover)
 {
 	struct esp_adapter *adapter = spi_context.adapter;
@@ -672,13 +685,12 @@ static void spi_notify_tx_lost(bool is_cmd, bool is_hci_pkt,
 	if (!adapter)
 		return;
 
-	if (recover || is_hci_pkt) {
+	if (recover || is_stateful_pkt) {
 		/* A failed full-duplex transaction cannot prove whether a control
 		 * side effect committed, or whether an asynchronous firmware event
-		 * was consumed on the slave side. Similarly, an unsubmitted but
-		 * consumed HCI packet cannot be completed to Linux without transport
-		 * recovery. Quarantine the incarnation and force firmware reset
-		 * recovery to prevent silent event loss or HCI timeouts. */
+		 * was consumed on the slave side. HCI and RCP are stateful streams:
+		 * silent loss would desynchronize HCI or Spinel. Quarantine the
+		 * incarnation and force firmware reset recovery. */
 		esp_schedule_fw_reset_recovery(adapter);
 		if (is_cmd)
 			esp_cmd_transport_failed(adapter, cmd_code, cmd_seq, err);
@@ -690,6 +702,19 @@ static void spi_notify_tx_lost(bool is_cmd, bool is_hci_pkt,
 		esp_cmd_transport_failed(adapter, cmd_code, cmd_seq, err);
 }
 
+static void esp_spi_fail_rcp_rx(const char *reason)
+{
+	struct esp_adapter *adapter = spi_context.adapter;
+
+	if (!adapter || !esp_rcp_fail_closed_required(adapter))
+		return;
+
+	esp_err("RCP SPI RX stream may be truncated: %s; resetting session\n",
+		reason);
+	esp_schedule_fw_reset_recovery(adapter);
+	esp_request_firmware_restart(adapter);
+}
+
 static int process_rx_buf(struct sk_buff *skb)
 {
 	struct esp_payload_header *header;
@@ -699,16 +724,21 @@ static int process_rx_buf(struct sk_buff *skb)
 	if (!skb)
 		return -EINVAL;
 	header = (struct esp_payload_header *)skb->data;
-	if (header->if_type >= ESP_MAX_IF)
+	if (header->if_type >= ESP_MAX_IF) {
+		esp_spi_fail_rcp_rx("invalid interface type");
 		return -EINVAL;
+	}
 
 	offset = esp_wire_le16_to_cpu(header->offset);
 	len = esp_wire_le16_to_cpu(header->len);
-	if (len == 0)
+	if (len == 0) {
+		esp_spi_fail_rcp_rx("zero payload");
 		return -EINVAL;
+	}
 	if (len > SPI_BUF_SIZE || !ESP_OFFSET_VALID(offset) ||
 	    offset > skb->len || len > (skb->len - offset)) {
 		esp_err("Drop invalid pkt: len=%d offset=%d skb_len=%u\n", len, offset, skb->len);
+		esp_spi_fail_rcp_rx("invalid length/offset");
 		return -EINVAL;
 	}
 	len += offset;
@@ -719,7 +749,7 @@ static int process_rx_buf(struct sk_buff *skb)
 	}
 	if (header->if_type == ESP_INTERNAL_IF)
 		skb_queue_tail(&spi_context.rx_q[PRIO_Q_HIGH], skb);
-	else if (header->if_type == ESP_HCI_IF)
+	else if (header->if_type == ESP_HCI_IF || header->if_type == ESP_RCP_IF)
 		skb_queue_tail(&spi_context.rx_q[PRIO_Q_MID], skb);
 	else
 		skb_queue_tail(&spi_context.rx_q[PRIO_Q_LOW], skb);
@@ -742,7 +772,7 @@ static void esp_spi_work(struct work_struct *work)
 	u8 cmd_code = 0;
 	u16 cmd_seq = 0;
 	bool is_cmd = false;
-	bool is_hci_pkt = false;
+	bool is_stateful_pkt = false;
 	bool has_tx = false;
 
 	if (!spi_accepting_work())
@@ -823,7 +853,7 @@ static void esp_spi_work(struct work_struct *work)
 		copy_len = min_t(u32, src_skb->len, (u32)SPI_BUF_SIZE);
 		payload_header = (struct esp_payload_header *)src_skb->data;
 		is_cmd = spi_get_cmd_info(src_skb, &cmd_code, &cmd_seq);
-		is_hci_pkt = spi_is_hci_packet(src_skb);
+		is_stateful_pkt = spi_is_stateful_packet(src_skb);
 #if TEST_RAW_TP
 		if (raw_tp_mode == ESP_TEST_RAW_TP_HOST_TO_ESP &&
 		    payload_header->if_type == ESP_TEST_IF) {
@@ -882,7 +912,7 @@ static void esp_spi_work(struct work_struct *work)
 		 * must quarantine the firmware incarnation rather than disappear
 		 * across the reset boundary.
 		 */
-		spi_notify_tx_lost(is_cmd, is_hci_pkt, cmd_code, cmd_seq,
+		spi_notify_tx_lost(is_cmd, is_stateful_pkt, cmd_code, cmd_seq,
 				   -ESHUTDOWN, false);
 		dev_kfree_skb(rx_skb);
 		dev_kfree_skb(tx_skb);
@@ -896,7 +926,7 @@ static void esp_spi_work(struct work_struct *work)
 			esp_raw_tp_tx_failed(1);
 #endif
 		esp_err("SPI Transaction failed: %d", ret);
-		spi_notify_tx_lost(is_cmd, is_hci_pkt, cmd_code, cmd_seq, ret, true);
+		spi_notify_tx_lost(is_cmd, is_stateful_pkt, cmd_code, cmd_seq, ret, true);
 		dev_kfree_skb(rx_skb);
 		dev_kfree_skb(tx_skb);
 	} else {

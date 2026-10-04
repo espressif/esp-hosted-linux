@@ -1041,6 +1041,38 @@ static int decode_disconnect_resp(struct esp_wifi_device *priv, struct command_n
 }
 
 
+static int decode_radio_service(struct esp_adapter *adapter,
+                                struct command_node *cmd_node)
+{
+    struct cmd_radio_service *resp;
+    struct command_header *header;
+    u64 nonce_le;
+
+    if (!adapter || !cmd_node || !cmd_node->resp_skb ||
+        cmd_node->resp_skb->len < sizeof(*resp))
+        return -EINVAL;
+
+    resp = (struct cmd_radio_service *)cmd_node->resp_skb->data;
+    header = &resp->header;
+
+    if (header->cmd_status == CMD_RESPONSE_UNSUPPORTED)
+        return -EOPNOTSUPP;
+    if (header->cmd_status == CMD_RESPONSE_INVALID)
+        return -EINVAL;
+    if (header->cmd_status != CMD_RESPONSE_SUCCESS)
+        return -EIO;
+
+    adapter->radio_service_active = resp->active;
+    adapter->radio_service_flags = resp->flags;
+    memcpy(&nonce_le, &resp->rcp_session_nonce, sizeof(nonce_le));
+    adapter->rcp_session_nonce = esp_wire_le64_to_cpu(nonce_le);
+
+    esp_info("Radio service response: requested=%u active=%u flags=0x%x nonce=%016llx\n",
+             resp->requested, resp->active, resp->flags,
+             (unsigned long long)adapter->rcp_session_nonce);
+    return 0;
+}
+
 static int decode_common_resp(struct command_node *cmd_node)
 {
 	int ret = 0;
@@ -1123,6 +1155,7 @@ static bool esp_cmd_timeout_is_commit_ambiguous(u8 cmd_code)
 	case CMD_START_OTA_UPDATE:
 	case CMD_START_OTA_WRITE:
 	case CMD_START_OTA_END:
+	case CMD_SET_RADIO_SERVICE:
 		return true;
 	default:
 		return false;
@@ -1337,6 +1370,12 @@ static int wait_and_decode_cmd_resp(struct esp_wifi_device *priv,
 		/* intentional fallthrough */
 		if (ret == 0)
 			ret = decode_common_resp(cmd_node);
+		break;
+
+	case CMD_SET_RADIO_SERVICE:
+	case CMD_GET_RADIO_SERVICE:
+		if (ret == 0)
+			ret = decode_radio_service(adapter, cmd_node);
 		break;
 
 	case CMD_GET_MAC:
@@ -3794,6 +3833,51 @@ int esp_commands_setup(struct esp_adapter *adapter)
 
 	set_bit(ESP_CMD_INIT_DONE, &adapter->state_flags);
 	return 0;
+}
+
+int cmd_set_radio_service(struct esp_adapter *adapter, u8 service)
+{
+    struct command_node *cmd_node;
+    struct cmd_radio_service *cmd;
+    struct esp_wifi_device *priv;
+
+    if (!adapter || service >= ESP_RADIO_SERVICE_MAX)
+        return -EINVAL;
+    priv = adapter->priv[0];
+    if (!priv)
+        return -ENODEV;
+
+    cmd_node = prepare_command_request(adapter, CMD_SET_RADIO_SERVICE,
+                                       sizeof(struct cmd_radio_service));
+    if (IS_ERR_OR_NULL(cmd_node))
+        return cmd_prepare_err(cmd_node);
+
+    cmd = (struct cmd_radio_service *)(cmd_node->cmd_skb->data +
+                                       sizeof(struct esp_payload_header));
+    cmd->requested = service;
+
+    queue_cmd_node(adapter, cmd_node, ESP_CMD_HIGH_PRIO);
+    return wait_and_decode_cmd_resp(priv, cmd_node);
+}
+
+int cmd_get_radio_service(struct esp_adapter *adapter)
+{
+    struct command_node *cmd_node;
+    struct esp_wifi_device *priv;
+
+    if (!adapter)
+        return -EINVAL;
+    priv = adapter->priv[0];
+    if (!priv)
+        return -ENODEV;
+
+    cmd_node = prepare_command_request(adapter, CMD_GET_RADIO_SERVICE,
+                                       sizeof(struct command_header));
+    if (IS_ERR_OR_NULL(cmd_node))
+        return cmd_prepare_err(cmd_node);
+
+    queue_cmd_node(adapter, cmd_node, ESP_CMD_HIGH_PRIO);
+    return wait_and_decode_cmd_resp(priv, cmd_node);
 }
 
 int cmd_set_wow_config(struct esp_wifi_device *priv, struct cfg80211_wowlan *wowlan)

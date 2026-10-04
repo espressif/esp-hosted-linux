@@ -15,6 +15,7 @@
 
 #include "sdkconfig.h"
 #include <stdlib.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -29,6 +30,9 @@
 #include "stats.h"
 #include "soc/gpio_reg.h"
 #include "esp_fw_version.h"
+#ifdef CONFIG_ESP_HOSTED_RCP
+#include "esp_rcp.h"
+#endif
 
 // de-assert HS signal on CS, instead of at end of transaction
 #if defined(CONFIG_ESP_SPI_DEASSERT_HS_ON_CS)
@@ -46,7 +50,7 @@ static const char TAG[] = "FW_SPI";
 
 #define SPI_DMA_ALIGNMENT_BYTES 4
 #define SPI_DMA_ALIGNMENT_MASK  (SPI_DMA_ALIGNMENT_BYTES-1)
-#define IS_SPI_DMA_ALIGNED(VAL) (!((VAL)& SPI_DMA_ALIGNMENT_MASK))
+#define IS_SPI_DMA_ALIGNED(VAL) (!(((uintptr_t)(VAL)) & SPI_DMA_ALIGNMENT_MASK))
 #define MAKE_SPI_DMA_ALIGNED(VAL)  (VAL += SPI_DMA_ALIGNMENT_BYTES - \
                 ((VAL)& SPI_DMA_ALIGNMENT_MASK))
 
@@ -272,7 +276,7 @@ static void register_hs_disable_pin(uint32_t gpio_num)
 }
 #endif
 
-esp_err_t send_bootup_event_to_host(uint32_t cap)
+esp_err_t send_bootup_event_to_host(uint32_t cap, uint32_t ext_cap)
 {
     struct esp_payload_header *header = NULL;
     struct esp_internal_bootup_event *event = NULL;
@@ -283,9 +287,15 @@ esp_err_t send_bootup_event_to_host(uint32_t cap)
 
     memset(&buf_handle, 0, sizeof(buf_handle));
 
-    buf_handle.payload = heap_caps_malloc(RX_BUF_SIZE, MALLOC_CAP_DMA);
-    assert(buf_handle.payload);
-    memset(buf_handle.payload, 0, RX_BUF_SIZE);
+    buf_handle.payload = heap_caps_calloc(1, ESP_BOOTUP_EVENT_BUF_SIZE, MALLOC_CAP_DMA);
+    if (!buf_handle.payload) {
+        ESP_LOGE(TAG,
+                 "Boot-event DMA allocation failed bytes=%u free_dma=%u largest_dma=%u",
+                 ESP_BOOTUP_EVENT_BUF_SIZE,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
+        return ESP_ERR_NO_MEM;
+    }
 
     buf_handle.priv_buffer_handle = buf_handle.payload;
     buf_handle.free_buf_handle = heap_caps_free;
@@ -322,6 +332,18 @@ esp_err_t send_bootup_event_to_host(uint32_t cap)
     memcpy(pos, &cap_le, sizeof(cap_le));
     pos += sizeof(cap_le);                len += sizeof(cap_le);
 
+    /* TLV - Extended capabilities and RCP firmware incarnation. */
+    if (ext_cap) {
+        uint32_t ext_cap_le = htole32(ext_cap);
+
+        *pos = ESP_BOOTUP_EXT_CAPABILITY; pos++; len++;
+        *pos = sizeof(ext_cap_le);         pos++; len++;
+        memcpy(pos, &ext_cap_le, sizeof(ext_cap_le));
+        pos += sizeof(ext_cap_le);          len += sizeof(ext_cap_le);
+    }
+
+    /* RCP nonce is published only by CMD_SET_RADIO_SERVICE after activation. */
+
     /* TLV - Slave RX Buffer Size */
     *pos = ESP_BOOTUP_RX_BUF_SIZE;        pos++; len++;
     *pos = 4;                             pos++; len++;
@@ -355,6 +377,13 @@ esp_err_t send_bootup_event_to_host(uint32_t cap)
     event->header.len = htole16(len);
 
     header->len = htole16(buf_handle.payload_len - sizeof(struct esp_payload_header));
+
+    if (buf_handle.payload_len > ESP_BOOTUP_EVENT_BUF_SIZE) {
+        ESP_LOGE(TAG, "Boot event too large len=%u max=%u",
+                 buf_handle.payload_len, ESP_BOOTUP_EVENT_BUF_SIZE);
+        heap_caps_free(buf_handle.payload);
+        return ESP_ERR_INVALID_SIZE;
+    }
 
 #if CONFIG_ESP_SPI_CHECKSUM
     header->checksum = htole16(compute_checksum(buf_handle.payload, buf_handle.payload_len));
@@ -426,6 +455,22 @@ static bool get_next_tx_buffer(interface_buffer_handle_t *buf_handle)
     return false;
 }
 
+static void spi_fail_rcp_rx(const struct esp_payload_header *header,
+                            const char *reason)
+{
+#ifdef CONFIG_ESP_HOSTED_RCP
+    if (esp_hosted_rcp_fail_closed_required()) {
+        ESP_LOGE(TAG, "RCP SPI H2E stream may be truncated: %s if=%u type=%u",
+                 reason, header ? header->if_type : 0xff,
+                 header ? header->packet_type : 0xff);
+        esp_hosted_rcp_fatal_restart(reason);
+    }
+#else
+    (void)header;
+    (void)reason;
+#endif
+}
+
 static int process_spi_rx(interface_buffer_handle_t *buf_handle)
 {
     int ret = 0;
@@ -443,15 +488,21 @@ static int process_spi_rx(interface_buffer_handle_t *buf_handle)
     }
 
     header = (struct esp_payload_header *) buf_handle->payload;
+    if (header->if_type >= ESP_MAX_IF) {
+        spi_fail_rcp_rx(header, "invalid SPI H2E interface type");
+        return -1;
+    }
     len = le16toh(header->len);
     offset = le16toh(header->offset);
 
     if (len == 0) {
+        spi_fail_rcp_rx(header, "zero SPI H2E payload");
         return -1;
     }
     if (len > RX_BUF_SIZE || !ESP_OFFSET_VALID(offset) ||
         offset > RX_BUF_SIZE || len > (RX_BUF_SIZE - offset)) {
         ESP_LOGE(TAG, "Drop invalid pkt: len=%d offset=%d", len, offset);
+        spi_fail_rcp_rx(header, "invalid SPI H2E length/offset");
         return -1;
     }
 
@@ -461,12 +512,14 @@ static int process_spi_rx(interface_buffer_handle_t *buf_handle)
 
     if (len + offset > RX_BUF_SIZE) {
         ESP_LOGD(TAG, "total len too large: %d", len + offset);
+        spi_fail_rcp_rx(header, "SPI H2E frame too large");
         return -1;
     }
     checksum = compute_checksum(buf_handle->payload, len + offset);
 
     if (checksum != rx_checksum) {
         ESP_LOGD(TAG, "checksum mismatch");
+        spi_fail_rcp_rx(header, "SPI H2E checksum mismatch");
         return -1;
     }
 #endif
@@ -480,6 +533,9 @@ static int process_spi_rx(interface_buffer_handle_t *buf_handle)
 
     if (header->if_type == ESP_INTERNAL_IF) {
         ret = xQueueSend(spi_rx_queue[PRIO_Q_HIGH], buf_handle, portMAX_DELAY);
+    } else if (header->if_type == ESP_RCP_IF) {
+        ret = xQueueSend(spi_rx_queue[PRIO_Q_MID], buf_handle,
+                         pdMS_TO_TICKS(ESP_HOSTED_RCP_TX_TIMEOUT_MS));
     } else if (header->if_type == ESP_HCI_IF) {
         ret = xQueueSend(spi_rx_queue[PRIO_Q_MID], buf_handle, portMAX_DELAY);
     } else {
@@ -487,6 +543,7 @@ static int process_spi_rx(interface_buffer_handle_t *buf_handle)
     }
 
     if (ret != pdTRUE) {
+        spi_fail_rcp_rx(header, "SPI H2E RX queue stalled");
         return -1;
     }
 
@@ -838,7 +895,27 @@ static int32_t esp_spi_write(interface_handle_t *handle, interface_buffer_handle
 
     uint32_t align_padding = 0;
     offset = sizeof(struct esp_payload_header);
-    if (IS_WIFI_DATA_PACKET(buf_handle)) {
+    if (buf_handle->if_type == ESP_RCP_IF) {
+        if (buf_handle->payload_len > ESP_HOSTED_RCP_CHUNK_MAX ||
+            ESP_HOSTED_RCP_TX_HEADROOM < sizeof(struct esp_payload_header)) {
+            ESP_LOGE(TAG, "Invalid RCP TX buffer len=%u headroom=%u",
+                     buf_handle->payload_len, ESP_HOSTED_RCP_TX_HEADROOM);
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        offset = ESP_HOSTED_RCP_TX_HEADROOM;
+        align_padding = offset - sizeof(struct esp_payload_header);
+        tx_buf_handle.payload = buf_handle->payload - offset;
+        if (!IS_SPI_DMA_ALIGNED(tx_buf_handle.payload)) {
+            ESP_LOGE(TAG, "RCP TX pool buffer is not word-aligned");
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        tx_buf_handle.priv_buffer_handle = buf_handle->priv_buffer_handle;
+        tx_buf_handle.free_buf_handle = buf_handle->free_buf_handle;
+        buf_handle->priv_buffer_handle = NULL;
+        buf_handle->free_buf_handle = NULL;
+    } else if (IS_WIFI_DATA_PACKET(buf_handle)) {
         /* As Wi-Fi esf-buf has headroom of rx_ctrl before Wi-Fi data pointer, we can use that space to store packet header.
          * This way we do not need to alloc and memcpy again */
         uint32_t payload_addr = (uint32_t)buf_handle->payload;
@@ -866,6 +943,7 @@ static int32_t esp_spi_write(interface_handle_t *handle, interface_buffer_handle
     }
 
     total_len = buf_handle->payload_len + offset + align_padding;
+    tx_buf_handle.payload_len = total_len;
     header = (struct esp_payload_header *) tx_buf_handle.payload;
 
     memset(header, 0, sizeof(struct esp_payload_header) + align_padding);
@@ -888,6 +966,14 @@ static int32_t esp_spi_write(interface_handle_t *handle, interface_buffer_handle
 
     if (header->if_type == ESP_INTERNAL_IF) {
         ret = xQueueSend(spi_tx_queue[PRIO_Q_HIGH], &tx_buf_handle, portMAX_DELAY);
+    } else if (header->if_type == ESP_RCP_IF) {
+        /*
+         * The generic Hosted queue is bounded, but SPI has this second
+         * transport-specific queue. Do not let a stalled host pin the
+         * OpenThread/NCP send path here indefinitely.
+         */
+        ret = xQueueSend(spi_tx_queue[PRIO_Q_MID], &tx_buf_handle,
+                         pdMS_TO_TICKS(ESP_HOSTED_RCP_TX_TIMEOUT_MS));
     } else if (header->if_type == ESP_HCI_IF) {
         ret = xQueueSend(spi_tx_queue[PRIO_Q_MID], &tx_buf_handle, portMAX_DELAY);
     } else {
@@ -902,6 +988,11 @@ static int32_t esp_spi_write(interface_handle_t *handle, interface_buffer_handle
         }
         if (buf_handle->if_type == ESP_TEST_IF) {
             debug_raw_tp_tx_failed(1);
+        }
+        if (buf_handle->if_type == ESP_RCP_IF) {
+            ESP_LOGE(TAG, "RCP SPI TX queue stalled for %u ms",
+                     ESP_HOSTED_RCP_TX_TIMEOUT_MS);
+            return ESP_ERR_TIMEOUT;
         }
         return ESP_FAIL;
     }

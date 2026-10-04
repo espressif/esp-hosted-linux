@@ -16,6 +16,12 @@
 
 #ifndef __TRANSPORT_LAYER_INTERFACE_H
 #define __TRANSPORT_LAYER_INTERFACE_H
+
+#define ESP_HOSTED_RCP_CHUNK_MAX     1400
+#define ESP_HOSTED_RCP_TX_HEADROOM   ESP_MAX_OFFSET_SIZE
+#define ESP_HOSTED_RCP_TX_TIMEOUT_MS 1000
+#define ESP_BOOTUP_EVENT_BUF_SIZE    256
+
 #include "esp_err.h"
 
 #include "adapter.h"
@@ -127,5 +133,8 @@ int32_t sdio_write_aggr(interface_handle_t *handle, uint8_t *payload,
 #endif
 esp_err_t send_to_host(uint8_t prio_q_idx, interface_buffer_handle_t *buf_handle);
 esp_err_t send_to_host_timeout(uint8_t prio_q_idx, interface_buffer_handle_t *buf_handle, TickType_t wait_ticks);
-esp_err_t send_bootup_event_to_host(uint32_t cap);
+esp_err_t send_bootup_event_to_host(uint32_t cap, uint32_t ext_cap);
+esp_err_t esp_radio_service_apply(uint8_t requested, uint8_t *active,
+                                  uint8_t *flags, uint64_t *rcp_nonce);
+void esp_radio_service_snapshot(uint8_t *active, uint64_t *rcp_nonce);
 #endif

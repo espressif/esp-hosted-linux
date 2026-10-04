@@ -565,8 +565,8 @@ static void hosted_mgmt_mark_accepted(uint64_t cookie)
     uint32_t frame_len = 0;
     bool ack = false;
     bool report_status = false;
-    TimerHandle_t timer = NULL;
     TimerHandle_t start_timer = NULL;
+    TimerHandle_t timer = NULL;
     bool complete = false;
 
     /* While accepted is false the TX callback records completion but never
@@ -1992,6 +1992,61 @@ int process_wow_set(uint8_t if_type, uint8_t *payload, uint16_t payload_len)
     }
 
     return send_command_resp(if_type, CMD_SET_WOW_CONFIG, CMD_RESPONSE_SUCCESS, NULL, 0);
+}
+
+
+static int process_radio_service(uint8_t if_type, uint8_t *payload,
+                                 uint16_t payload_len)
+{
+    struct cmd_radio_service response = {0};
+    struct cmd_radio_service *request = NULL;
+    uint8_t requested = ESP_RADIO_SERVICE_NONE;
+    uint8_t active = ESP_RADIO_SERVICE_NONE;
+    uint8_t flags = 0;
+    uint64_t nonce = 0;
+    uint8_t status = CMD_RESPONSE_SUCCESS;
+    uint8_t cmd_code;
+    esp_err_t ret = ESP_OK;
+
+    if (!payload || payload_len < sizeof(struct command_header))
+        return ESP_ERR_INVALID_ARG;
+
+    cmd_code = ((struct command_header *)payload)->cmd_code;
+
+    if (cmd_code == CMD_SET_RADIO_SERVICE) {
+        if (payload_len < sizeof(*request))
+            return send_command_resp(if_type, cmd_code,
+                                     CMD_RESPONSE_INVALID, NULL, 0);
+        request = (struct cmd_radio_service *)payload;
+        requested = request->requested;
+        ret = esp_radio_service_apply(requested, &active, &flags, &nonce);
+    } else if (cmd_code == CMD_GET_RADIO_SERVICE) {
+        esp_radio_service_snapshot(&active, &nonce);
+        requested = active;
+    } else {
+        return send_command_resp(if_type, cmd_code,
+                                 CMD_RESPONSE_UNSUPPORTED, NULL, 0);
+    }
+
+    if (ret == ESP_ERR_NOT_SUPPORTED)
+        status = CMD_RESPONSE_UNSUPPORTED;
+    else if (ret == ESP_ERR_INVALID_ARG)
+        status = CMD_RESPONSE_INVALID;
+    else if (ret != ESP_OK)
+        status = CMD_RESPONSE_FAIL;
+
+    response.requested = requested;
+    response.active = active;
+    response.flags = flags;
+    response.rcp_session_nonce = htole64(nonce);
+
+    ret = send_command_resp(if_type, cmd_code, status,
+                            (uint8_t *)&response.requested,
+                            sizeof(response) - sizeof(response.header));
+    if (ret != ESP_OK)
+        return ret;
+
+    return ESP_OK;
 }
 
 int process_set_time(uint8_t if_type, uint8_t *payload, uint16_t payload_len)
@@ -3898,6 +3953,8 @@ static const struct esp_cmd_entry s_cmd_table[] = {
     { CMD_START_OTA_WRITE,     0,                                      process_ota_write,          "OTA_WRITE" },
     { CMD_START_OTA_END,       0,                                      process_ota_end,            "OTA_END" },
     { CMD_STA_SET_AUTHORIZED,  sizeof(struct cmd_sta_set_authorized), process_sta_set_authorized, "STA_SET_AUTH" },
+    { CMD_SET_RADIO_SERVICE,  sizeof(struct cmd_radio_service),       process_radio_service,      "SET_RADIO_SERVICE" },
+    { CMD_GET_RADIO_SERVICE,  sizeof(struct command_header),          process_radio_service,      "GET_RADIO_SERVICE" },
 };
 
 int esp_cmd_dispatch(uint8_t if_type, uint8_t *payload, uint16_t payload_len)

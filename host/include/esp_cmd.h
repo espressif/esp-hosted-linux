@@ -81,4 +81,7 @@ int cmd_process_ota_start(struct esp_wifi_device *priv);
 int cmd_process_ota_write(struct esp_wifi_device *priv, char *ota_chunk, ssize_t nread);
 int cmd_process_ota_end(struct esp_wifi_device *priv);
 int esp_ota_finish_or_recover(struct esp_wifi_device *priv, int ret);
+
+int cmd_set_radio_service(struct esp_adapter *adapter, u8 service);
+int cmd_get_radio_service(struct esp_adapter *adapter);
 #endif

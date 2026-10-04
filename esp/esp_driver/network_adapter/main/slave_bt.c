@@ -383,48 +383,77 @@ static void init_uart(void)
 
     ESP_LOGI(BT_TAG, "UART Pins: Tx:%u Rx:%u", BT_TX_PIN, BT_RX_PIN);
 }
+#elif defined(CONFIG_IDF_TARGET_ESP32S31)
+static void init_uart(void)
+{
+    /* ESP-IDF owns the S31 HCI UART transport; Hosted only reports its wiring. */
+#ifdef CONFIG_BT_CTRL_HCI_UART_FLOWCTRL
+    ESP_LOGI(BT_TAG, "HCI UART%d baud=%d Tx:%u Rx:%u RTS:%u CTS:%u",
+             BLUETOOTH_UART, CONFIG_BT_CTRL_HCI_UART_BAUD,
+             BT_TX_PIN, BT_RX_PIN, BT_RTS_PIN, BT_CTS_PIN);
+#else
+    ESP_LOGI(BT_TAG, "HCI UART%d baud=%d Tx:%u Rx:%u",
+             BLUETOOTH_UART, CONFIG_BT_CTRL_HCI_UART_BAUD,
+             BT_TX_PIN, BT_RX_PIN);
+#endif
+}
 #endif
 #endif
 
 esp_err_t initialise_bluetooth(void)
 {
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    esp_err_t ret;
 
 #ifdef BLUETOOTH_UART
 #if defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32S3)
     bt_cfg.hci_tl_funcs = &s_hci_uart_tl_funcs;
 #endif
-
     init_uart();
 #endif
-    ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
+
+    ret = esp_bt_controller_init(&bt_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(BT_TAG, "Bluetooth controller init failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
 #if BLUETOOTH_BLE
-    ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BLE));
+    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
 #elif BLUETOOTH_BT
-    ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT));
+    ret = esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT);
 #elif BLUETOOTH_BT_BLE
-    ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BTDM));
+    ret = esp_bt_controller_enable(ESP_BT_MODE_BTDM);
+#else
+    ret = ESP_ERR_NOT_SUPPORTED;
 #endif
+    if (ret != ESP_OK) {
+        ESP_LOGE(BT_TAG, "Bluetooth controller enable failed: %s", esp_err_to_name(ret));
+        esp_bt_controller_deinit();
+        return ret;
+    }
 
 #if BLUETOOTH_HCI
-    esp_err_t ret = ESP_OK;
-
     ret = esp_vhci_host_register_callback(&vhci_host_cb);
-
     if (ret != ESP_OK) {
-        ESP_LOGE(BT_TAG, "Failed to register VHCI callback");
+        ESP_LOGE(BT_TAG, "Failed to register VHCI callback: %s", esp_err_to_name(ret));
+        esp_bt_controller_disable();
+        esp_bt_controller_deinit();
         return ret;
     }
 
     vhci_send_sem = xSemaphoreCreateBinary();
     if (vhci_send_sem == NULL) {
-        ESP_LOGE(BT_TAG, "Failed to create VHCI send sem");
+        ESP_LOGE(BT_TAG, "Failed to create VHCI send semaphore");
+        esp_bt_controller_disable();
+        esp_bt_controller_deinit();
         return ESP_ERR_NO_MEM;
     }
 
     xSemaphoreGive(vhci_send_sem);
 #endif
 
+    ESP_LOGI(BT_TAG, "Bluetooth controller activated at runtime");
     return ESP_OK;
 }
 
@@ -438,6 +467,8 @@ void deinitialize_bluetooth(void)
         vSemaphoreDelete(vhci_send_sem);
         vhci_send_sem = NULL;
     }
+#endif
+#if BLUETOOTH_HCI || BLUETOOTH_UART
     esp_bt_controller_disable();
     esp_bt_controller_deinit();
 #endif

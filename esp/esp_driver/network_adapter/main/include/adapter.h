@@ -73,6 +73,8 @@ enum ESP_INTERFACE_TYPE {
 	ESP_HCI_IF,
 	ESP_INTERNAL_IF,
 	ESP_TEST_IF,
+	/* Stack-agnostic 802.15.4 RCP byte stream (Spinel/HDLC). */
+	ESP_RCP_IF,
 	ESP_MAX_IF,
 };
 
@@ -91,7 +93,28 @@ enum ESP_PACKET_TYPE {
 	PACKET_TYPE_COMMAND_RESPONSE,
 	PACKET_TYPE_EVENT,
 	PACKET_TYPE_EAPOL,
+	PACKET_TYPE_RCP_SESSION,
 };
+
+#define ESP_RCP_SESSION_VERSION         1
+
+struct esp_rcp_session_marker {
+	uint8_t  version;
+	uint8_t  reserved[3];
+	uint64_t nonce;
+} __packed;
+
+enum ESP_RADIO_SERVICE {
+	ESP_RADIO_SERVICE_NONE = 0,
+	ESP_RADIO_SERVICE_BT = (1u << 0),
+	ESP_RADIO_SERVICE_IEEE802154 = (1u << 1),
+	ESP_RADIO_SERVICE_ALL = ESP_RADIO_SERVICE_BT |
+		ESP_RADIO_SERVICE_IEEE802154,
+	ESP_RADIO_SERVICE_MAX = ESP_RADIO_SERVICE_ALL + 1,
+};
+
+#define ESP_RADIO_SERVICE_MASK ESP_RADIO_SERVICE_ALL
+#define ESP_RADIO_SERVICE_F_RESTART_REQUIRED (1u << 0)
 
 enum ESP_HOST_INTERRUPT {
 	ESP_OPEN_DATA_PATH,
@@ -115,6 +138,18 @@ enum ESP_CAPABILITIES {
 	ESP_BT_USB_SUPPORT = (1 << 10),
 };
 
+/* RCP remains an independently negotiated feature capability. */
+enum ESP_EXT_CAPABILITIES {
+	/* Legacy semantic: RCP is already active and boot event carries a nonce. */
+	ESP_EXT_CAP_RCP = (1u << 6), /* Align with esp-hosted-mcu ESP_EXT_CAP_OT. */
+	/* New semantic: host may select a secondary-radio personality at runtime. */
+	ESP_EXT_CAP_RADIO_SERVICE_CTRL = (1u << 14),
+	/* RCP implementation is compiled and can be activated by the runtime selector. */
+	ESP_EXT_CAP_RCP_AVAILABLE = (1u << 15),
+};
+
+#define ESP_EXT_CAP_RCP_ANY (ESP_EXT_CAP_RCP | ESP_EXT_CAP_RCP_AVAILABLE)
+
 typedef enum {
 	ESP_TEST_RAW_TP_HOST_TO_ESP = (1 << 0),
 	ESP_TEST_RAW_TP_ESP_TO_HOST = (1 << 1)
@@ -131,6 +166,10 @@ enum ESP_BOOTUP_TAG_TYPE {
 	ESP_BOOTUP_FIRMWARE_CHIP_ID,
 	ESP_BOOTUP_TEST_RAW_TP,
 	ESP_BOOTUP_RX_BUF_SIZE,
+	/* u32 little-endian ESP_EXT_CAPABILITIES bitmask. */
+	ESP_BOOTUP_EXT_CAPABILITY,
+	/* u64 little-endian nonce used by legacy active-at-boot RCP firmware. */
+	ESP_BOOTUP_RCP_SESSION_NONCE,
 };
 
 enum COMMAND_CODE {
@@ -166,6 +205,8 @@ enum COMMAND_CODE {
 	CMD_START_OTA_WRITE = 30,
 	CMD_START_OTA_END = 31,
 	CMD_STA_SET_AUTHORIZED = 32,
+	CMD_SET_RADIO_SERVICE = 33,
+	CMD_GET_RADIO_SERVICE = 34,
 	CMD_MAX,
 };
 
@@ -195,6 +236,16 @@ struct command_header {
 	uint8_t    reserved1;
 	uint8_t    reserved2;
 } __packed;
+
+struct cmd_radio_service {
+	struct command_header header;
+	uint8_t requested;
+	uint8_t active;
+	uint8_t flags;
+	uint8_t reserved;
+	uint64_t rcp_session_nonce;
+} __packed;
+
 
 struct cmd_ota_update_request {
 	struct command_header header;

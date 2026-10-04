@@ -5,6 +5,31 @@ ESP_IDF_DIR="esp-idf"
 FORCE=0
 UPDATE_IDF=0
 
+apply_idf_patch_once() {
+    local patch="$1"
+
+    if git apply --recount --reverse --check "$patch" >/dev/null 2>&1; then
+        echo "ESP hosted: patch already applied: $patch"
+        return 0
+    fi
+    git apply --recount --check "$patch"
+    git apply --recount "$patch"
+}
+
+apply_hosted_idf_patches() {
+    apply_idf_patch_once ../lib/rom.patch
+
+    # The pinned ESP-IDF v6.1 revision does not contain the generic OpenThread
+    # custom RCP host transport. If a future IDF already provides it, do not
+    # attempt the compatibility backport.
+    if grep -q "config OPENTHREAD_RCP_CUSTOM" components/openthread/Kconfig; then
+        echo "ESP hosted: native OpenThread custom RCP transport present"
+        return 0
+    fi
+
+    apply_idf_patch_once ../lib/idf-openthread-custom-rcp-v6.1.patch
+}
+
 show_help() {
     echo "Usage: ./setup.sh [options]"
     echo ""
@@ -89,8 +114,8 @@ if [ ! -d "$ESP_IDF_DIR" ]; then
     git clone --branch "$IDF_TAG" --depth 100 https://github.com/espressif/esp-idf.git "$ESP_IDF_DIR"
     cd "$ESP_IDF_DIR"
     git checkout -f "$IDF_COMMIT"
-    echo "ESP hosted: applying rom patch"
-    git apply ../lib/rom.patch
+    echo "ESP hosted: applying IDF patches"
+    apply_hosted_idf_patches
     echo "ESP hosted: initializing submodules"
     git submodule update --init --depth 1 --recursive
     echo "ESP hosted: installing prerequisites for esp-idf"
@@ -118,9 +143,9 @@ if [ $UPDATE_IDF -eq 1 ]; then
     cd "$ESP_IDF_DIR"
     git fetch --depth 100 origin "$IDF_TAG"
     git reset --hard "$IDF_COMMIT"
-    echo "ESP hosted: applying rom patch"
-    git apply ../lib/rom.patch
     git clean -fdx
+    echo "ESP hosted: applying IDF patches"
+    apply_hosted_idf_patches
     echo "ESP hosted: updating submodules"
     git submodule update --init --depth 1 --recursive
     echo "ESP hosted: installing prerequisites for esp-idf"
@@ -129,6 +154,12 @@ if [ $UPDATE_IDF -eq 1 ]; then
 
     ESP_IDF_CORRECT=1
 fi
+
+# Existing correct checkouts may predate a newly added patch. Re-run the
+# idempotent patch step on every setup invocation.
+cd "$ESP_IDF_DIR"
+apply_hosted_idf_patches
+cd ..
 
 echo "ESP hosted: replacing wireless libraries"
 mkdir -p "$ESP_IDF_DIR/components/esp_wifi/lib"

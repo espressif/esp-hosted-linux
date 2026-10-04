@@ -7,6 +7,38 @@ param(
     [switch]$Help
 )
 
+
+function Apply-IdfPatchOnce {
+    param([Parameter(Mandatory = $true)][string]$Patch)
+
+    $null = & git apply --recount --reverse --check $Patch 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "ESP hosted: patch already applied: $Patch"
+        return
+    }
+
+    & git apply --recount --check $Patch
+    if ($LASTEXITCODE -ne 0) {
+        throw "ESP hosted: patch does not apply cleanly: $Patch"
+    }
+    & git apply --recount $Patch
+    if ($LASTEXITCODE -ne 0) {
+        throw "ESP hosted: failed to apply patch: $Patch"
+    }
+}
+
+function Apply-HostedIdfPatches {
+    Apply-IdfPatchOnce "../lib/rom.patch"
+
+    $kconfig = "components/openthread/Kconfig"
+    if (Select-String -Path $kconfig -SimpleMatch "config OPENTHREAD_RCP_CUSTOM" -Quiet) {
+        Write-Host "ESP hosted: native OpenThread custom RCP transport present"
+        return
+    }
+
+    Apply-IdfPatchOnce "../lib/idf-openthread-custom-rcp-v6.1.patch"
+}
+
 function Show-Help {
     Write-Host "Usage: ./setup.ps1 [-f] [-u|--update-idf] [-h|--help]"
     Write-Host ""
@@ -80,8 +112,8 @@ if (-not (Test-Path $ESP_IDF_DIR)) {
     git clone --branch $IDF_TAG --depth 100 https://github.com/espressif/esp-idf.git $ESP_IDF_DIR
     Push-Location $ESP_IDF_DIR
     git checkout -f $IDF_COMMIT
-    Write-Host "ESP hosted: applying rom patch"
-    git apply ../lib/rom.patch
+    Write-Host "ESP hosted: applying IDF patches"
+    Apply-HostedIdfPatches
     Write-Host "ESP hosted: initializing submodules"
     git submodule update --init --depth 1 --recursive
     Write-Host "ESP hosted: installing prerequisites for esp-idf"
@@ -104,13 +136,22 @@ if ($UpdateIdf) {
     Push-Location $ESP_IDF_DIR
     git fetch --depth 100 origin $IDF_TAG
     git reset --hard $IDF_COMMIT
-    Write-Host "ESP hosted: applying rom patch"
-    git apply ../lib/rom.patch
     git clean -fdx
+    Write-Host "ESP hosted: applying IDF patches"
+    Apply-HostedIdfPatches
     Write-Host "ESP hosted: updating submodules"
     git submodule update --init --depth 1 --recursive
     Write-Host "ESP hosted: installing prerequisites for esp-idf"
     .\install.ps1
+    Pop-Location
+}
+
+# Existing correct checkouts may predate a newly added patch. Re-run the
+# idempotent patch step on every setup invocation.
+Push-Location $ESP_IDF_DIR
+try {
+    Apply-HostedIdfPatches
+} finally {
     Pop-Location
 }
 
@@ -127,4 +168,3 @@ if (Test-Path $destRoot) {
 Copy-Item ".\lib\*" $destRoot -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host "###### Setup Done ######"
-
