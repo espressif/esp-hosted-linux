@@ -141,7 +141,7 @@ if [ $UPDATE_IDF -eq 1 ]; then
 
     echo "Updating esp-idf to commit $IDF_COMMIT"
     cd "$ESP_IDF_DIR"
-    git fetch --depth 100 origin "$IDF_TAG"
+    git fetch --no-recurse-submodules --depth 100 origin "$IDF_TAG"
     git reset --hard "$IDF_COMMIT"
     git clean -fdx
     echo "ESP hosted: applying IDF patches"
