@@ -1,4 +1,21 @@
 set(COMPONENT_SRCS "app_main.c" "slave_bt.c" "cmd.c" "stats.c")
+
+if(CONFIG_ESP_HOSTED_RCP)
+    list(APPEND COMPONENT_SRCS "esp_rcp.c")
+    # esp_rcp.c uses esp_random() to bind each session to one firmware boot.
+    list(APPEND COMPONENT_REQUIRES esp_hw_support)
+    if(CONFIG_ESP_HOSTED_RCP_OPENTHREAD)
+        list(APPEND COMPONENT_SRCS "esp_rcp_openthread.c")
+        # esp_rcp_openthread.c directly includes esp_coexist.h and
+        # esp_vfs_eventfd.h; OpenThread keeps both as private dependencies.
+        list(APPEND COMPONENT_REQUIRES openthread esp_coex vfs)
+    endif()
+endif()
+
+if(CONFIG_ESP_THREAD_RCP_UART)
+    list(APPEND COMPONENT_SRCS "thread_rcp_uart.c")
+    list(APPEND COMPONENT_REQUIRES openthread esp_coex vfs esp_event)
+endif()
 set(COMPONENT_ADD_INCLUDEDIRS "./include")
 
 if(CONFIG_ESP_SDIO_HOST_INTERFACE)

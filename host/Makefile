@@ -10,6 +10,9 @@ endif
 ifeq ($(ARCH), aarch64)
     ARCH := arm64
 endif
+ifneq ($(filter armv%,$(ARCH)),)
+    ARCH := arm
+endif
 
 # Module name (default: sdio)
 target ?= sdio
@@ -56,7 +59,7 @@ ifeq ($(target), usb)
 endif
 
 # Common source files
-module_objects += esp_bt.o main.o esp_cmd.o esp_utils.o esp_cfg80211.o esp_stats.o esp_debugfs.o esp_log.o
+module_objects += esp_bt.o esp_rcp.o main.o esp_cmd.o esp_utils.o esp_cfg80211.o esp_stats.o esp_debugfs.o esp_log.o
 CFLAGS_esp_log.o = -DDEBUG
 
 # Module build rules

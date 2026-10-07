@@ -4,6 +4,9 @@
  */
 
 #include "sdkconfig.h"
+#ifdef CONFIG_ESP_HOSTED_RCP
+#include "esp_rcp.h"
+#endif
 
 #if !defined(CONFIG_IDF_TARGET_ESP32S31)
 #error "ESP USB host interface is supported here only for ESP32-S31"
@@ -73,6 +76,7 @@ typedef struct {
     size_t rx_stream_len;
     size_t ep_mps;
     uint32_t boot_cap;
+    uint32_t boot_ext_cap;
     bool boot_cap_valid;
     volatile bool ready_replay_pending;
     volatile bool soft_reset_pending;
@@ -187,6 +191,20 @@ static void usb_free_frame(void *arg)
         heap_caps_free(arg);
 }
 
+static bool usb_stateful_rcp_loss(const char *reason)
+{
+#ifdef CONFIG_ESP_HOSTED_RCP
+    if (esp_hosted_rcp_fail_closed_required()) {
+        ESP_LOGE(TAG, "USB stateful RCP loss: %s", reason);
+        esp_hosted_rcp_fatal_restart(reason);
+        return true;
+    }
+#else
+    (void)reason;
+#endif
+    return false;
+}
+
 static bool usb_queue_frame(const uint8_t *frame, size_t frame_len)
 {
     interface_buffer_handle_t buf_handle = {0};
@@ -217,7 +235,7 @@ static bool usb_queue_frame(const uint8_t *frame, size_t frame_len)
     return true;
 }
 
-static void usb_parse_stream(void)
+static esp_err_t usb_parse_stream(void)
 {
     const struct esp_payload_header *hdr;
     size_t frame_len;
@@ -226,6 +244,14 @@ static void usb_parse_stream(void)
     while (s_usb.rx_stream_len >= sizeof(*hdr)) {
         hdr = (const struct esp_payload_header *)s_usb.rx_stream;
         if (!usb_header_valid(hdr, &frame_len)) {
+            /*
+             * Once the host has established RCP, byte-sliding would silently
+             * truncate a stateful Spinel stream. Fail closed instead.
+             */
+            if (usb_stateful_rcp_loss("USB RX framing corruption")) {
+                s_usb.rx_stream_len = 0;
+                return ESP_FAIL;
+            }
             memmove(s_usb.rx_stream, s_usb.rx_stream + 1,
                     s_usb.rx_stream_len - 1);
             s_usb.rx_stream_len--;
@@ -235,24 +261,36 @@ static void usb_parse_stream(void)
         if (s_usb.rx_stream_len < frame_len)
             break;
 
-        if (!usb_queue_frame(s_usb.rx_stream, frame_len))
-            ESP_LOGW(TAG, "RX frame queue full, dropping %u bytes",
-                     (unsigned)frame_len);
+        if (!usb_queue_frame(s_usb.rx_stream, frame_len)) {
+            ESP_LOGW(TAG, "RX frame queue full, dropping %u bytes if=%u",
+                     (unsigned)frame_len, (unsigned)hdr->if_type);
+            if (hdr->if_type == ESP_RCP_IF &&
+                usb_stateful_rcp_loss("USB RX RCP queue loss")) {
+                s_usb.rx_stream_len = 0;
+                return ESP_FAIL;
+            }
+        }
 
         remaining = s_usb.rx_stream_len - frame_len;
         if (remaining)
             memmove(s_usb.rx_stream, s_usb.rx_stream + frame_len, remaining);
         s_usb.rx_stream_len = remaining;
     }
+
+    return ESP_OK;
 }
 
-static void usb_ingest(const uint8_t *data, size_t len)
+static esp_err_t usb_ingest(const uint8_t *data, size_t len)
 {
     size_t copy;
 
     while (len) {
         if (s_usb.rx_stream_len == ESP_USB_RX_STREAM_CAP) {
             ESP_LOGW(TAG, "RX stream overflow, dropping partial frame");
+            if (usb_stateful_rcp_loss("USB RX partial-stream overflow")) {
+                s_usb.rx_stream_len = 0;
+                return ESP_FAIL;
+            }
             s_usb.rx_stream_len = 0;
         }
 
@@ -264,8 +302,11 @@ static void usb_ingest(const uint8_t *data, size_t len)
         s_usb.rx_stream_len += copy;
         data += copy;
         len -= copy;
-        usb_parse_stream();
+        if (usb_parse_stream() != ESP_OK)
+            return ESP_FAIL;
     }
+
+    return ESP_OK;
 }
 
 static esp_err_t usb_read_available_once(void)
@@ -288,8 +329,7 @@ static esp_err_t usb_read_available_once(void)
     if (!read_len)
         return ESP_ERR_TIMEOUT;
 
-    usb_ingest(s_usb.rx_read_buf, read_len);
-    return ESP_OK;
+    return usb_ingest(s_usb.rx_read_buf, read_len);
 }
 
 static void usb_wake_rx_task(void)
@@ -375,7 +415,7 @@ static void usb_service_control_requests(void)
     }
 
     if (s_usb.ready_replay_pending && s_usb.boot_cap_valid) {
-        esp_err_t ret = send_bootup_event_to_host(s_usb.boot_cap);
+        esp_err_t ret = send_bootup_event_to_host(s_usb.boot_cap, s_usb.boot_ext_cap);
 
         if (ret != ESP_OK)
             ESP_LOGW(TAG, "READY replay enqueue failed: %s",
@@ -669,7 +709,7 @@ int interface_remove_driver(void)
     return 0;
 }
 
-esp_err_t send_bootup_event_to_host(uint32_t cap)
+esp_err_t send_bootup_event_to_host(uint32_t cap, uint32_t ext_cap)
 {
     struct esp_internal_bootup_event *event;
     struct fw_data *fw_p;
@@ -681,6 +721,7 @@ esp_err_t send_bootup_event_to_host(uint32_t cap)
     BaseType_t queued;
 
     s_usb.boot_cap = cap;
+    s_usb.boot_ext_cap = ext_cap;
     s_usb.boot_cap_valid = true;
 
     buf_handle.payload = heap_caps_malloc(ESP_USB_MAX_XFER, MALLOC_CAP_8BIT);
@@ -710,6 +751,18 @@ esp_err_t send_bootup_event_to_host(uint32_t cap)
     memcpy(pos, &cap_le, sizeof(cap_le));
     pos += sizeof(cap_le);
     len += 2 + sizeof(cap_le);
+
+    if (ext_cap) {
+        uint32_t ext_cap_le = htole32(ext_cap);
+
+        *pos++ = ESP_BOOTUP_EXT_CAPABILITY;
+        *pos++ = sizeof(ext_cap_le);
+        memcpy(pos, &ext_cap_le, sizeof(ext_cap_le));
+        pos += sizeof(ext_cap_le);
+        len += 2 + sizeof(ext_cap_le);
+    }
+
+/* RCP nonce is published only by CMD_SET_RADIO_SERVICE after activation. */
 
     *pos++ = ESP_BOOTUP_RX_BUF_SIZE;
     *pos++ = LENGTH_4_BYTE;

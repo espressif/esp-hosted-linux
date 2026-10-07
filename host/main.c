@@ -12,10 +12,13 @@
 #include <linux/stddef.h>
 #include <linux/igmp.h>
 #include <linux/jiffies.h>
+#include <linux/mutex.h>
+#include <linux/string.h>
 
 #include "esp.h"
 #include "esp_if.h"
 #include "esp_bt_api.h"
+#include "esp_rcp_api.h"
 #include "esp_api.h"
 #include "esp_cmd.h"
 #include "esp_kernel_port.h"
@@ -37,6 +40,96 @@ u32 raw_tp_mode = 0;
 int log_level = ESP_INFO;
 char version_str[ESP_VERSION_BUFFER_SIZE];
 
+static struct esp_adapter adapter;
+static DEFINE_MUTEX(radio_service_lock);
+static u8 radio_service_desired = ESP_RADIO_SERVICE_NONE;
+
+static const char *esp_radio_service_name(u8 service)
+{
+	if (service & ~ESP_RADIO_SERVICE_MASK)
+		return "invalid";
+
+	switch (service) {
+	case ESP_RADIO_SERVICE_NONE:
+		return "none";
+	case ESP_RADIO_SERVICE_BT:
+		return "bt";
+	case ESP_RADIO_SERVICE_IEEE802154:
+		return "154";
+	case ESP_RADIO_SERVICE_ALL:
+		return "bt+154";
+	default:
+		return "invalid";
+	}
+}
+
+static int radio_service_param_set(const char *val,
+				   const struct kernel_param *kp)
+{
+	u8 requested;
+
+	(void)kp;
+	if (sysfs_streq(val, "none"))
+		requested = ESP_RADIO_SERVICE_NONE;
+	else if (sysfs_streq(val, "bt") || sysfs_streq(val, "bluetooth"))
+		requested = ESP_RADIO_SERVICE_BT;
+	else if (sysfs_streq(val, "154") || sysfs_streq(val, "802154") ||
+		 sysfs_streq(val, "ieee802154") || sysfs_streq(val, "rcp"))
+		requested = ESP_RADIO_SERVICE_IEEE802154;
+	else if (sysfs_streq(val, "both") || sysfs_streq(val, "all") ||
+		 sysfs_streq(val, "bt+154") || sysfs_streq(val, "154+bt") ||
+		 sysfs_streq(val, "bt,154") || sysfs_streq(val, "154,bt"))
+		requested = ESP_RADIO_SERVICE_ALL;
+	else
+		return -EINVAL;
+
+	mutex_lock(&radio_service_lock);
+	radio_service_desired = requested;
+	mutex_unlock(&radio_service_lock);
+
+	if (test_bit(ESP_INIT_DONE, &adapter.state_flags) &&
+	    !test_bit(ESP_DRIVER_UNLOADING, &adapter.state_flags) &&
+	    !test_bit(ESP_TRANSPORT_REMOVING, &adapter.state_flags))
+		schedule_work(&adapter.radio_service_work);
+
+	return 0;
+}
+
+static int radio_service_param_get(char *buf, const struct kernel_param *kp)
+{
+	u8 desired;
+
+	(void)kp;
+	mutex_lock(&radio_service_lock);
+	desired = radio_service_desired;
+	mutex_unlock(&radio_service_lock);
+	return scnprintf(buf, PAGE_SIZE, "%s\n", esp_radio_service_name(desired));
+}
+
+static const struct kernel_param_ops radio_service_param_ops = {
+	.set = radio_service_param_set,
+	.get = radio_service_param_get,
+};
+
+static int radio_service_active_param_get(char *buf,
+					  const struct kernel_param *kp)
+{
+	u8 active;
+
+	(void)kp;
+	if (test_bit(ESP_INIT_DONE, &adapter.state_flags) &&
+	    !(adapter.ext_capabilities & ESP_EXT_CAP_RADIO_SERVICE_CTRL))
+		return scnprintf(buf, PAGE_SIZE, "legacy\n");
+
+	active = READ_ONCE(adapter.radio_service_active);
+	return scnprintf(buf, PAGE_SIZE, "%s\n",
+			 esp_radio_service_name(active));
+}
+
+static const struct kernel_param_ops radio_service_active_param_ops = {
+	.get = radio_service_active_param_get,
+};
+
 
 module_param(clockspeed, uint, S_IRUSR | S_IRGRP | S_IROTH);
 MODULE_PARM_DESC(clockspeed, "Hosts clock speed in MHz");
@@ -47,12 +140,19 @@ MODULE_PARM_DESC(raw_tp_mode, "Mode chosen to test raw throughput");
 module_param(ota_file, charp, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 MODULE_PARM_DESC(ota_file, "Ota file to update ESP firmware");
 
+module_param_cb(radio_service, &radio_service_param_ops, NULL, 0644);
+MODULE_PARM_DESC(radio_service,
+		 "Secondary radio services: none, bt, 154, or bt+154 (runtime selectable)");
+
+module_param_cb(radio_service_active, &radio_service_active_param_ops, NULL, 0444);
+MODULE_PARM_DESC(radio_service_active,
+		 "Currently active secondary-radio service bitmask");
+
 static void deinit_adapter(void);
 static int esp_publish_network_ifaces(struct esp_adapter *adapter);
 
 
 static struct multicast_list mcast_list = {0};
-static struct esp_adapter adapter;
 /*struct esp_device esp_dev;*/
 
 struct esp_adapter *esp_get_adapter(void)
@@ -468,6 +568,20 @@ void print_capabilities(u32 cap)
 	}
 }
 
+static void print_ext_capabilities(u32 cap)
+{
+	if (!cap)
+		return;
+
+	esp_info("Extended capabilities: 0x%x. Features supported are:\n", cap);
+	if (cap & ESP_EXT_CAP_RADIO_SERVICE_CTRL)
+		esp_info("\t * Runtime secondary-radio selection\n");
+	if (cap & ESP_EXT_CAP_RCP)
+		esp_info("\t   - legacy IEEE 802.15.4 RCP active at boot\n");
+	if (cap & ESP_EXT_CAP_RCP_AVAILABLE)
+		esp_info("\t   - IEEE 802.15.4 RCP available for runtime activation\n");
+}
+
 static int init_bt(struct esp_adapter *adapter)
 {
 	if ((adapter->capabilities & ESP_BT_SPI_SUPPORT) ||
@@ -478,6 +592,133 @@ static int init_bt(struct esp_adapter *adapter)
 		return esp_init_bt(adapter);
 	}
 	return 0;
+}
+
+
+static bool esp_bt_service_supported(struct esp_adapter *adapter)
+{
+	if (!adapter)
+		return false;
+
+	return !!(adapter->capabilities &
+		  (ESP_BT_SPI_SUPPORT | ESP_BT_SDIO_SUPPORT | ESP_BT_USB_SUPPORT));
+}
+
+static void esp_radio_service_work(struct work_struct *work)
+{
+	struct esp_adapter *adapter =
+		container_of(work, struct esp_adapter, radio_service_work);
+	u8 desired;
+	u8 active;
+	u8 latest;
+	int ret;
+
+again:
+	if (!test_bit(ESP_INIT_DONE, &adapter->state_flags) ||
+	    test_bit(ESP_CLEANUP_IN_PROGRESS, &adapter->state_flags) ||
+	    test_bit(ESP_FW_RECOVERY_PENDING, &adapter->state_flags) ||
+	    test_bit(ESP_FW_RESET_EXPECTED, &adapter->state_flags) ||
+	    test_bit(ESP_DRIVER_UNLOADING, &adapter->state_flags) ||
+	    test_bit(ESP_TRANSPORT_REMOVING, &adapter->state_flags) ||
+	    !adapter->priv[0])
+		return;
+
+	mutex_lock(&radio_service_lock);
+	desired = radio_service_desired;
+	mutex_unlock(&radio_service_lock);
+
+	if (!(adapter->ext_capabilities & ESP_EXT_CAP_RADIO_SERVICE_CTRL)) {
+		if (desired != ESP_RADIO_SERVICE_NONE)
+			esp_err("Firmware does not support runtime radio-service selection\n");
+		return;
+	}
+
+	if ((desired & ESP_RADIO_SERVICE_BT) &&
+	    !esp_bt_service_supported(adapter)) {
+		esp_err("Bluetooth service requested but firmware does not advertise HCI support\n");
+		goto check_latest;
+	}
+	if ((desired & ESP_RADIO_SERVICE_IEEE802154) &&
+	    !(adapter->ext_capabilities & ESP_EXT_CAP_RCP_AVAILABLE)) {
+		esp_err("802.15.4 service requested but firmware does not advertise RCP support\n");
+		goto check_latest;
+	}
+
+	ret = cmd_set_radio_service(adapter, desired);
+	if (ret) {
+		esp_err("Failed to select radio services %s: %d\n",
+			esp_radio_service_name(desired), ret);
+		goto check_latest;
+	}
+
+	if (adapter->radio_service_flags &
+	    ESP_RADIO_SERVICE_F_RESTART_REQUIRED) {
+		esp_info("Radio service change %s -> %s requires firmware reincarnation\n",
+			esp_radio_service_name(adapter->radio_service_active),
+			esp_radio_service_name(desired));
+
+		/*
+		 * A requested removal crossed a backend lifetime boundary. Publish
+		 * quarantine first, drain RX ownership, unpublish both stateful host
+		 * endpoints, then restart and reapply the desired service mask.
+		 */
+		esp_schedule_fw_reset_recovery(adapter);
+		if (adapter->if_rx_workqueue)
+			flush_workqueue(adapter->if_rx_workqueue);
+		esp_deinit_rcp(adapter);
+		if (adapter->hcidev)
+			esp_deinit_bt(adapter);
+		esp_request_firmware_restart(adapter);
+		return;
+	}
+
+	active = adapter->radio_service_active;
+
+	/* HCI and RCP are independent logical channels and may coexist. */
+	if (active & ESP_RADIO_SERVICE_BT) {
+		if (!adapter->hcidev) {
+			ret = init_bt(adapter);
+			if (ret) {
+				esp_err("Bluetooth host endpoint init failed: %d\n", ret);
+				esp_schedule_fw_reset_recovery(adapter);
+				esp_request_firmware_restart(adapter);
+				return;
+			}
+		}
+	} else if (adapter->hcidev) {
+		esp_deinit_bt(adapter);
+	}
+
+	if (active & ESP_RADIO_SERVICE_IEEE802154) {
+		if (!adapter->rcp_session_nonce) {
+			esp_err("802.15.4 activation completed without an RCP session nonce\n");
+			esp_schedule_fw_reset_recovery(adapter);
+			esp_request_firmware_restart(adapter);
+			return;
+		}
+		ret = esp_init_rcp(adapter);
+		if (ret) {
+			esp_err("RCP endpoint init failed: %d\n", ret);
+			esp_schedule_fw_reset_recovery(adapter);
+			esp_request_firmware_restart(adapter);
+			return;
+		}
+	} else {
+		esp_deinit_rcp(adapter);
+		adapter->rcp_session_nonce = 0;
+	}
+
+check_latest:
+	/*
+	 * schedule_work() coalesces writes while this work item is executing.
+	 * Re-read the desired mask before returning so rapid userspace writes
+	 * converge on the newest request instead of losing the last transition.
+	 */
+	mutex_lock(&radio_service_lock);
+	latest = radio_service_desired;
+	mutex_unlock(&radio_service_lock);
+	if (latest != desired)
+		goto again;
 }
 
 static int check_esp_version(struct fw_version *ver)
@@ -606,6 +847,8 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 	bool seen_fw_data = false;
 	bool seen_rx_buf_size = false;
 	bool seen_spi_clk = false;
+	bool seen_ext_capability = false;
+	bool seen_rcp_nonce = false;
 
 	if (!adapter || !evt_buf)
 		return -1;
@@ -631,6 +874,10 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 	 * missing/malformed TLV inherit transport/checksum/chip state from the
 	 * previous boot. */
 	adapter->capabilities = 0;
+	adapter->ext_capabilities = 0;
+	adapter->rcp_session_nonce = 0;
+	adapter->radio_service_active = ESP_RADIO_SERVICE_NONE;
+	adapter->radio_service_flags = 0;
 	adapter->chipset = ESP_FIRMWARE_CHIP_UNRECOGNIZED;
 	adapter->tx_aggr_size = 0;
 
@@ -684,6 +931,34 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 				goto fail;
 			}
 			seen_capability = true;
+			break;
+		case ESP_BOOTUP_EXT_CAPABILITY:
+			if (seen_ext_capability || tag_len != sizeof(u32)) {
+				esp_err("Invalid/duplicate extended capability TLV in firmware boot event\n");
+				ret = -EPROTO;
+				goto fail;
+			}
+			{
+				__le32 ext_cap_le;
+
+				memcpy(&ext_cap_le, pos + 2, sizeof(ext_cap_le));
+				adapter->ext_capabilities = le32_to_cpu(ext_cap_le);
+			}
+			seen_ext_capability = true;
+			break;
+		case ESP_BOOTUP_RCP_SESSION_NONCE:
+			if (seen_rcp_nonce || tag_len != sizeof(u64)) {
+				esp_err("Invalid/duplicate RCP session nonce TLV in firmware boot event\n");
+				ret = -EPROTO;
+				goto fail;
+			}
+			{
+				__le64 nonce_le;
+
+				memcpy(&nonce_le, pos + 2, sizeof(nonce_le));
+				adapter->rcp_session_nonce = le64_to_cpu(nonce_le);
+			}
+			seen_rcp_nonce = true;
 			break;
 		case ESP_BOOTUP_RX_BUF_SIZE:
 			if (seen_rx_buf_size) {
@@ -816,6 +1091,25 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 		goto fail;
 	}
 
+	if (seen_rcp_nonce && !(adapter->ext_capabilities & ESP_EXT_CAP_RCP)) {
+		esp_err("RCP session nonce advertised without RCP capability\n");
+		ret = -EPROTO;
+		goto fail;
+	}
+	if ((adapter->ext_capabilities & ESP_EXT_CAP_RCP) &&
+	    !(adapter->ext_capabilities & ESP_EXT_CAP_RADIO_SERVICE_CTRL) &&
+	    (!seen_rcp_nonce || !adapter->rcp_session_nonce)) {
+		esp_err("Legacy active-RCP firmware did not publish a valid session nonce\n");
+		ret = -EPROTO;
+		goto fail;
+	}
+	if ((adapter->ext_capabilities & ESP_EXT_CAP_RADIO_SERVICE_CTRL) &&
+	    seen_rcp_nonce && !adapter->rcp_session_nonce) {
+		esp_err("Runtime-radio firmware published a zero RCP session nonce\n");
+		ret = -EPROTO;
+		goto fail;
+	}
+
 	if (reinitializing && adapter->if_ops &&
 	    adapter->if_ops->reinit_after_fw_reset) {
 		ret = adapter->if_ops->reinit_after_fw_reset(adapter);
@@ -867,12 +1161,8 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 	esp_commit_reconstruction(adapter);
 	committed = true;
 
-	ret = init_bt(adapter);
-	if (ret) {
-		esp_err("Bluetooth init failed: %d\n", ret);
-		goto fail_after_commit;
-	}
-
+	/* Publish WLAN first; the selected secondary-radio endpoint is applied
+	 * independently after reconstruction commits. */
 	ret = esp_publish_network_ifaces(adapter);
 	if (ret) {
 		esp_err("network interface publish failed\n");
@@ -884,6 +1174,25 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 		process_test_capabilities(raw_tp_mode);
 #endif
 	print_capabilities(adapter->capabilities);
+	print_ext_capabilities(adapter->ext_capabilities);
+
+	if (adapter->ext_capabilities & ESP_EXT_CAP_RADIO_SERVICE_CTRL) {
+		schedule_work(&adapter->radio_service_work);
+	} else {
+		/* Backward compatibility with firmware predating runtime selection. */
+		if (adapter->ext_capabilities & ESP_EXT_CAP_RCP) {
+			ret = esp_init_rcp(adapter);
+			if (ret) {
+				esp_err("Legacy RCP endpoint init failed: %d\n", ret);
+				goto fail_after_commit;
+			}
+		}
+		ret = init_bt(adapter);
+		if (ret) {
+			esp_err("Legacy Bluetooth init failed: %d\n", ret);
+			goto fail_after_commit;
+		}
+	}
 	return 0;
 
 fail_after_commit:
@@ -1264,6 +1573,7 @@ int esp_remove_card(struct esp_adapter *adapter, bool notify_fw)
 		return 0;
 
 	esp_cmd_abort_waiters(adapter);
+	cancel_work_sync(&adapter->radio_service_work);
 	cancel_work_sync(&adapter->mac_flter_work);
 
 	if (!notify_fw)
@@ -1275,7 +1585,8 @@ int esp_remove_card(struct esp_adapter *adapter, bool notify_fw)
 	esp_cfg_cleanup(adapter);
 	if (adapter->if_rx_workqueue)
 		flush_workqueue(adapter->if_rx_workqueue);
-	/* BT may have been initialized after fw boot-up event, deinit it */
+	/* Stateful side channels may have been initialized after the boot event. */
+	esp_deinit_rcp(adapter);
 	esp_deinit_bt(adapter);
 	esp_commands_teardown(adapter);
 	esp_remove_network_ifaces(adapter);
@@ -1305,6 +1616,64 @@ struct esp_wifi_device *get_priv_from_payload_header(struct esp_payload_header *
 	return NULL;
 }
 
+static bool esp_bootup_event_structurally_valid(struct sk_buff *skb)
+{
+	struct esp_internal_bootup_event *evt;
+
+	if (!skb ||
+	    skb->len < offsetof(struct esp_internal_bootup_event, data))
+		return false;
+
+	evt = (struct esp_internal_bootup_event *)skb->data;
+	if (evt->header.status)
+		return false;
+	if (evt->len > skb->len - offsetof(struct esp_internal_bootup_event, data))
+		return false;
+
+	return true;
+}
+
+static bool esp_bootup_event_legacy_rcp_active(struct sk_buff *skb)
+{
+	struct esp_internal_bootup_event *evt;
+	u8 *pos;
+	int left;
+	u32 ext_caps = 0;
+	bool seen_ext = false;
+
+	if (!esp_bootup_event_structurally_valid(skb))
+		return false;
+
+	evt = (struct esp_internal_bootup_event *)skb->data;
+	pos = evt->data;
+	left = evt->len;
+
+	while (left >= 2) {
+		u8 tag = pos[0];
+		u8 tag_len = pos[1];
+
+		if (tag_len > left - 2)
+			return false;
+		if (tag == ESP_BOOTUP_EXT_CAPABILITY &&
+		    tag_len == sizeof(u32)) {
+			u32 ext_caps_le;
+
+			if (seen_ext)
+				return false;
+			memcpy(&ext_caps_le, pos + 2, sizeof(ext_caps_le));
+			ext_caps = esp_wire_le32_to_cpu(ext_caps_le);
+			seen_ext = true;
+		}
+		pos += tag_len + 2;
+		left -= tag_len + 2;
+	}
+
+	return seen_ext &&
+	       (ext_caps & ESP_EXT_CAP_RCP) &&
+	       !(ext_caps & ESP_EXT_CAP_RADIO_SERVICE_CTRL);
+}
+
+
 static void process_esp_bootup_event(struct esp_adapter *adapter,
 		struct sk_buff *skb)
 {
@@ -1314,21 +1683,15 @@ static void process_esp_bootup_event(struct esp_adapter *adapter,
 		esp_err("Invalid arguments\n");
 		return;
 	}
-	if (skb->len < offsetof(struct esp_internal_bootup_event, data)) {
-		esp_err("Boot-up event truncated skb_len=%u\n", skb->len);
+	if (!esp_bootup_event_structurally_valid(skb)) {
+		esp_err("Malformed ESP boot-up event skb_len=%u; forcing recovery\n",
+			skb->len);
+		esp_schedule_fw_reset_recovery(adapter);
+		esp_request_firmware_restart(adapter);
 		return;
 	}
 
 	evt = (struct esp_internal_bootup_event *)skb->data;
-	if (evt->header.status) {
-		esp_err("Incorrect ESP boot-up event\n");
-		return;
-	}
-	if (evt->len > skb->len - offsetof(struct esp_internal_bootup_event, data)) {
-		esp_err("Boot-up event TLV len=%u exceeds skb_len=%u\n",
-			evt->len, skb->len);
-		return;
-	}
 
 	esp_info("Received ESP boot-up event\n");
 	process_event_esp_bootup(adapter, evt->data, evt->len);
@@ -1358,6 +1721,18 @@ static int process_internal_event(struct esp_adapter *adapter,
 		break;
 	}
 	return 0;
+}
+
+static void esp_fail_rcp_rx_if_required(struct esp_adapter *adapter,
+					    const char *reason)
+{
+	if (!adapter || !esp_rcp_fail_closed_required(adapter))
+		return;
+
+	esp_err("RCP RX transport corruption: %s; resetting stateful session\n",
+		reason ? reason : "unspecified");
+	esp_schedule_fw_reset_recovery(adapter);
+	esp_request_firmware_restart(adapter);
 }
 
 static bool esp_internal_checksum_required(const u8 *frame, u16 len,
@@ -1414,6 +1789,7 @@ static void process_rx_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 	if (skb->len < sizeof(*payload_header)) {
 		esp_err("RX drop: runt transport frame skb_len=%u header=%zu\n",
 			skb->len, sizeof(*payload_header));
+		esp_fail_rcp_rx_if_required(adapter, "runt transport frame");
 		dev_kfree_skb_any(skb);
 		return;
 	}
@@ -1425,6 +1801,7 @@ static void process_rx_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 		esp_err("RX drop: invalid bounds if=%u pkt=%u len=%u offset=%u skb_len=%u\n",
 			payload_header->if_type, payload_header->packet_type,
 			len, offset, skb->len);
+		esp_fail_rcp_rx_if_required(adapter, "transport bounds corruption");
 		dev_kfree_skb_any(skb);
 		return;
 	}
@@ -1456,17 +1833,20 @@ static void process_rx_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 			esp_err("ESP_RX_CHECKSUM_ERROR: if=%u pkt=%u len=%u offset=%u skb_len=%u expected=0x%04x got=0x%04x\n",
 				payload_header->if_type, payload_header->packet_type,
 				len, offset, skb->len, checksum, rx_checksum);
+			esp_fail_rcp_rx_if_required(adapter, "transport checksum corruption");
 			dev_kfree_skb_any(skb);
 			return;
 		}
 	}
 
 	if (payload_header->if_type != ESP_INTERNAL_IF &&
+	    payload_header->if_type != ESP_RCP_IF &&
 	    atomic_read(&adapter->state) < ESP_CONTEXT_READY) {
 		dev_kfree_skb_any(skb);
 		return;
 	}
 	if (payload_header->if_type != ESP_INTERNAL_IF &&
+	    payload_header->if_type != ESP_RCP_IF &&
 	    test_bit(ESP_CLEANUP_IN_PROGRESS, &adapter->state_flags) &&
 	    !test_bit(ESP_ALLOW_RECONSTRUCT, &adapter->state_flags)) {
 		dev_kfree_skb_any(skb);
@@ -1511,6 +1891,25 @@ static void process_rx_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 		} else {
 			dev_kfree_skb_any(skb);
 		}
+	} else if (payload_header->if_type == ESP_RCP_IF) {
+		if (payload_header->packet_type == PACKET_TYPE_RCP_SESSION) {
+			if (skb->len > len)
+				skb_trim(skb, len);
+			esp_rcp_session_ack(adapter, skb->data, skb->len);
+			dev_kfree_skb_any(skb);
+			return;
+		}
+		if (payload_header->packet_type != PACKET_TYPE_DATA || !len) {
+			esp_err("RCP RX invalid frame type=%u len=%u; resetting stateful session\n",
+				payload_header->packet_type, len);
+			dev_kfree_skb_any(skb);
+			esp_schedule_fw_reset_recovery(adapter);
+			esp_request_firmware_restart(adapter);
+			return;
+		}
+		if (skb->len > len)
+			skb_trim(skb, len);
+		esp_rcp_rx(adapter, skb);
 	} else if (payload_header->if_type == ESP_HCI_IF) {
 		u8 pkt_type;
 		u16 payload_len;
@@ -1541,6 +1940,21 @@ static void process_rx_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 		else
 			esp_hci_update_rx_counter(hdev, pkt_type, payload_len);
 	} else if (payload_header->if_type == ESP_INTERNAL_IF) {
+		struct event_header *event = NULL;
+
+		if (skb->len >= sizeof(*event)) {
+			event = (struct event_header *)skb->data;
+			if (event->event_code == ESP_INTERNAL_BOOTUP_EVENT &&
+			    esp_bootup_event_structurally_valid(skb)) {
+				bool legacy_rcp_active =
+					esp_bootup_event_legacy_rcp_active(skb);
+
+				if (esp_rcp_fail_closed_required(adapter) ||
+				    legacy_rcp_active)
+					esp_rcp_note_boot_event(adapter,
+							 legacy_rcp_active);
+			}
+		}
 		if (test_bit(ESP_DRIVER_UNLOADING, &adapter->state_flags) ||
 		    test_bit(ESP_TRANSPORT_REMOVING, &adapter->state_flags)) {
 			dev_kfree_skb_any(skb);
@@ -1732,6 +2146,7 @@ static void esp_events_work(struct work_struct *work)
 static struct esp_adapter *init_adapter(void)
 {
 	memset(&adapter, 0, sizeof(adapter));
+	INIT_WORK(&adapter.radio_service_work, esp_radio_service_work);
 	skb_queue_head_init(&adapter.events_skb_q);
 	INIT_DELAYED_WORK(&adapter.fw_recovery_work, esp_fw_recovery_work);
 	spin_lock_init(&adapter.fw_recovery_lock);
@@ -1755,6 +2170,8 @@ static struct esp_adapter *init_adapter(void)
 
 static void deinit_adapter(void)
 {
+	cancel_work_sync(&adapter.radio_service_work);
+	esp_deinit_rcp(&adapter);
 	cancel_delayed_work_sync(&adapter.fw_recovery_work);
 	if (adapter.if_context)
 		atomic_set(&adapter.state, ESP_CONTEXT_DISABLED);
@@ -1801,6 +2218,7 @@ static void __exit esp_exit(void)
 		cancel_work_sync(&adapter.events_work);
 	skb_queue_purge(&adapter.events_skb_q);
 	cancel_work_sync(&adapter.mac_flter_work);
+	cancel_work_sync(&adapter.radio_service_work);
 
 	can_deinit_fw = test_bit(ESP_INIT_DONE, &adapter.state_flags) &&
 		atomic_read(&adapter.state) >= ESP_CONTEXT_RX_READY &&

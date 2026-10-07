@@ -38,12 +38,16 @@
 #include "esp_fw_version.h"
 #include "esp_heap_caps.h"
 #include "esp_memory_utils.h"
+#ifdef CONFIG_ESP_HOSTED_RCP
+#include "esp_rcp.h"
+#endif
 
 #include "hal/sdio_slave_ll.h"
 
 #define SDIO_DMA_ALIGNMENT_BYTES    4
 #define SDIO_DMA_ALIGNMENT_MASK     (SDIO_DMA_ALIGNMENT_BYTES - 1)
 #define IS_SDIO_DMA_ALIGNED(val)    (!((uint32_t)(val) & SDIO_DMA_ALIGNMENT_MASK))
+#define SDIO_SMALL_TX_BOUNCE_SIZE   2048
 
 uint32_t rx_buf_size = 15872;
 uint32_t sdio_tx_aggr_size = 15872;
@@ -82,6 +86,9 @@ static volatile bool s_sdio_tx_blocked;
 static volatile int s_sdio_tx_inflight;
 static volatile bool s_sdio_tx_wait_idle;
 static SemaphoreHandle_t s_sdio_tx_idle;
+static SemaphoreHandle_t s_sdio_tx_serial;
+/* Allocated only for RCP-enabled builds; NULL keeps legacy builds on fallback. */
+static uint8_t *s_small_tx_dma_buf;
 
 static if_ops_t if_ops = {
     .init = sdio_init,
@@ -139,14 +146,71 @@ static esp_err_t sdio_transmit_admitted(uint8_t *addr, size_t len)
 {
     esp_err_t ret;
 
-    if (!sdio_tx_try_admit())
+    if (!s_sdio_tx_serial ||
+        xSemaphoreTake(s_sdio_tx_serial, portMAX_DELAY) != pdTRUE)
         return ESP_ERR_INVALID_STATE;
+
+    if (!sdio_tx_try_admit()) {
+        xSemaphoreGive(s_sdio_tx_serial);
+        return ESP_ERR_INVALID_STATE;
+    }
+
     ret = sdio_slave_transmit(addr, len);
     sdio_tx_release();
+    xSemaphoreGive(s_sdio_tx_serial);
     return ret;
 }
 
-static esp_err_t sdio_reset_hw(void)
+/*
+ * RCP is a stateful stream and must not pin the OpenThread/NCP task forever
+ * if the host stops consuming SDIO data. Use the lower-level IDF send APIs so
+ * queue admission and physical completion are both bounded.
+ *
+ * If *driver_owns_buffer is true on error, SDIO accepted the DMA buffer but
+ * did not return ownership before timeout. The caller must not free it; the
+ * RCP session is then restarted.
+ */
+static esp_err_t sdio_transmit_admitted_timeout(uint8_t *addr, size_t len,
+                                                TickType_t wait_ticks,
+                                                bool *driver_owns_buffer)
+{
+    void *finished_arg = NULL;
+    esp_err_t ret;
+
+    if (!driver_owns_buffer)
+        return ESP_ERR_INVALID_ARG;
+    *driver_owns_buffer = false;
+
+    if (!s_sdio_tx_serial ||
+        xSemaphoreTake(s_sdio_tx_serial, wait_ticks) != pdTRUE)
+        return ESP_ERR_TIMEOUT;
+
+    if (!sdio_tx_try_admit()) {
+        xSemaphoreGive(s_sdio_tx_serial);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ret = sdio_slave_send_queue(addr, len, addr, wait_ticks);
+    if (ret != ESP_OK)
+        goto out;
+
+    *driver_owns_buffer = true;
+    ret = sdio_slave_send_get_finished(&finished_arg, wait_ticks);
+    if (ret == ESP_OK && finished_arg == addr) {
+        *driver_owns_buffer = false;
+    } else if (ret == ESP_OK) {
+        ESP_LOGE(TAG, "SDIO RCP TX completion cookie mismatch expected=%p got=%p",
+                 addr, finished_arg);
+        ret = ESP_ERR_INVALID_STATE;
+    }
+
+out:
+    sdio_tx_release();
+    xSemaphoreGive(s_sdio_tx_serial);
+    return ret;
+}
+
+static esp_err_t sdio_reset_hw_internal(bool restart_link)
 {
     uint8_t gen;
     void *arg;
@@ -203,6 +267,17 @@ static esp_err_t sdio_reset_hw(void)
         (void)arg;
     }
 
+    if (!restart_link) {
+        /*
+         * Fatal firmware reboot path: ownership is flushed, TX remains blocked
+         * and the SDIO peripheral stays stopped. Do not expose a fresh link to
+         * the host in the window before esp_restart().
+         */
+        if (dropped_e2h_tokens)
+            ESP_LOGW(TAG, "SDIO fatal quiesce flushed committed E2H tokens");
+        return ESP_OK;
+    }
+
     ret = sdio_slave_start();
     if (ret != ESP_OK)
         goto fail;
@@ -216,7 +291,11 @@ static esp_err_t sdio_reset_hw(void)
     portEXIT_CRITICAL(&s_sdio_tx_mux);
 
     if (dropped_e2h_tokens) {
-        ESP_LOGE(TAG, "SDIO reset dropped committed E2H tokens; restarting firmware to ensure state agreement");
+        ESP_LOGE(TAG, "SDIO reset dropped committed E2H tokens; quiescing before firmware restart");
+        portENTER_CRITICAL(&s_sdio_tx_mux);
+        s_sdio_tx_blocked = true;
+        portEXIT_CRITICAL(&s_sdio_tx_mux);
+        sdio_slave_stop();
         esp_restart();
     }
 
@@ -238,21 +317,21 @@ static void sdio_process_host_bits(uint32_t bits)
     }
 
     if (bits & (1u << ESP_RESET)) {
-        (void)sdio_reset_hw();
-        ESP_LOGI(TAG, "ESP_RESET received; restarting firmware to guarantee clean application state");
+        (void)sdio_reset_hw_internal(false);
+        ESP_LOGI(TAG, "ESP_RESET received; restarting firmware from quiesced SDIO state");
         esp_restart();
     }
 
     if (bits & (1u << ESP_POWER_SAVE_ON)) {
         if (context.event_handler)
             context.event_handler(ESP_POWER_SAVE_ON);
-        (void)sdio_reset_hw();
+        (void)sdio_reset_hw_internal(true);
     }
 
     if (bits & (1u << ESP_POWER_SAVE_OFF)) {
         if (context.event_handler)
             context.event_handler(ESP_POWER_SAVE_OFF);
-        (void)sdio_reset_hw();
+        (void)sdio_reset_hw_internal(true);
     }
 
     if (bits & (1u << ESP_OPEN_DATA_PATH)) {
@@ -314,10 +393,20 @@ static void sdio_free_rx_buffers(void)
 {
     for (int i = 0; i < RX_BUF_NUM; i++) {
         if (sdio_slave_rx_buffer[i]) {
-            free(sdio_slave_rx_buffer[i]);
+            heap_caps_free(sdio_slave_rx_buffer[i]);
             sdio_slave_rx_buffer[i] = NULL;
         }
     }
+}
+
+static void sdio_free_small_tx_buffer(void)
+{
+#ifdef CONFIG_ESP_HOSTED_RCP
+    if (s_small_tx_dma_buf) {
+        heap_caps_free(s_small_tx_dma_buf);
+        s_small_tx_dma_buf = NULL;
+    }
+#endif
 }
 
 static void sdio_ctrl_stop_worker(void)
@@ -359,6 +448,12 @@ static void sdio_ctrl_delete_sync(void)
         vSemaphoreDelete(s_sdio_tx_idle);
         s_sdio_tx_idle = NULL;
     }
+
+    /*
+     * Keep s_sdio_tx_serial for firmware lifetime. A sender may be waking
+     * from this mutex just after reset drained the active transmitter; deleting
+     * it here would race that waiter. Reinitialization safely reuses it.
+     */
 
     if (wakeup_sem) {
         vSemaphoreDelete(wakeup_sem);
@@ -475,6 +570,14 @@ static interface_handle_t * sdio_init(void)
         sdio_ctrl_teardown();
         return NULL;
     }
+
+    if (!s_sdio_tx_serial)
+        s_sdio_tx_serial = xSemaphoreCreateMutex();
+    if (!s_sdio_tx_serial) {
+        ESP_LOGE(TAG, "Failed to create SDIO TX serialization mutex");
+        sdio_ctrl_teardown();
+        return NULL;
+    }
     {
         TaskHandle_t ctrl_task = NULL;
 
@@ -497,12 +600,32 @@ static interface_handle_t * sdio_init(void)
 
     for (int i = 0; i < RX_BUF_NUM; i++) {
         sdio_slave_rx_buffer[i] = heap_caps_malloc(rx_buf_size, MALLOC_CAP_DMA);
-        assert(sdio_slave_rx_buffer[i] != NULL);
+        if (!sdio_slave_rx_buffer[i]) {
+            ESP_LOGE(TAG,
+                     "SDIO RX DMA allocation failed index=%d bytes=%u free_dma=%u largest_dma=%u",
+                     i, (unsigned)rx_buf_size,
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
+            sdio_ctrl_stop_worker();
+            sdio_slave_deinit();
+            sdio_free_rx_buffers();
+            sdio_ctrl_delete_sync();
+            return NULL;
+        }
+
         handle = sdio_slave_recv_register_buf(sdio_slave_rx_buffer[i]);
-        assert(handle != NULL);
+        if (!handle) {
+            ESP_LOGE(TAG, "SDIO RX buffer registration failed index=%d", i);
+            sdio_ctrl_stop_worker();
+            sdio_slave_deinit();
+            sdio_free_rx_buffers();
+            sdio_ctrl_delete_sync();
+            return NULL;
+        }
 
         ret = sdio_slave_recv_load_buf(handle);
         if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "SDIO RX buffer load failed index=%d ret=0x%x", i, ret);
             sdio_ctrl_stop_worker();
             sdio_slave_deinit();
             sdio_free_rx_buffers();
@@ -510,6 +633,23 @@ static interface_handle_t * sdio_init(void)
             return NULL;
         }
     }
+
+#ifdef CONFIG_ESP_HOSTED_RCP
+    s_small_tx_dma_buf = heap_caps_malloc(SDIO_SMALL_TX_BOUNCE_SIZE,
+                                          MALLOC_CAP_DMA);
+    if (!s_small_tx_dma_buf) {
+        ESP_LOGE(TAG,
+                 "SDIO small-packet DMA bounce allocation failed bytes=%u free_dma=%u largest_dma=%u",
+                 SDIO_SMALL_TX_BOUNCE_SIZE,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
+        sdio_ctrl_stop_worker();
+        sdio_slave_deinit();
+        sdio_free_rx_buffers();
+        sdio_ctrl_delete_sync();
+        return NULL;
+    }
+#endif
 
     sdio_slave_set_host_intena(SDIO_SLAVE_HOSTINT_SEND_NEW_PACKET |
                                SDIO_SLAVE_HOSTINT_BIT0 |
@@ -525,6 +665,7 @@ static interface_handle_t * sdio_init(void)
     if (ret != ESP_OK) {
         sdio_ctrl_stop_worker();
         sdio_slave_deinit();
+        sdio_free_small_tx_buffer();
         sdio_free_rx_buffers();
         sdio_ctrl_delete_sync();
         return NULL;
@@ -582,6 +723,7 @@ static int32_t sdio_write(interface_handle_t *handle, interface_buffer_handle_t 
     int32_t total_len = 0;
     uint8_t* sendbuf = NULL;
     uint16_t offset = 0;
+    uint16_t wire_offset = 0;
     struct esp_payload_header *header = NULL;
     bool free_sendbuf = false;
 
@@ -606,7 +748,27 @@ static int32_t sdio_write(interface_handle_t *handle, interface_buffer_handle_t 
 
     uint32_t align_padding = 0;
     offset = sizeof(struct esp_payload_header);
-    if (IS_WIFI_DATA_PACKET(buf_handle)) {
+    if (buf_handle->if_type == ESP_RCP_IF) {
+        if (!s_small_tx_dma_buf ||
+            buf_handle->payload_len > ESP_HOSTED_RCP_CHUNK_MAX ||
+            ESP_HOSTED_RCP_TX_HEADROOM < sizeof(struct esp_payload_header) ||
+            ESP_HOSTED_RCP_TX_HEADROOM + buf_handle->payload_len >
+                SDIO_SMALL_TX_BOUNCE_SIZE) {
+            ESP_LOGE(TAG, "Invalid RCP TX buffer len=%u headroom=%u bounce=%p",
+                     buf_handle->payload_len, ESP_HOSTED_RCP_TX_HEADROOM,
+                     s_small_tx_dma_buf);
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        offset = ESP_HOSTED_RCP_TX_HEADROOM;
+        /*
+         * RCP payloads already reserve the complete Hosted headroom. Do not
+         * add that headroom/header delta again as transport alignment padding.
+         */
+        align_padding = 0;
+        sendbuf = s_small_tx_dma_buf;
+        memcpy(sendbuf + offset, buf_handle->payload, buf_handle->payload_len);
+    } else if (IS_WIFI_DATA_PACKET(buf_handle)) {
         /* As Wi-Fi esf-buf has headroom of rx_ctrl before Wi-Fi data pointer, we can use that space to store packet header.
          * This way we do not need to alloc and memcpy again */
         uint32_t payload_addr = (uint32_t)buf_handle->payload;
@@ -614,42 +776,68 @@ static int32_t sdio_write(interface_handle_t *handle, interface_buffer_handle_t 
         sendbuf = (uint8_t *)buf_handle->payload - sizeof(struct esp_payload_header) - align_padding;
         if (!esp_ptr_dma_capable(sendbuf) || !IS_SDIO_DMA_ALIGNED(sendbuf)) {
             align_padding = 0;
-            sendbuf = heap_caps_malloc(buf_handle->payload_len + offset, MALLOC_CAP_DMA);
-            if (sendbuf == NULL) {
-                ESP_LOGE(TAG, "Malloc send buffer fail!");
-                return ESP_ERR_NO_MEM;
+            if (s_small_tx_dma_buf &&
+                buf_handle->payload_len + offset <= SDIO_SMALL_TX_BOUNCE_SIZE) {
+                sendbuf = s_small_tx_dma_buf;
+                memcpy(sendbuf + offset, buf_handle->payload,
+                       buf_handle->payload_len);
+            } else {
+                sendbuf = heap_caps_malloc(buf_handle->payload_len + offset,
+                                           MALLOC_CAP_DMA);
+                if (sendbuf == NULL) {
+                    ESP_LOGE(TAG,
+                             "Wi-Fi DMA TX allocation failed len=%u free_dma=%u largest_dma=%u",
+                             buf_handle->payload_len,
+                             (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+                             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
+                    return ESP_ERR_NO_MEM;
+                }
+                memcpy(sendbuf + offset, buf_handle->payload,
+                       buf_handle->payload_len);
+                free_sendbuf = true;
             }
-            memcpy(sendbuf + offset, buf_handle->payload, buf_handle->payload_len);
-            free_sendbuf = true;
         }
+    } else if (s_small_tx_dma_buf &&
+               buf_handle->payload_len + offset <= SDIO_SMALL_TX_BOUNCE_SIZE) {
+        /*
+         * SDIO E2H is serialized, so the small bounce can also carry HCI,
+         * command/control and other short non-Wi-Fi packets. This removes the
+         * remaining hot-path DMA malloc/free churn seen during RCP soak tests.
+         */
+        sendbuf = s_small_tx_dma_buf;
+        memcpy(sendbuf + offset, buf_handle->payload, buf_handle->payload_len);
     } else {
-
         sendbuf = heap_caps_malloc(buf_handle->payload_len + offset, MALLOC_CAP_DMA);
         if (sendbuf == NULL) {
-            ESP_LOGE(TAG, "Malloc send buffer fail!");
+            ESP_LOGE(TAG,
+                     "DMA TX allocation failed if=%u len=%u free_dma=%u largest_dma=%u",
+                     buf_handle->if_type, buf_handle->payload_len,
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
             return ESP_ERR_NO_MEM;
         }
 
         memcpy(sendbuf + offset, buf_handle->payload, buf_handle->payload_len);
 
-        if (buf_handle->free_buf_handle && buf_handle->payload) {
-            buf_handle->free_buf_handle(buf_handle->payload);
+        if (buf_handle->free_buf_handle && buf_handle->priv_buffer_handle) {
+            buf_handle->free_buf_handle(buf_handle->priv_buffer_handle);
         }
 
         buf_handle->priv_buffer_handle = sendbuf;
         buf_handle->free_buf_handle = heap_caps_free;
     }
 
-    total_len = buf_handle->payload_len + offset + align_padding;
+    wire_offset = offset + align_padding;
+    total_len = buf_handle->payload_len + wire_offset;
     header = (struct esp_payload_header *)sendbuf;
-    memset(header, 0, sizeof(struct esp_payload_header) + align_padding);
+    memset(header, 0, wire_offset);
 
     /* Initialize header */
     header->if_type = buf_handle->if_type;
     header->if_num = buf_handle->if_num;
     header->len = htole16(buf_handle->payload_len);
     header->reserved2 = buf_handle->flag;
-    header->offset = htole16(sizeof(struct esp_payload_header) + align_padding);
+    header->offset = htole16(wire_offset);
     header->packet_type = buf_handle->pkt_type;
     if (header->if_type == ESP_TEST_IF) {
         debug_raw_tp_set_seq(header, buf_handle->raw_tp_seq);
@@ -660,17 +848,40 @@ static int32_t sdio_write(interface_handle_t *handle, interface_buffer_handle_t 
                                                 total_len));
 #endif
 
-    ret = sdio_transmit_admitted(sendbuf, total_len);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "sdio slave transmit error, ret : 0x%x\r\n", ret);
-        if (free_sendbuf) {
-            heap_caps_free(sendbuf);
+    if (header->if_type == ESP_RCP_IF) {
+        bool driver_owns_sendbuf = false;
+
+        ret = sdio_transmit_admitted_timeout(
+            sendbuf, total_len,
+            pdMS_TO_TICKS(ESP_HOSTED_RCP_TX_TIMEOUT_MS),
+            &driver_owns_sendbuf);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "RCP SDIO TX stalled/failed ret=0x%x timeout=%u ms",
+                     ret, ESP_HOSTED_RCP_TX_TIMEOUT_MS);
+            if (driver_owns_sendbuf) {
+                /*
+                 * The persistent bounce buffer may still be owned by SDIO.
+                 * Do not reboot from inside the transport while it owns this
+                 * descriptor. Return failure so process_tx_pkt() can run the
+                 * RCP fatal-recovery task, reset/flush SDIO, then reboot.
+                 */
+                ESP_LOGE(TAG, "RCP SDIO completion ownership ambiguous");
+            }
+            if (free_sendbuf && !driver_owns_sendbuf)
+                heap_caps_free(sendbuf);
+            return ret;
         }
-        return ret;
+    } else {
+        ret = sdio_transmit_admitted(sendbuf, total_len);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "sdio slave transmit error, ret : 0x%x\r\n", ret);
+            if (free_sendbuf)
+                heap_caps_free(sendbuf);
+            return ret;
+        }
     }
-    if (free_sendbuf) {
+    if (free_sendbuf)
         heap_caps_free(sendbuf);
-    }
 #if 0
     ESP_LOGE(TAG, "\nTo Host");
     ESP_LOG_BUFFER_HEXDUMP("s->h", buf_handle->payload,
@@ -703,7 +914,7 @@ int32_t sdio_write_aggr(interface_handle_t *handle, uint8_t *payload,
     return payload_len;
 }
 
-esp_err_t send_bootup_event_to_host(uint32_t cap)
+esp_err_t send_bootup_event_to_host(uint32_t cap, uint32_t ext_cap)
 {
     struct esp_payload_header *header = NULL;
     struct esp_internal_bootup_event *event = NULL;
@@ -715,9 +926,15 @@ esp_err_t send_bootup_event_to_host(uint32_t cap)
 
     memset(&buf_handle, 0, sizeof(buf_handle));
 
-    buf_handle.payload = heap_caps_malloc(RX_BUF_SIZE, MALLOC_CAP_DMA);
-    assert(buf_handle.payload);
-    memset(buf_handle.payload, 0, RX_BUF_SIZE);
+    buf_handle.payload = heap_caps_calloc(1, ESP_BOOTUP_EVENT_BUF_SIZE, MALLOC_CAP_DMA);
+    if (!buf_handle.payload) {
+        ESP_LOGE(TAG,
+                 "Boot-event DMA allocation failed bytes=%u free_dma=%u largest_dma=%u",
+                 ESP_BOOTUP_EVENT_BUF_SIZE,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
+        return ESP_ERR_NO_MEM;
+    }
 
     header = (struct esp_payload_header *) buf_handle.payload;
 
@@ -745,6 +962,18 @@ esp_err_t send_bootup_event_to_host(uint32_t cap)
     uint32_t cap_le = htole32(cap);
     memcpy(pos, &cap_le, sizeof(cap_le));
     pos += sizeof(cap_le);                len += sizeof(cap_le);
+
+    /* TLV - Extended capabilities and RCP firmware incarnation. */
+    if (ext_cap) {
+        uint32_t ext_cap_le = htole32(ext_cap);
+
+        *pos = ESP_BOOTUP_EXT_CAPABILITY; pos++; len++;
+        *pos = sizeof(ext_cap_le);         pos++; len++;
+        memcpy(pos, &ext_cap_le, sizeof(ext_cap_le));
+        pos += sizeof(ext_cap_le);          len += sizeof(ext_cap_le);
+    }
+
+    /* RCP nonce is published only by CMD_SET_RADIO_SERVICE after activation. */
 
     /* TLV - Slave RX Buffer Size */
     *pos = ESP_BOOTUP_RX_BUF_SIZE;        pos++; len++;
@@ -780,6 +1009,13 @@ esp_err_t send_bootup_event_to_host(uint32_t cap)
 
     header->len = htole16(buf_handle.payload_len - sizeof(struct esp_payload_header));
 
+    if (buf_handle.payload_len > ESP_BOOTUP_EVENT_BUF_SIZE) {
+        ESP_LOGE(TAG, "Boot event too large len=%u max=%u",
+                 buf_handle.payload_len, ESP_BOOTUP_EVENT_BUF_SIZE);
+        heap_caps_free(buf_handle.payload);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
 #if CONFIG_ESP_SDIO_CHECKSUM
     header->checksum = htole16(compute_checksum(buf_handle.payload, buf_handle.payload_len));
 #endif
@@ -787,11 +1023,11 @@ esp_err_t send_bootup_event_to_host(uint32_t cap)
     ret = sdio_transmit_admitted(buf_handle.payload, buf_handle.payload_len);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "sdio slave tx error, ret : 0x%x\r\n", ret);
-        free(buf_handle.payload);
+        heap_caps_free(buf_handle.payload);
         return ret;
     }
 
-    free(buf_handle.payload);
+    heap_caps_free(buf_handle.payload);
     return ESP_OK;
 }
 
@@ -844,10 +1080,15 @@ static int sdio_read(interface_handle_t *if_handle, interface_buffer_handle_t *b
     return buf_handle->payload_len;
 }
 
+esp_err_t sdio_prepare_fatal_reboot(void)
+{
+    return sdio_reset_hw_internal(false);
+}
+
 static esp_err_t sdio_reset(interface_handle_t *handle)
 {
     (void)handle;
-    return sdio_reset_hw();
+    return sdio_reset_hw_internal(true);
 }
 
 static void sdio_deinit(interface_handle_t *handle)
@@ -858,6 +1099,7 @@ static void sdio_deinit(interface_handle_t *handle)
     sdio_slave_stop();
     sdio_slave_reset();
     sdio_ctrl_wait_tx_idle();
+    sdio_free_small_tx_buffer();
     sdio_free_rx_buffers();
     sdio_ctrl_delete_sync();
 }

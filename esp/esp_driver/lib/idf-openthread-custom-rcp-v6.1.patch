@@ -1,0 +1,1038 @@
+diff --git a/components/openthread/Kconfig b/components/openthread/Kconfig
+--- a/components/openthread/Kconfig
++++ b/components/openthread/Kconfig
+@@ -232,273 +232,285 @@
+                     bool "USB RCP"
+                     help
+                         Select this to enable connection to host over USB JTAG serial.
++
++                config OPENTHREAD_RCP_CUSTOM
++                    bool "Custom Transport RCP"
++                    help
++                        Select this to enable a custom transport connection to host.
+             endchoice
+ 
+             config OPENTHREAD_NCP_VENDOR_HOOK
+                 bool "Enable vendor command for RCP"
+                 default y
+                 help
+                     Select this to enable OpenThread NCP vendor commands.
+ 
+             config OPENTHREAD_RCP_SPINEL_CONSOLE
+                 bool "Enable RCP console via Spinel"
+                 default n
+                 help
+                     Select this to enable sending console commands to OpenThread RCP via Spinel.
+         endmenu
+ 
+         config OPENTHREAD_BORDER_ROUTER
+             bool "Enable Border Router"
+             depends on OPENTHREAD_FTD && OPENTHREAD_PLATFORM_NETIF
+             default n
+             help
+                 Select this option to enable border router features in OpenThread.
+ 
+         config OPENTHREAD_COMMISSIONER
+             bool "Enable Commissioner"
+             default n
+             help
+                 Select this option to enable commissioner in OpenThread. This will enable the device to act as a
+                 commissioner in the Thread network. A commissioner checks the pre-shared key from a joining device
+                 with the Thread commissioning protocol and shares the network parameter with the joining device
+                 upon success.
+         menu "Commissioner Configurations"
+             depends on OPENTHREAD_COMMISSIONER
+             config OPENTHREAD_COMM_MAX_JOINER_ENTRIES
+                 int "The size of max commissioning joiner entries"
+                 default 2
+         endmenu
+ 
+         config OPENTHREAD_JOINER
+             bool "Enable Joiner"
+             default n
+             help
+                 Select this option to enable Joiner in OpenThread. This allows a device to join the
+                 Thread network with a pre-shared key using the Thread commissioning protocol.
+ 
+         config OPENTHREAD_SRP_CLIENT
+             bool "Enable SRP Client"
+             default y
+             help
+                 Select this option to enable SRP Client in OpenThread.
+                 This allows a device to register SRP services to SRP Server.
+         menu "SRP Client Configurations"
+             depends on OPENTHREAD_SRP_CLIENT
+             config OPENTHREAD_SRP_CLIENT_MAX_SERVICES
+                 int "Specifies number of service entries in the SRP client service pool"
+                 default 5
+                 help
+                     Set the max buffer size of service entries in the SRP client service pool.
+         endmenu
+ 
+         config OPENTHREAD_DNS_CLIENT
+             bool "Enable DNS Client"
+             default y
+             help
+                 Select this option to enable DNS Client in OpenThread.
+ 
+         config OPENTHREAD_DNS64_CLIENT
+             bool "Enable DNS64 Client"
+             depends on LWIP_IPV4 && OPENTHREAD_PLATFORM_NETIF
+             select LWIP_HOOK_DNS_EXTERNAL_RESOLVE_SELECT_CUSTOM
+             default n
+             help
+                 Select this option to acquire NAT64 address from dns servers.
+         menu "DNS64 Client Configurations"
+             depends on OPENTHREAD_DNS64_CLIENT
+             config OPENTHREAD_DNS_SERVER_ADDR
+                 string "DNS server address (IPv4)"
+                 default "8.8.8.8"
+                 help
+                     Set the DNS server IPv4 address.
+         endmenu
+ 
+         config OPENTHREAD_TIMING_OPTIMIZATION
+             bool "Enable timing optimization"
+             default n
+             help
+                 Select this option to enable timing optimization for link metrics / CSL features.
+ 
+         config OPENTHREAD_LINK_METRICS
+             bool "Enable link metrics feature"
+             default n
+             select IEEE802154_TIMING_OPTIMIZATION if IEEE802154_ENABLED
+             select OPENTHREAD_TIMING_OPTIMIZATION
+             help
+                 Select this option to enable link metrics feature
+ 
+         config OPENTHREAD_BORDER_AGENT_ENABLE
+             bool "Enable border agent feature"
+             default y if OPENTHREAD_BORDER_ROUTER
+             default n if !OPENTHREAD_BORDER_ROUTER
+             help
+                 Select this option to enable border agent feature
+ 
+         config OPENTHREAD_MACFILTER_ENABLE
+             bool "Enable mac filter feature"
+             default n
+             help
+                 Select this option to enable mac filter feature
+ 
+         config OPENTHREAD_CSL_ENABLE
+             bool "Enable CSL feature"
+             default n
+             select IEEE802154_TIMING_OPTIMIZATION if IEEE802154_ENABLED
+             select OPENTHREAD_TIMING_OPTIMIZATION
+             help
+                 Select this option to enable CSL feature
+         menu "CSL Configurations"
+             config OPENTHREAD_CSL_ACCURACY
+                 int "The current CSL rx/tx scheduling drift, in units of ± ppm"
+ 
+                 default 50
+                 help
+                     The current accuracy of the clock used for scheduling CSL operations
+ 
+             config OPENTHREAD_CSL_UNCERTAIN
+                 int "The CSL Uncertainty in units of 10 us."
+                 default 50
+                 help
+                     The fixed uncertainty of the Device for scheduling CSL Transmissions in units of 10 microseconds.
+ 
+             config OPENTHREAD_CSL_DEBUG_ENABLE
+                 bool "Enable CSL debug"
+                 default n
+                 help
+                     Select this option to set rx on when sleep in CSL feature, only for debug
+         endmenu
+ 
+         config OPENTHREAD_TIME_SYNC
+             bool "Enable the time synchronization service feature"
+             default n
+             help
+                 Select this option to enable time synchronization feature, the devices in the same Thread network could
+                 sync to the same network time.
+ 
+         config OPENTHREAD_RADIO_STATS_ENABLE
+             bool "Enable Radio Statistics feature"
+             depends on OPENTHREAD_FTD || OPENTHREAD_MTD
+             default n
+             help
+                 Select this option to enable the radio statistics feature, you can use radio
+                 command to print some radio Statistics information.
+ 
+         config OPENTHREAD_RX_ON_WHEN_IDLE
+             bool "Enable OpenThread radio capability rx on when idle"
+             default y if !ESP_COEX_SW_COEXIST_ENABLE && !ESP_COEX_EXTERNAL_COEXIST_ENABLE
+             default n if ESP_COEX_SW_COEXIST_ENABLE || ESP_COEX_EXTERNAL_COEXIST_ENABLE
+             help
+                 Select this option to enable OpenThread radio capability rx on when idle.
+                 Do not support this feature when SW coexistence is enabled.
+ 
+         config OPENTHREAD_DIAG
+             bool "Enable diag"
+             default y
+             help
+                 Select this option to enable Diag in OpenThread. This will enable diag mode and a series of diag
+                 commands in the OpenThread command line. These commands allow users to manipulate low-level
+                 features of the storage and 15.4 radio.
+ 
+         config OPENTHREAD_PARENT_SEARCH_MTD
+             bool "Enable Parent Search"
+             depends on OPENTHREAD_MTD
+             default y
+             help
+                 Select this option to enable "Periodic Parent Search" function for MTD. This checks the average
+                 RSS to its current parent every periodically and starts a parent search process if the average
+                 RSS is below OPENTHREAD_PARENT_SEARCH_RSS_THRESHOLD. This feature is always enabled for FTDs.
+         menu "Parent Search Configurations"
+             depends on OPENTHREAD_PARENT_SEARCH_MTD || OPENTHREAD_FTD
+             config OPENTHREAD_PARENT_SEARCH_CHECK_INTERVAL_MINS
+                 int "The interval in minutes for a child to check the trigger condition to perform a parent search"
+                 default 9
+             config OPENTHREAD_PARENT_SEARCH_BACKOFF_INTERVAL_MINS
+                 int "The backoff interval in minutes for a child to not perform a parent search after triggering one"
+                 default 600
+             config OPENTHREAD_PARENT_SEARCH_RSS_THRESHOLD
+                 int "The RSS threshold used to trigger a parent search"
+                 default -65
+             config OPENTHREAD_PARENT_SEARCH_RESELECT_TIMEOUT_MINS
+                 int "The parent reselect timeout duration in minutes used on FTD child devices"
+                 default 90
+             config OPENTHREAD_PARENT_SEARCH_RSS_MARGIN
+                 int "The RSS margin over the current parent RSS used on FTD child devices"
+                 default 7
+         endmenu
+ 
+         menu "Thread Memory Allocation"
+             depends on (SPIRAM_USE_CAPS_ALLOC || SPIRAM_USE_MALLOC)
+             config OPENTHREAD_PLATFORM_MALLOC_CAP_SPIRAM
+                 bool 'Allocate memory from PSRAM'
+                 default y
+                 help
+                     Select this option to allocate buffer from PSRAM for Thread
+ 
+             config OPENTHREAD_PLATFORM_MSGPOOL_MANAGEMENT
+                 bool 'Allocate message pool buffer from PSRAM'
+                 depends on OPENTHREAD_PLATFORM_MALLOC_CAP_SPIRAM
+                 default y
+                 help
+                     If enabled, the message pool is managed by platform defined logic.
+         endmenu
+ 
+         menu "OpenThread Stack Parameters"
+ 
+             menu "Thread Address Query Config"
+                 config OPENTHREAD_ADDRESS_QUERY_TIMEOUT
+                     int "Timeout (in seconds) for a address notification response after sending an address query."
+                     depends on OPENTHREAD_FTD || OPENTHREAD_MTD
+                     default 3
+ 
+                 config OPENTHREAD_ADDRESS_QUERY_RETRY_DELAY
+                     int "Initial retry delay for address query (in seconds)."
+                     depends on OPENTHREAD_FTD || OPENTHREAD_MTD
+                     default 15
+ 
+                 config OPENTHREAD_ADDRESS_QUERY_MAX_RETRY_DELAY
+                     int "Maximum retry delay for address query (in seconds)."
+                     depends on OPENTHREAD_FTD || OPENTHREAD_MTD
+                     default 120
+             endmenu
+ 
+             config OPENTHREAD_PREFERRED_CHANNEL_MASK
+                 hex "Preferred channel mask"
+                 default 0x7fff800
+ 
+             config OPENTHREAD_SUPPORTED_CHANNEL_MASK
+                 hex "Supported channel mask"
+                 default 0x7fff800
+ 
+             config OPENTHREAD_NUM_MESSAGE_BUFFERS
+                 int "The number of openthread message buffers"
+                 default 65 if !OPENTHREAD_PLATFORM_MSGPOOL_MANAGEMENT
+                 default 1024 if OPENTHREAD_PLATFORM_MSGPOOL_MANAGEMENT
+ 
+             config OPENTHREAD_XTAL_ACCURACY
+                 int "The accuracy of the XTAL"
+                 default 10
+                 help
+                     The device's XTAL accuracy, in ppm.
+ 
+             config OPENTHREAD_BUS_LATENCY
+                 int "The bus latency between host and radio chip"
+                 default 4000
+                 help
+                     The device's bus latency, in us.
+ 
+             config OPENTHREAD_MLE_MAX_CHILDREN
+                 int "The size of max MLE children entries"
+                 default 10
+ 
+             config OPENTHREAD_TMF_ADDR_CACHE_ENTRIES
+                 int "The size of max TMF address cache entries"
+                 default 20
+ 
+             config OPENTHREAD_UART_BUFFER_SIZE
+                 int "The uart received buffer size of openthread"
+                 default 2048
+                 help
+                     Set the OpenThread UART buffer size.
+ 
++            config OPENTHREAD_TRANSPORT_BUFFER_SIZE
++                depends on OPENTHREAD_RCP_CUSTOM
++                int "The custom transport received buffer size of openthread"
++                default 2048
++                help
++                    Set the OpenThread custom transport buffer size.
++
+             config OPENTHREAD_MAC_MAX_CSMA_BACKOFFS_DIRECT
+                 int "Maximum backoffs times before declaring a channel access failure."
+diff --git a/components/openthread/include/esp_openthread_types.h b/components/openthread/include/esp_openthread_types.h
+--- a/components/openthread/include/esp_openthread_types.h
++++ b/components/openthread/include/esp_openthread_types.h
+@@ -6,177 +6,194 @@
+ 
+ #pragma once
+ 
++#include <stddef.h>
+ #include <stdint.h>
+ 
+ #include <sys/select.h>
+ 
+ #include "esp_event_base.h"
+ #include "esp_netif_types.h"
+ #include "driver/gpio.h"
+ #include "driver/spi_master.h"
+ #include "driver/spi_slave.h"
+ #include "driver/uart.h"
+ #include "driver/usb_serial_jtag.h"
+ #include "hal/gpio_types.h"
+ #include "hal/uart_types.h"
+ #include "openthread/thread.h"
+ 
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+ 
+ /**
+  * @brief OpenThread event declarations
+  *
+  */
+ typedef enum {
+     OPENTHREAD_EVENT_START,                     /*!< OpenThread stack start */
+     OPENTHREAD_EVENT_STOP,                      /*!< OpenThread stack stop */
+     OPENTHREAD_EVENT_DETACHED,                  /*!< OpenThread detached */
+     OPENTHREAD_EVENT_ATTACHED,                  /*!< OpenThread attached */
+     OPENTHREAD_EVENT_ROLE_CHANGED,              /*!< OpenThread role changed */
+     OPENTHREAD_EVENT_IF_UP,                     /*!< OpenThread network interface up */
+     OPENTHREAD_EVENT_IF_DOWN,                   /*!< OpenThread network interface down */
+     OPENTHREAD_EVENT_GOT_IP6,                   /*!< OpenThread stack added IPv6 address */
+     OPENTHREAD_EVENT_LOST_IP6,                  /*!< OpenThread stack removed IPv6 address */
+     OPENTHREAD_EVENT_MULTICAST_GROUP_JOIN,      /*!< OpenThread stack joined IPv6 multicast group */
+     OPENTHREAD_EVENT_MULTICAST_GROUP_LEAVE,     /*!< OpenThread stack left IPv6 multicast group */
+     OPENTHREAD_EVENT_TREL_ADD_IP6,              /*!< OpenThread stack added TREL IPv6 address */
+     OPENTHREAD_EVENT_TREL_REMOVE_IP6,           /*!< OpenThread stack removed TREL IPv6 address */
+     OPENTHREAD_EVENT_TREL_MULTICAST_GROUP_JOIN, /*!< OpenThread stack joined TREL IPv6 multicast group */
+     OPENTHREAD_EVENT_SET_DNS_SERVER,            /*!< OpenThread stack set DNS server >*/
+     OPENTHREAD_EVENT_PUBLISH_MESHCOP_E,         /*!< OpenThread stack start to publish meshcop-e service >*/
+     OPENTHREAD_EVENT_REMOVE_MESHCOP_E,          /*!< OpenThread stack start to remove  meshcop-e service >*/
+     OPENTHREAD_EVENT_DATASET_CHANGED,           /*!< OpenThread dataset changed >*/
+ } esp_openthread_event_t;
+ 
+ /**
+  * @brief OpenThread event base declaration
+  *
+  */
+ ESP_EVENT_DECLARE_BASE(OPENTHREAD_EVENT);
+ 
+ /**
+  * @brief OpenThread role changed event data
+  *
+  */
+ typedef struct {
+     otDeviceRole previous_role; /*!< Previous Thread role */
+     otDeviceRole current_role;  /*!< Current Thread role */
+ } esp_openthread_role_changed_event_t;
+ 
+ /**
+  * @brief OpenThread dataset type
+  *
+  */
+ typedef enum {
+     OPENTHREAD_ACTIVE_DATASET,  /*!< Active dataset */
+     OPENTHREAD_PENDING_DATASET, /*!< Pending dataset */
+ } esp_openthread_dataset_type_t;
+ 
+ /**
+  * @brief OpenThread dataset changed event data
+  *
+  */
+ typedef struct {
+     esp_openthread_dataset_type_t type; /*!< Dataset type */
+     otOperationalDataset new_dataset;   /*!< New dataset */
+ } esp_openthread_dataset_changed_event_t;
+ 
+ /**
+  * This structure represents a context for a select() based mainloop.
+  *
+  */
+ typedef struct {
+     fd_set         read_fds;  /*!< The read file descriptors */
+     fd_set         write_fds; /*!< The write file descriptors */
+     fd_set         error_fds; /*!< The error file descriptors */
+     int            max_fd;    /*!< The max file descriptor */
+     struct timeval timeout;   /*!< The timeout */
+ } esp_openthread_mainloop_context_t;
+ 
+ /**
+  * @brief The uart port config for OpenThread.
+  *
+  */
+ typedef struct {
+     uart_port_t   port;        /*!< UART port number */
+     uart_config_t uart_config; /*!< UART configuration, see uart_config_t docs */
+     gpio_num_t    rx_pin;      /*!< UART RX pin */
+     gpio_num_t    tx_pin;      /*!< UART TX pin */
+ } esp_openthread_uart_config_t;
+ 
+ /**
+  * @brief The spi port config for OpenThread.
+  *
+  */
+ typedef struct {
+     spi_host_device_t             host_device;      /*!< SPI host device */
+     spi_dma_chan_t                dma_channel;      /*!< DMA channel */
+     spi_bus_config_t              spi_interface;    /*!< SPI bus */
+     spi_device_interface_config_t spi_device;       /*!< SPI peripheral device */
+     gpio_num_t                    intr_pin;         /*!< SPI interrupt pin */
+ } esp_openthread_spi_host_config_t;
+ 
+ /**
+  * @brief The spi slave config for OpenThread.
+  *
+  */
+ typedef struct {
+     spi_host_device_t            host_device;  /*!< SPI host device */
+     spi_bus_config_t             bus_config;   /*!< SPI bus config */
+     spi_slave_interface_config_t slave_config; /*!< SPI slave config */
+     gpio_num_t                   intr_pin;     /*!< SPI interrupt pin */
+ } esp_openthread_spi_slave_config_t;
+ 
+ /**
++ * @brief Custom byte transport for an OpenThread RCP host connection.
++ *
++ * The callbacks carry HDLC-framed Spinel bytes, not raw Spinel packets.
++ * transport_tx must synchronously consume exactly len bytes before returning
++ * ESP_OK. transport_rx is non-blocking and returns ESP_ERR_TIMEOUT when no
++ * bytes are currently available.
++ */
++typedef struct {
++    esp_err_t (*transport_tx)(const void *buf, size_t len);
++    esp_err_t (*transport_rx)(void *buf, size_t buf_size, size_t *out_len);
++    uint32_t bus_speed;
++} esp_openthread_transport_config_t;
++
++/**
+  * @brief The radio mode of OpenThread.
+  *
+  */
+ typedef enum {
+     RADIO_MODE_NATIVE = 0x0,   /*!< Use the native 15.4 radio */
+     RADIO_MODE_UART_RCP,       /*!< UART connection to a 15.4 capable radio co-processor (RCP) */
+     RADIO_MODE_SPI_RCP,        /*!< SPI connection to a 15.4 capable radio co-processor (RCP) */
+     RADIO_MODE_TREL,           /*!< Use the Thread Radio Encapsulation Link (TREL) */
+     RADIO_MODE_MAX,            /*!< Using for parameter check */
+ } esp_openthread_radio_mode_t;
+ 
+ /**
+  * @brief How OpenThread connects to the host.
+  *
+  */
+ typedef enum {
+     HOST_CONNECTION_MODE_NONE = 0x0,     /*!< Disable host connection */
+     HOST_CONNECTION_MODE_CLI_UART,       /*!< CLI UART connection to the host */
+     HOST_CONNECTION_MODE_CLI_USB,        /*!< CLI USB connection to the host */
+     HOST_CONNECTION_MODE_RCP_UART,       /*!< RCP UART connection to the host */
+     HOST_CONNECTION_MODE_RCP_SPI,        /*!< RCP SPI connection to the host */
++    HOST_CONNECTION_MODE_RCP_USB,        /*!< RCP USB Serial JTAG connection to the host */
++    HOST_CONNECTION_MODE_RCP_TRANSPORT,  /*!< RCP custom transport connection to the host */
+-    HOST_CONNECTION_MODE_RCP_USB,       /*!<  RCP USB Serial JTAG connection to the host */
+     HOST_CONNECTION_MODE_MAX,            /*!< Using for parameter check */
+ } esp_openthread_host_connection_mode_t;
+ 
+ /**
+  * @brief The OpenThread radio configuration
+  *
+  */
+ typedef struct {
+     esp_openthread_radio_mode_t radio_mode; /*!< The radio mode */
+     union {
+         esp_openthread_uart_config_t     radio_uart_config; /*!< The uart configuration to RCP */
+         esp_openthread_spi_host_config_t radio_spi_config;  /*!< The spi configuration to RCP */
+     };
+ } esp_openthread_radio_config_t;
+ 
+ /**
+  * @brief The OpenThread host connection configuration
+  *
+  */
+ typedef struct {
+     esp_openthread_host_connection_mode_t host_connection_mode; /*!< The host connection mode */
+     union {
+         esp_openthread_uart_config_t      host_uart_config; /*!< The uart configuration to host */
+         usb_serial_jtag_driver_config_t   host_usb_config;  /*!< The usb configuration to host */
+         esp_openthread_spi_slave_config_t spi_slave_config; /*!< The spi configuration to host */
++        esp_openthread_transport_config_t host_transport_config; /*!< The custom transport configuration */
+     };
+ } esp_openthread_host_connection_config_t;
+ 
+diff --git a/components/openthread/private_include/esp_openthread_common_macro.h b/components/openthread/private_include/esp_openthread_common_macro.h
+--- a/components/openthread/private_include/esp_openthread_common_macro.h
++++ b/components/openthread/private_include/esp_openthread_common_macro.h
+@@ -23,6 +23,7 @@
+ #endif
+ 
+ #define ESP_OPENTHREAD_UART_BUFFER_SIZE CONFIG_OPENTHREAD_UART_BUFFER_SIZE
++#define ESP_OPENTHREAD_TRANSPORT_BUFFER_SIZE CONFIG_OPENTHREAD_TRANSPORT_BUFFER_SIZE
+ 
+ #if CONFIG_OPENTHREAD_DEBUG
+ 
+diff --git a/components/openthread/private_include/openthread-core-esp32x-radio-config.h b/components/openthread/private_include/openthread-core-esp32x-radio-config.h
+--- a/components/openthread/private_include/openthread-core-esp32x-radio-config.h
++++ b/components/openthread/private_include/openthread-core-esp32x-radio-config.h
+@@ -91,7 +91,7 @@
+ #ifdef OPENTHREAD_CONFIG_NCP_HDLC_ENABLE
+ #error `OPENTHREAD_CONFIG_NCP_HDLC_ENABLE` is redefined.
+ #endif
++#define OPENTHREAD_CONFIG_NCP_HDLC_ENABLE (CONFIG_OPENTHREAD_RCP_UART || CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG || CONFIG_OPENTHREAD_RCP_CUSTOM)
+-#define OPENTHREAD_CONFIG_NCP_HDLC_ENABLE (CONFIG_OPENTHREAD_RCP_UART || CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG)
+ 
+ /**
+  * @def OPENTHREAD_LIB_SPINEL_RX_FRAME_BUFFER_SIZE
+diff --git a/components/openthread/src/esp_openthread_platform.cpp b/components/openthread/src/esp_openthread_platform.cpp
+--- a/components/openthread/src/esp_openthread_platform.cpp
++++ b/components/openthread/src/esp_openthread_platform.cpp
+@@ -11,185 +11,199 @@
+ #include "esp_log.h"
+ #include "esp_openthread_alarm.h"
+ #include "esp_openthread_common_macro.h"
++#if CONFIG_OPENTHREAD_RCP_CUSTOM
++#include "esp_openthread_transport_priv.h"
++#endif
+ #include "esp_openthread_lock.h"
+ #include "esp_openthread_radio.h"
+ #include "esp_openthread_spi_slave.h"
+ #include "esp_openthread_task_queue.h"
+ #include "esp_openthread_types.h"
+ #include "esp_openthread_uart.h"
+ #include "esp_partition.h"
+ #include "common/code_utils.hpp"
+ #include "common/logging.hpp"
+ #include "core/instance/instance.hpp"
+ #include "freertos/FreeRTOS.h"
+ #include "freertos/queue.h"
+ #include "openthread/cli.h"
+ #include "openthread/instance.h"
+ #include "openthread/tasklet.h"
+ 
+ static esp_openthread_platform_config_t s_platform_config;
+ static bool s_openthread_platform_initialized = false;
+ static esp_openthread_platform_workflow_t *s_workflow_list = NULL;
+ 
+ esp_err_t esp_openthread_platform_workflow_register(esp_openthread_update_func update_func,
+                                                     esp_openthread_process_func process_func, const char *name)
+ {
+     uint8_t name_len = strnlen(name, WORKFLOW_MAX_NAMELEN - 1);
+     esp_openthread_platform_workflow_t *current_workflow = s_workflow_list;
+     esp_openthread_platform_workflow_t *before_workflow = NULL;
+     esp_openthread_platform_workflow_t *add_workflow =
+         static_cast<esp_openthread_platform_workflow_t *>(calloc(1, sizeof(esp_openthread_platform_workflow_t)));
+     ESP_RETURN_ON_FALSE(add_workflow != NULL, ESP_ERR_NO_MEM, OT_PLAT_LOG_TAG,
+                         "Failed to alloc memory for esp_openthread_workflow");
+     strncpy(add_workflow->name, name, name_len);
+     add_workflow->name[name_len] = '\0';
+     add_workflow->update_func = update_func;
+     add_workflow->process_func = process_func;
+     add_workflow->next = NULL;
+     while (current_workflow) {
+         if (strncmp(current_workflow->name, name, name_len) == 0) {
+             free(add_workflow);
+             add_workflow = NULL; // handle has be added in the list.
+             break;
+         } else {
+             before_workflow = current_workflow;
+             current_workflow = current_workflow->next;
+         }
+     }
+     if (add_workflow) {
+         if (before_workflow) {
+             before_workflow->next = add_workflow; // Add handle to the list end
+         } else {
+             s_workflow_list = add_workflow; // No handle in the list
+         }
+     }
+     return ESP_OK;
+ }
+ 
+ void esp_openthread_platform_workflow_unregister(const char *name)
+ {
+     esp_openthread_platform_workflow_t *current_workflow = s_workflow_list;
+     esp_openthread_platform_workflow_t *before_workflow = NULL;
+     while (current_workflow) {
+         if (strncmp(current_workflow->name, name, strnlen(name, WORKFLOW_MAX_NAMELEN)) == 0) {
+             if (before_workflow) {
+                 before_workflow->next = current_workflow->next;
+             } else {
+                 s_workflow_list = current_workflow->next;
+             }
+             free(current_workflow);
+             break;
+         }
+         before_workflow = current_workflow;
+         current_workflow = current_workflow->next;
+     }
+ }
+ 
+ static inline esp_openthread_host_connection_mode_t get_host_connection_mode(void)
+ {
+     return s_platform_config.host_config.host_connection_mode;
+ }
+ 
+ static esp_err_t esp_openthread_host_interface_init(const esp_openthread_platform_config_t *config)
+ {
+     esp_openthread_host_connection_mode_t host_mode = get_host_connection_mode();
+     switch (host_mode) {
+ #if CONFIG_OPENTHREAD_RCP_SPI
+     case HOST_CONNECTION_MODE_RCP_SPI:
+         ESP_RETURN_ON_ERROR(esp_openthread_host_rcp_spi_init(config), OT_PLAT_LOG_TAG,
+                           "esp_openthread_host_rcp_spi_init failed");
+         break;
+ #endif
+ #if CONFIG_OPENTHREAD_RCP_UART
+     case HOST_CONNECTION_MODE_RCP_UART:
+         ESP_RETURN_ON_ERROR(esp_openthread_host_rcp_uart_init(config), OT_PLAT_LOG_TAG,
+                           "esp_openthread_host_rcp_uart_init failed");
+         break;
+ #endif
+ #if CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG
+     case HOST_CONNECTION_MODE_RCP_USB:
+         ESP_RETURN_ON_ERROR(esp_openthread_host_rcp_usb_init(config), OT_PLAT_LOG_TAG,
+                           "esp_openthread_host_rcp_usb_init failed");
+         break;
+ #endif
++#if CONFIG_OPENTHREAD_RCP_CUSTOM
++    case HOST_CONNECTION_MODE_RCP_TRANSPORT:
++        ESP_RETURN_ON_ERROR(esp_openthread_host_rcp_transport_init(config), OT_PLAT_LOG_TAG,
++                            "esp_openthread_host_rcp_transport_init failed");
++        break;
++#endif
+ #if CONFIG_OPENTHREAD_CONSOLE_TYPE_UART
+     case HOST_CONNECTION_MODE_CLI_UART:
+         ESP_RETURN_ON_ERROR(esp_openthread_host_cli_uart_init(config), OT_PLAT_LOG_TAG,
+                           "esp_openthread_host_cli_uart_init failed");
+         break;
+ #endif
+ #if CONFIG_OPENTHREAD_CONSOLE_TYPE_USB_SERIAL_JTAG
+     case HOST_CONNECTION_MODE_CLI_USB:
+         ESP_RETURN_ON_ERROR(esp_openthread_host_cli_usb_init(config), OT_PLAT_LOG_TAG,
+                           "esp_openthread_host_cli_usb_init failed");
+         break;
+ #endif
+     case HOST_CONNECTION_MODE_NONE:
+         ESP_LOGI(OT_PLAT_LOG_TAG, "Host connection mode none");
+         break;
+     default:
+         return ESP_FAIL;
+     }
+     return ESP_OK;
+ }
+ 
+ esp_err_t esp_openthread_platform_init(const esp_openthread_platform_config_t *config)
+ {
+     ESP_RETURN_ON_FALSE(config->radio_config.radio_mode < RADIO_MODE_MAX,
+                         ESP_ERR_INVALID_ARG, OT_PLAT_LOG_TAG, "Radio mode not supported");
+     ESP_RETURN_ON_FALSE(config->host_config.host_connection_mode < HOST_CONNECTION_MODE_MAX,
+                         ESP_ERR_INVALID_ARG, OT_PLAT_LOG_TAG, "Host connection mode not supported");
+     ESP_RETURN_ON_FALSE(!s_openthread_platform_initialized, ESP_ERR_INVALID_STATE, OT_PLAT_LOG_TAG,
+                         "OpenThread platform already initialized");
+ 
+     s_openthread_platform_initialized = true;
+     esp_err_t ret = ESP_OK;
+ 
+     s_platform_config = *config;
+     ESP_GOTO_ON_ERROR(esp_openthread_lock_init(), exit, OT_PLAT_LOG_TAG, "esp_openthread_lock_init failed");
+     ESP_GOTO_ON_ERROR(esp_openthread_alarm_init(), exit, OT_PLAT_LOG_TAG, "esp_openthread_alarm_init failed");
+ 
+     esp_openthread_set_storage_name(config->port_config.storage_partition_name);
+ 
+     ESP_GOTO_ON_ERROR(esp_openthread_host_interface_init(config), exit, OT_PLAT_LOG_TAG,
+                       "esp_openthread_host_interface_init failed");
+ 
+     ESP_GOTO_ON_ERROR(esp_openthread_task_queue_init(config), exit, OT_PLAT_LOG_TAG,
+                       "esp_openthread_task_queue_init failed");
+     ESP_GOTO_ON_ERROR(esp_openthread_radio_init(config), exit, OT_PLAT_LOG_TAG, "esp_openthread_radio_init failed");
+ 
+ exit:
+     if (ret != ESP_OK) {
+         esp_openthread_platform_deinit();
+     }
+ 
+     return ret;
+ }
+ 
+ otInstance *esp_openthread_get_instance(void)
+ {
+     return (otInstance *)&ot::Instance::Get();
+ }
+ 
+ esp_err_t esp_openthread_platform_deinit(void)
+ {
+     ESP_RETURN_ON_FALSE(s_openthread_platform_initialized, ESP_ERR_INVALID_STATE, OT_PLAT_LOG_TAG,
+                         "OpenThread platform not initialized");
+     s_openthread_platform_initialized = false;
+     esp_openthread_task_queue_deinit();
+     esp_openthread_radio_deinit();
+ 
+     esp_openthread_host_connection_mode_t host_mode = get_host_connection_mode();
+     switch (host_mode) {
+ #if CONFIG_OPENTHREAD_RCP_SPI
+     case HOST_CONNECTION_MODE_RCP_SPI:
+         esp_openthread_spi_slave_deinit();
+         break;
+ #endif
+ #if CONFIG_OPENTHREAD_RCP_UART || CONFIG_OPENTHREAD_CONSOLE_TYPE_UART
+     case HOST_CONNECTION_MODE_RCP_UART:
+     case HOST_CONNECTION_MODE_CLI_UART:
+         esp_openthread_uart_deinit();
+         break;
+ #endif
++#if CONFIG_OPENTHREAD_RCP_CUSTOM
++    case HOST_CONNECTION_MODE_RCP_TRANSPORT:
++        esp_openthread_host_rcp_transport_deinit();
++        break;
++#endif
+     default:
+diff --git a/components/openthread/src/ncp/esp_openthread_ncp.cpp b/components/openthread/src/ncp/esp_openthread_ncp.cpp
+--- a/components/openthread/src/ncp/esp_openthread_ncp.cpp
++++ b/components/openthread/src/ncp/esp_openthread_ncp.cpp
+@@ -14,87 +14,87 @@
+ #include "esp_coex_i154.h"
+ #endif
+ 
++#if (CONFIG_OPENTHREAD_RCP_UART || CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG || CONFIG_OPENTHREAD_RCP_CUSTOM)
+-#if (CONFIG_OPENTHREAD_RCP_UART || CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG)
+ #include "utils/uart.h"
+ #endif
+ 
+ #if CONFIG_OPENTHREAD_RCP_SPINEL_CONSOLE
+ #include "esp_console.h"
+ #include "freertos/FreeRTOS.h"
+ #include "freertos/queue.h"
+ #include "esp_openthread_common_macro.h"
+ 
+ static constexpr size_t s_console_command_max_length = 256;
+ static constexpr size_t s_console_command_queue_length = 8;
+ static QueueHandle_t s_console_command_queue = nullptr;
+ 
+ #define NO_LOG_TAG "" // don't use a tag to reduce log lengths from RCP
+ 
+ struct ConsoleCmdMsg
+ {
+     char cmd[s_console_command_max_length];
+ };
+ #endif // CONFIG_OPENTHREAD_RCP_SPINEL_CONSOLE
+ 
++#if (CONFIG_OPENTHREAD_RCP_UART || CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG || CONFIG_OPENTHREAD_RCP_CUSTOM)
+-#if (CONFIG_OPENTHREAD_RCP_UART || CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG)
+ extern "C" {
+     static int NcpSend(const uint8_t *aBuf, uint16_t aBufLength)
+     {
+         IgnoreError(otPlatUartSend(aBuf, aBufLength));
+         return aBufLength;
+     }
+ }
+ #endif
+ 
+ #if CONFIG_OPENTHREAD_RCP_SPINEL_CONSOLE
+ static void console_command_worker_task(void *arg)
+ {
+     ConsoleCmdMsg msg;
+ 
+     for (;;) {
+         if (xQueueReceive(s_console_command_queue, &msg, portMAX_DELAY) != pdTRUE) {
+             continue;
+         }
+ 
+         int ret = 0;
+         esp_err_t err = esp_console_run(msg.cmd, &ret);
+ 
+         if (err == ESP_ERR_NOT_FOUND){
+             ESP_LOGI(NO_LOG_TAG, "Unrecognized command: %s", msg.cmd);
+         } else if (err == ESP_ERR_INVALID_ARG) {
+             ESP_LOGI(NO_LOG_TAG, "Command is empty");
+         } else if (err == ESP_OK && ret != ESP_OK) {
+             ESP_LOGI(NO_LOG_TAG, "Command returned non-zero error code: 0x%x (%s)", ret, esp_err_to_name(ret));
+         } else if (err != ESP_OK) {
+             ESP_LOGI(NO_LOG_TAG, "Internal error running '%s': %s", msg.cmd, esp_err_to_name(err));
+         }
+     }
+ }
+ 
+ static esp_err_t init_console_command_worker()
+ {
+     if (s_console_command_queue) {
+         return ESP_OK;
+     }
+ 
+     s_console_command_queue = xQueueCreate(s_console_command_queue_length, sizeof(ConsoleCmdMsg));
+     ESP_RETURN_ON_FALSE(s_console_command_queue, ESP_ERR_NO_MEM, OT_PLAT_LOG_TAG, "Failed to create s_console_command_queue");
+ 
+     BaseType_t ret = xTaskCreatePinnedToCore(console_command_worker_task, "ot_console", 3072, nullptr, 3, nullptr, tskNO_AFFINITY);
+ 
+     if (ret != pdPASS) {
+         vQueueDelete(s_console_command_queue);
+         s_console_command_queue = nullptr;
+         return ESP_FAIL;
+     }
+ 
+     return ESP_OK;
+ }
+ #endif // CONFIG_OPENTHREAD_RCP_SPINEL_CONSOLE
+ 
+ extern "C" void otAppNcpInit(otInstance *aInstance)
+ {
++#if (CONFIG_OPENTHREAD_RCP_UART || CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG || CONFIG_OPENTHREAD_RCP_CUSTOM)
+-#if (CONFIG_OPENTHREAD_RCP_UART || CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG)
+     IgnoreError(otPlatUartEnable());
+     otNcpHdlcInit(aInstance, NcpSend);
+ #else
+diff --git a/components/openthread/srcs_radio.cmake b/components/openthread/srcs_radio.cmake
+--- a/components/openthread/srcs_radio.cmake
++++ b/components/openthread/srcs_radio.cmake
+@@ -91,6 +91,13 @@
+     if(CONFIG_OPENTHREAD_NCP_VENDOR_HOOK)
+         list(APPEND rcp_srcs src/ncp/esp_openthread_ncp_spi.cpp)
+     endif()
++elseif(CONFIG_OPENTHREAD_RCP_CUSTOM)
++    list(APPEND rcp_srcs
++        openthread/src/ncp/ncp_hdlc.cpp
++        src/port/esp_openthread_transport_rcp.c)
++    if(CONFIG_OPENTHREAD_NCP_VENDOR_HOOK)
++        list(APPEND rcp_srcs src/ncp/esp_openthread_ncp_hdlc.cpp)
++    endif()
+ endif()
+ 
+ if(CONFIG_OPENTHREAD_NCP_VENDOR_HOOK AND CONFIG_OPENTHREAD_RCP_SPINEL_CONSOLE)
+diff --git a/components/openthread/include/esp_openthread_transport.h b/components/openthread/include/esp_openthread_transport.h
+new file mode 100644
+--- /dev/null
++++ b/components/openthread/include/esp_openthread_transport.h
+@@ -0,0 +1,22 @@
++/*
++ * SPDX-FileCopyrightText: 2026 Espressif Systems (Shanghai) CO LTD
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#pragma once
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief Wake the OpenThread RCP main loop when custom transport RX data is ready.
++ *
++ * Call after transport_rx data has been queued so select() wakes promptly.
++ */
++void esp_openthread_transport_notify_rcp_rx(void);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/components/openthread/private_include/esp_openthread_transport_priv.h b/components/openthread/private_include/esp_openthread_transport_priv.h
+new file mode 100644
+--- /dev/null
++++ b/components/openthread/private_include/esp_openthread_transport_priv.h
+@@ -0,0 +1,22 @@
++/*
++ * SPDX-FileCopyrightText: 2026 Espressif Systems (Shanghai) CO LTD
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#pragma once
++
++#include "esp_err.h"
++#include "esp_openthread_types.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++esp_err_t esp_openthread_host_rcp_transport_init(
++    const esp_openthread_platform_config_t *config);
++void esp_openthread_host_rcp_transport_deinit(void);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/components/openthread/src/port/esp_openthread_transport_rcp.c b/components/openthread/src/port/esp_openthread_transport_rcp.c
+new file mode 100644
+--- /dev/null
++++ b/components/openthread/src/port/esp_openthread_transport_rcp.c
+@@ -0,0 +1,147 @@
++/*
++ * SPDX-FileCopyrightText: 2026 Espressif Systems (Shanghai) CO LTD
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include "sdkconfig.h"
++
++#if CONFIG_OPENTHREAD_RCP_CUSTOM
++
++#include "esp_openthread_transport_priv.h"
++
++#include <stdint.h>
++#include <string.h>
++#include <unistd.h>
++
++#include "esp_check.h"
++#include "esp_openthread_common_macro.h"
++#include "esp_openthread_platform.h"
++#include "esp_openthread_types.h"
++#include "esp_vfs_eventfd.h"
++#include "openthread/instance.h"
++#include "utils/uart.h"
++
++static esp_openthread_transport_config_t s_transport_config;
++static int s_notify_eventfd = -1;
++static const char s_transport_rcp_workflow[] = "transport_rcp";
++static uint8_t s_rx_chunk[ESP_OPENTHREAD_TRANSPORT_BUFFER_SIZE];
++
++static esp_err_t transport_rcp_notify_eventfd_init(void)
++{
++    ESP_RETURN_ON_FALSE(s_notify_eventfd < 0, ESP_ERR_INVALID_STATE,
++                        OT_PLAT_LOG_TAG, "custom transport RCP eventfd already initialized");
++    s_notify_eventfd = eventfd(0, EFD_SUPPORT_ISR);
++    ESP_RETURN_ON_FALSE(s_notify_eventfd >= 0, ESP_FAIL,
++                        OT_PLAT_LOG_TAG, "custom transport RCP eventfd create failed");
++    return ESP_OK;
++}
++
++static void transport_rcp_notify_eventfd_deinit(void)
++{
++    if (s_notify_eventfd >= 0) {
++        close(s_notify_eventfd);
++        s_notify_eventfd = -1;
++    }
++}
++
++void esp_openthread_transport_notify_rcp_rx(void)
++{
++    if (s_notify_eventfd >= 0) {
++        uint64_t one = 1;
++        ssize_t w = write(s_notify_eventfd, &one, sizeof(one));
++        (void)w;
++    }
++}
++
++static void esp_openthread_transport_rcp_update(esp_openthread_mainloop_context_t *mainloop)
++{
++    if (s_notify_eventfd >= 0) {
++        FD_SET(s_notify_eventfd, &mainloop->read_fds);
++        if (s_notify_eventfd > mainloop->max_fd) {
++            mainloop->max_fd = s_notify_eventfd;
++        }
++    }
++}
++
++static esp_err_t esp_openthread_transport_rcp_process(
++    otInstance *instance, const esp_openthread_mainloop_context_t *mainloop)
++{
++    (void)instance;
++
++    if (s_notify_eventfd >= 0 && FD_ISSET(s_notify_eventfd, &mainloop->read_fds)) {
++        uint64_t v;
++        ssize_t r = read(s_notify_eventfd, &v, sizeof(v));
++        (void)r;
++    }
++
++    for (unsigned int budget = 0; budget < 4; ++budget) {
++        size_t n = 0;
++        esp_err_t err = s_transport_config.transport_rx(
++            s_rx_chunk, sizeof(s_rx_chunk), &n);
++        if (err != ESP_OK || n == 0) {
++            break;
++        }
++        if (n > sizeof(s_rx_chunk)) {
++            ESP_LOGE(OT_PLAT_LOG_TAG, "invalid custom transport RX length");
++            return ESP_FAIL;
++        }
++        otPlatUartReceived(s_rx_chunk, (uint16_t)n);
++        if (budget == 3)
++            esp_openthread_transport_notify_rcp_rx();
++    }
++    return ESP_OK;
++}
++
++esp_err_t esp_openthread_host_rcp_transport_init(
++    const esp_openthread_platform_config_t *config)
++{
++    ESP_RETURN_ON_FALSE(config != NULL, ESP_ERR_INVALID_ARG,
++                        OT_PLAT_LOG_TAG, "config is NULL");
++    ESP_RETURN_ON_FALSE(
++        config->host_config.host_connection_mode == HOST_CONNECTION_MODE_RCP_TRANSPORT,
++        ESP_ERR_INVALID_ARG, OT_PLAT_LOG_TAG,
++        "host connection mode must be RCP transport");
++    ESP_RETURN_ON_FALSE(config->host_config.host_transport_config.transport_tx != NULL,
++                        ESP_ERR_INVALID_ARG, OT_PLAT_LOG_TAG, "transport_tx is NULL");
++    ESP_RETURN_ON_FALSE(config->host_config.host_transport_config.transport_rx != NULL,
++                        ESP_ERR_INVALID_ARG, OT_PLAT_LOG_TAG, "transport_rx is NULL");
++
++    memcpy(&s_transport_config, &config->host_config.host_transport_config,
++           sizeof(s_transport_config));
++    ESP_RETURN_ON_ERROR(transport_rcp_notify_eventfd_init(),
++                        OT_PLAT_LOG_TAG, "custom transport RCP notify init failed");
++
++    esp_err_t err = esp_openthread_platform_workflow_register(
++        &esp_openthread_transport_rcp_update,
++        &esp_openthread_transport_rcp_process,
++        s_transport_rcp_workflow);
++    if (err != ESP_OK) {
++        memset(&s_transport_config, 0, sizeof(s_transport_config));
++        transport_rcp_notify_eventfd_deinit();
++    }
++    return err;
++}
++
++void esp_openthread_host_rcp_transport_deinit(void)
++{
++    esp_openthread_platform_workflow_unregister(s_transport_rcp_workflow);
++    memset(&s_transport_config, 0, sizeof(s_transport_config));
++    transport_rcp_notify_eventfd_deinit();
++}
++
++otError otPlatUartEnable(void) { return OT_ERROR_NONE; }
++otError otPlatUartDisable(void) { return OT_ERROR_NONE; }
++otError otPlatUartFlush(void) { return OT_ERROR_NONE; }
++
++otError otPlatUartSend(const uint8_t *buf, uint16_t buf_length)
++{
++    if (!s_transport_config.transport_tx) {
++        return OT_ERROR_FAILED;
++    }
++    esp_err_t err = s_transport_config.transport_tx(buf, buf_length);
++    if (err != ESP_OK) {
++        return OT_ERROR_FAILED;
++    }
++    /*
++     * transport_tx() returning ESP_OK means the complete buffer was
++     * synchronously consumed, so SendDone is valid only on that path.
++     */
++    otPlatUartSendDone();
++    return OT_ERROR_NONE;
++}
++
++#endif /* CONFIG_OPENTHREAD_RCP_CUSTOM */

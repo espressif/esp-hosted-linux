@@ -98,8 +98,10 @@ struct esp_sdio_context {
 	/* TX kthread wakeup: enqueuing a skb wakes tx_process instead of
 	 * relying on its 10-20ms usleep poll. Driven by wake_up()/wait_event. */
 	wait_queue_head_t      tx_waitq;
-	atomic_t               tx_aggr_has_hci;
-	wait_queue_head_t      tx_aggr_waitq;
+	/* Bitmask of stateful interface types currently owned by the TX aggregate.
+	 * Per-interface bits let HCI and RCP flush independently. */
+	atomic_t               tx_aggr_stateful_mask;
+	wait_queue_head_t      tx_aggr_stateful_waitq;
 	/* DMA-safe SDIO buffers allocated once at probe (not per IRQ/packet):
 	 * reg_buf = ISR INT_ST / INT_CLR (1 word);
 	 * rx_len_buf = PACKET_LEN only (1 word);

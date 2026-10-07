@@ -1,4 +1,4 @@
 [codespell]
-skip = build,*.drawio,*.svg,*.pdf
+skip = build,*.drawio,*.svg,*.pdf,*.patch
 ignore-words-list = DEACTIVE, sme
 write-changes = true

@@ -122,6 +122,10 @@ struct esp_adapter {
 	uint8_t                 if_type;
 	atomic_t                state;
 	uint32_t                capabilities;
+	uint32_t                ext_capabilities;
+	u64                     rcp_session_nonce;
+	u8                      radio_service_active;
+	u8                      radio_service_flags;
 
 	/* Possible types:
 	 * struct esp_sdio_context */
@@ -153,6 +157,7 @@ struct esp_adapter {
 	spinlock_t              cmd_lock;
 
 	struct work_struct      mac_flter_work;
+	struct work_struct      radio_service_work;
 
 	struct workqueue_struct *cmd_wq;
 	struct work_struct      cmd_work;
