@@ -455,6 +455,27 @@ static bool get_next_tx_buffer(interface_buffer_handle_t *buf_handle)
     return false;
 }
 
+/*
+ * Linux clocks a full fixed-size SPI transaction to receive an advertised
+ * E2H frame even when it has no H2E payload to send. In that case the host TX
+ * buffer is deliberately all zeroes. This is transport idle, not a truncated
+ * RCP frame. Accept only the exact all-zero transaction so any nonzero
+ * malformed bytes remain fail-closed once an RCP session is active.
+ */
+static bool spi_is_host_idle_transaction(const uint8_t *buf)
+{
+    size_t i;
+
+    if (!buf)
+        return false;
+
+    for (i = 0; i < RX_BUF_SIZE; i++) {
+        if (buf[i] != 0)
+            return false;
+    }
+    return true;
+}
+
 static void spi_fail_rcp_rx(const struct esp_payload_header *header,
                             const char *reason)
 {
@@ -496,6 +517,8 @@ static int process_spi_rx(interface_buffer_handle_t *buf_handle)
     offset = le16toh(header->offset);
 
     if (len == 0) {
+        if (spi_is_host_idle_transaction((const uint8_t *)buf_handle->payload))
+            return -1;
         spi_fail_rcp_rx(header, "zero SPI H2E payload");
         return -1;
     }
@@ -858,6 +881,7 @@ static int32_t esp_spi_write(interface_handle_t *handle, interface_buffer_handle
     esp_err_t ret = ESP_OK;
     int32_t total_len = 0;
     uint16_t offset = 0;
+    uint16_t wire_offset = 0;
     struct esp_payload_header *header = NULL;
     interface_buffer_handle_t tx_buf_handle = {0};
 
@@ -904,7 +928,11 @@ static int32_t esp_spi_write(interface_handle_t *handle, interface_buffer_handle
         }
 
         offset = ESP_HOSTED_RCP_TX_HEADROOM;
-        align_padding = offset - sizeof(struct esp_payload_header);
+        /*
+         * RCP payloads already reserve the complete Hosted headroom. Do not
+         * add that headroom/header delta again as transport alignment padding.
+         */
+        align_padding = 0;
         tx_buf_handle.payload = buf_handle->payload - offset;
         if (!IS_SPI_DMA_ALIGNED(tx_buf_handle.payload)) {
             ESP_LOGE(TAG, "RCP TX pool buffer is not word-aligned");
@@ -942,17 +970,18 @@ static int32_t esp_spi_write(interface_handle_t *handle, interface_buffer_handle
         tx_buf_handle.free_buf_handle = heap_caps_free;
     }
 
-    total_len = buf_handle->payload_len + offset + align_padding;
+    wire_offset = offset + align_padding;
+    total_len = buf_handle->payload_len + wire_offset;
     tx_buf_handle.payload_len = total_len;
     header = (struct esp_payload_header *) tx_buf_handle.payload;
 
-    memset(header, 0, sizeof(struct esp_payload_header) + align_padding);
+    memset(header, 0, wire_offset);
 
     /* Initialize header */
     header->if_type = buf_handle->if_type;
     header->if_num = buf_handle->if_num;
     header->len = htole16(buf_handle->payload_len);
-    header->offset = htole16(sizeof(struct esp_payload_header) + align_padding);
+    header->offset = htole16(wire_offset);
     header->flags = buf_handle->flag;
     header->packet_type = buf_handle->pkt_type;
     if (header->if_type == ESP_TEST_IF) {

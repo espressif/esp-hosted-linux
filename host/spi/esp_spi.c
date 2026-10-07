@@ -715,7 +715,53 @@ static void esp_spi_fail_rcp_rx(const char *reason)
 	esp_request_firmware_restart(adapter);
 }
 
-static int process_rx_buf(struct sk_buff *skb)
+static bool spi_is_dummy_rx(const struct esp_payload_header *header)
+{
+	/*
+	 * Firmware deliberately arms this canonical frame when no E2H payload is
+	 * ready. data-ready may subsequently rise for a newly queued payload while
+	 * the already-armed dummy is still the transaction the host will clock.
+	 * Treat only the exact firmware sentinel as no-data; any other malformed
+	 * frame remains fail-closed while RCP is active.
+	 */
+	return header &&
+		header->if_type == 0xF &&
+		header->if_num == 0xF &&
+		header->flags == 0 &&
+		header->packet_type == 0 &&
+		header->reserved1 == 0 &&
+		esp_wire_le16_to_cpu(header->len) == 0 &&
+		esp_wire_le16_to_cpu(header->offset) == 0 &&
+		esp_wire_le16_to_cpu(header->checksum) == 0 &&
+		header->reserved2 == 0 &&
+		header->reserved3 == 0;
+}
+
+static bool spi_is_unadvertised_idle_rx(const struct sk_buff *skb,
+		bool rx_pending)
+{
+	u32 i;
+
+	/*
+	 * A host-only H2E transfer can race the slave arming its next dummy
+	 * transaction. When data-ready was not asserted, an entirely zero MISO
+	 * transaction carries no advertised E2H ownership and is transport idle.
+	 * Keep this exception narrower than the canonical dummy rule: once
+	 * data-ready advertised RX, any non-canonical zero/malformed frame remains
+	 * stateful-fatal.
+	 */
+	if (rx_pending || !skb || skb->len != SPI_BUF_SIZE)
+		return false;
+
+	for (i = 0; i < skb->len; i++) {
+		if (skb->data[i] != 0)
+			return false;
+	}
+
+	return true;
+}
+
+static int process_rx_buf(struct sk_buff *skb, bool rx_pending)
 {
 	struct esp_payload_header *header;
 	u16 len = 0;
@@ -724,6 +770,9 @@ static int process_rx_buf(struct sk_buff *skb)
 	if (!skb)
 		return -EINVAL;
 	header = (struct esp_payload_header *)skb->data;
+	if (spi_is_dummy_rx(header) ||
+	    spi_is_unadvertised_idle_rx(skb, rx_pending))
+		return -ENODATA;
 	if (header->if_type >= ESP_MAX_IF) {
 		esp_spi_fail_rcp_rx("invalid interface type");
 		return -EINVAL;
@@ -732,6 +781,11 @@ static int process_rx_buf(struct sk_buff *skb)
 	offset = esp_wire_le16_to_cpu(header->offset);
 	len = esp_wire_le16_to_cpu(header->len);
 	if (len == 0) {
+		esp_err("Drop zero SPI RX payload: if=%u if_num=%u type=%u flags=0x%02x "
+			"offset=%u checksum=0x%04x rx_pending=%u\n",
+			header->if_type, header->if_num, header->packet_type,
+			header->flags, offset,
+			esp_wire_le16_to_cpu(header->checksum), rx_pending);
 		esp_spi_fail_rcp_rx("zero payload");
 		return -EINVAL;
 	}
@@ -934,7 +988,7 @@ static void esp_spi_work(struct work_struct *work)
 		if (raw_tx)
 			esp_raw_tp_tx_complete(raw_run_id, 1);
 #endif
-		if (process_rx_buf(rx_skb))
+		if (process_rx_buf(rx_skb, rx_pending))
 			dev_kfree_skb(rx_skb);
 		dev_kfree_skb(tx_skb);
 		esp_spi_requeue_if_pending();

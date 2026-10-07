@@ -723,6 +723,7 @@ static int32_t sdio_write(interface_handle_t *handle, interface_buffer_handle_t 
     int32_t total_len = 0;
     uint8_t* sendbuf = NULL;
     uint16_t offset = 0;
+    uint16_t wire_offset = 0;
     struct esp_payload_header *header = NULL;
     bool free_sendbuf = false;
 
@@ -760,7 +761,11 @@ static int32_t sdio_write(interface_handle_t *handle, interface_buffer_handle_t 
         }
 
         offset = ESP_HOSTED_RCP_TX_HEADROOM;
-        align_padding = offset - sizeof(struct esp_payload_header);
+        /*
+         * RCP payloads already reserve the complete Hosted headroom. Do not
+         * add that headroom/header delta again as transport alignment padding.
+         */
+        align_padding = 0;
         sendbuf = s_small_tx_dma_buf;
         memcpy(sendbuf + offset, buf_handle->payload, buf_handle->payload_len);
     } else if (IS_WIFI_DATA_PACKET(buf_handle)) {
@@ -822,16 +827,17 @@ static int32_t sdio_write(interface_handle_t *handle, interface_buffer_handle_t 
         buf_handle->free_buf_handle = heap_caps_free;
     }
 
-    total_len = buf_handle->payload_len + offset + align_padding;
+    wire_offset = offset + align_padding;
+    total_len = buf_handle->payload_len + wire_offset;
     header = (struct esp_payload_header *)sendbuf;
-    memset(header, 0, sizeof(struct esp_payload_header) + align_padding);
+    memset(header, 0, wire_offset);
 
     /* Initialize header */
     header->if_type = buf_handle->if_type;
     header->if_num = buf_handle->if_num;
     header->len = htole16(buf_handle->payload_len);
     header->reserved2 = buf_handle->flag;
-    header->offset = htole16(sizeof(struct esp_payload_header) + align_padding);
+    header->offset = htole16(wire_offset);
     header->packet_type = buf_handle->pkt_type;
     if (header->if_type == ESP_TEST_IF) {
         debug_raw_tp_set_seq(header, buf_handle->raw_tp_seq);

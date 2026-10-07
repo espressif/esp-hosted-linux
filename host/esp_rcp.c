@@ -308,6 +308,27 @@ static int esp_rcp_release(struct inode *inode, struct file *file)
 	if (session_current && adapter && adapter->if_ops &&
 	    adapter->if_ops->flush_rcp_traffic)
 		adapter->if_ops->flush_rcp_traffic(adapter);
+
+	/*
+	 * ESP-IDF v6.1 has no safe hot-reset/fence for a running native-radio NCP.
+	 * A transport flush can order Host->ESP ownership, but it cannot prove that
+	 * OpenThread has finished every asynchronous effect of bytes already
+	 * consumed from the custom transport. Reincarnate the complete firmware
+	 * after a live userspace RCP session closes so the next open necessarily
+	 * binds to a fresh boot nonce and a fresh OpenThread backend.
+	 *
+	 * This also defines the SPI/SDIO/USB close linearization point: queued and
+	 * worker-owned stateful traffic is flushed/waited first, then the old
+	 * firmware incarnation is destroyed. A subsequent open is rejected while
+	 * recovery is pending by esp_rcp_session_ready().
+	 */
+	if (session_current && adapter &&
+	    !test_bit(ESP_DRIVER_UNLOADING, &adapter->state_flags) &&
+	    !test_bit(ESP_TRANSPORT_REMOVING, &adapter->state_flags)) {
+		esp_info("RCP userspace session closed; reincarnating firmware to fence backend state\n");
+		esp_schedule_fw_reset_recovery(adapter);
+		esp_request_firmware_restart(adapter);
+	}
 	mutex_unlock(&rcp_lifecycle_lock);
 
 	if (session_current) {
