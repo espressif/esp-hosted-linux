@@ -2732,7 +2732,7 @@ int process_sta_set_authorized(uint8_t if_type, uint8_t *payload,
     }
 
     if (cmd->authorized) {
-        auth_done_failed = esp_wifi_auth_done_internal();
+        auth_done_failed = !esp_wifi_auth_done_internal();
         ESP_LOGD(TAG, "STA_PORT_AUTH_DONE seq=%u ipc_failed=%u",
                  active_cmd_seq, auth_done_failed);
         if (auth_done_failed) {
