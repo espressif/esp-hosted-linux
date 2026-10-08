@@ -1,38 +1,42 @@
-# Espressif Wireless Framework
+# ESP-Hosted-Linux firmware
 
-## Introduction
+This directory contains the ESP-IDF setup helpers used to build the ESP firmware in `network_adapter/`.
 
-This project is used to build firmware for ESP-HOSTED-Linux solution
+The canonical build instructions are in [Build, flash, and load](../../docs/getting-started/build-and-flash.md). Use [Supported hardware](../../docs/reference/supported-hardware.md) and [Hardware setup](../../docs/getting-started/hardware-setup.md) before selecting a target and transport.
 
-## Building on Linux using Command Prompt
+## Linux and macOS
 
-1. run `./setup.sh` to setup environment, it will setup esp-idf which is to be used by `network_adapter`
+From `esp/esp_driver/`:
 
-2. setup compiling environment by `. ./export.sh` in esp-idf directory
+```sh
+./setup.sh
+. ./esp-idf/export.sh
+cd network_adapter
+idf.py set-target ESP_TARGET
+idf.py menuconfig
+idf.py build
+```
 
-3. In the `network_adapter` directory of this project, input command `idf.py set-target <chip_name>` to set target.
+Use `idf.py --preview set-target esp32s31` for ESP32-S31 with the pinned ESP-IDF revision.
 
-4. Use `idf.py build` to recompile `network_adapter` and generate new firmware.
+Flash and monitor with the serial port connected to the ESP board:
 
-## Building on Windows 11 using Command Prompt
+```sh
+idf.py -p SERIAL_PORT flash monitor
+```
 
-1. Install and setup ESP-IDF on Windows as documented in the [Standard Setup of Toolchain for
-Windows](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/windows-setup.html).
+## Windows
 
-2. Use the ESP-IDF [Powershell Command
-Prompt](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/windows-setup.html#using-the-command-prompt) to execute `setup.ps1`. It will setup `esp-idf` as a submodule to be used by `network_adapter`.
-:warning: **This command is dangerous. It will revert all your local changes. Stash if need to keep them**.
+From PowerShell:
 
-3. Setup compiling environment by running `export.ps1` in `esp-idf`
-directory
+```powershell
+.\setup.ps1
+.\esp-idf\export.ps1
+cd network_adapter
+idf.py set-target ESP_TARGET
+idf.py menuconfig
+idf.py build
+idf.py -p SERIAL_PORT flash monitor
+```
 
-4. In the `network_adapter` directory of this project, input command
-`idf.py set-target <chip_name>` to set target.
-
-5. Use `idf.py build` to recompile `network_adapter` and generate new
-firmware.
-
-6. Use `idf.py flash` to flash the firmware.
-
-7. Use `idf.py monitor` to monitor the serial out. You can combine
-these two steps (flash and monitor) by running `idf.py flash monitor`.
+`setup.ps1` and `setup.sh` prepare the ESP-IDF revision used by this repository. See the canonical build guide before using force/update options on an existing checkout.

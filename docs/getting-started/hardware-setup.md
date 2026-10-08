@@ -1,14 +1,14 @@
 # Hardware setup
 
-ESP-Hosted-Linux connects an ESP device to a Linux host over SDIO, SPI, or USB. SDIO and SPI need a shared ground and a host-controlled ESP reset/enable signal. SPI additionally requires **Handshake** and **Data Ready** GPIOs from ESP to the host. USB uses native USB endpoints with in-band vendor control requests.
+ESP-Hosted-Linux connects an ESP device to a Linux host over SDIO, SPI, or USB. SPI uses a host-controlled ESP reset/enable signal plus **Handshake** and **Data Ready** GPIOs. SDIO uses the MMC/SDIO bus and may need platform reset/power sequencing before enumeration. USB needs no sideband GPIOs.
 
-All interface signals are 3.3 V logic. Do not connect them to 5 V logic without level shifting. Map the signals below to the Linux host's bus controller, pinctrl, and GPIO resources.
+SDIO, SPI, and UART GPIO signals use 3.3 V logic; do not connect them to 5 V GPIO logic without level shifting. USB D+/D- are USB differential signals and must be routed as USB, not as 3.3 V GPIOs.
 
 Pick a target and transport from [Supported hardware](../reference/supported-hardware.md), then use the matching section below.
 
 ## SDIO
 
-ESP-Hosted SDIO uses CLK, CMD, DAT0-DAT3, reset, and ground. **CMD and DAT0-DAT3 require pull-ups.** ESP-IDF calls for pull-ups on these lines, including unused data lines. See [ESP-IDF SD Pull-up Requirements](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/peripherals/sd_pullup_requirements.html) for resistor guidance and board/module compatibility.
+ESP-Hosted SDIO uses CLK, CMD, DAT0-DAT3, and ground. A board can also expose ESP reset/enable to the host for MMC power sequencing before enumeration. **CMD and DAT0-DAT3 require pull-ups.** ESP-IDF calls for pull-ups on these lines, including unused data lines. See [ESP-IDF SD Pull-up Requirements](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/peripherals/sd_pullup_requirements.html) for resistor guidance and board/module compatibility.
 
 <details markdown="1">
 <summary><strong>SDIO wiring diagram and electrical notes</strong></summary>
@@ -21,7 +21,7 @@ The diagram shows external 10 kΩ pull-ups. Do not add duplicate resistors when 
 
 For bring-up, keep wiring short, provide a solid ground path, fit the required pull-ups, and lower the SDIO clock if transfers are unstable. Use a PCB or purpose-built interconnect for repeatable high-speed results.
 
-On the Linux host, configure the MMC/SDIO controller, pinctrl, reset GPIO, and interrupt handling required by the platform.
+On the Linux host, configure the MMC/SDIO controller and pinctrl. Add an MMC power-sequence/reset GPIO only when the board needs it for initial enumeration; ESP-Hosted recovery is in-band after the SDIO function is present.
 
 </details>
 
@@ -80,8 +80,18 @@ These are the project defaults. Keep the active ESP firmware configuration and L
 
 ESP32-S31 provides a native USB 2.0 High-Speed bulk transport. Connect the ESP32-S31 USB port to a USB port on the Linux host using a standard USB cable.
 
-- No external pull-ups or sideband GPIO lines (such as Handshake, Data Ready, or reset) are needed.
-- Firmware recovery, data path enable/disable, and reset requests are handled directly over USB vendor control transfers.
+<details markdown="1">
+<summary><strong>USB connection diagram and notes</strong></summary>
+
+<p align="center">
+  <img src="../assets/usb-connection.svg" width="900" alt="ESP-Hosted USB connection architecture">
+</p>
+
+- No external D+/D- pull-ups or sideband GPIO lines (Handshake, Data Ready, or reset) are required by ESP-Hosted.
+- VBUS is part of the normal USB connection; whether it powers the development board depends on the board design.
+- Ready replay and firmware restart requests are sent through USB vendor control transfers.
+
+</details>
 
 ## Bluetooth HCI over UART
 
@@ -94,25 +104,32 @@ Bluetooth HCI can optionally use UART while Wi-Fi continues over SDIO, SPI, or U
 |---|---|---|---|---|---|
 | ESP32 | IO5 | IO18 | IO19 | IO23 | 4-wire or 2-wire |
 | ESP32-S3 | IO17 | IO18 | IO19 | IO20 | 4-wire or 2-wire |
+| ESP32-S31 | IO13 | IO12 | — | — | 2-wire |
 | ESP32-C3 | IO5 | IO18 | IO19 | IO8 | 4-wire or 2-wire |
 | ESP32-C2 | IO5 | IO18 | — | — | 2-wire |
 | ESP32-C5 | IO23 | IO24 | — | — | 2-wire |
 | ESP32-C6 | IO5 | IO12 | — | — | 2-wire |
 | ESP32-C61 | IO13 | IO12 | — | — | 2-wire |
 
-For ESP32, ESP32-S3, or ESP32-C3, a two-wire TX/RX setup is possible when hardware flow control is disabled in firmware. C2/C5/C6/C61 project defaults use two-wire UART with flow control disabled.
+For ESP32, ESP32-S3, or ESP32-C3, a two-wire TX/RX setup is possible when hardware flow control is disabled in firmware. S31/C2/C5/C6/C61 project defaults use two-wire UART with flow control disabled.
 
 </details>
 
 On the Linux host, map TX/RX and, when used, RTS/CTS to an available UART. Remove any serial console or other service that owns the selected UART before attaching it to the Linux Bluetooth stack. [Bluetooth](../guides/bluetooth.md) covers HCI attachment.
 
+## OpenThread RCP over UART on ESP32-S31
+
+ESP32-S31 can place the Thread RCP on a dedicated UART instead of the hosted SPI/USB path. The project default for this optional mode is UART2 at 460800 baud with hardware flow control disabled. TX and RX GPIOs are selected with `CONFIG_ESP_THREAD_RCP_UART_TX_PIN` and `CONFIG_ESP_THREAD_RCP_UART_RX_PIN`; there is no fixed board-independent pin pair.
+
+Use a different UART for Bluetooth HCI when both UART radio interfaces are enabled. See [IEEE 802.15.4 / Thread RCP](../guides/thread-rcp.md#dedicated-rcp-uart-on-esp32-s31).
+
 ## Power and reset
 
-These points apply to every transport and Linux host:
+Use a stable supply and power the ESP board through a supported board power input.
 
-- use a stable power supply suitable for the host and ESP hardware
-- power ESP development boards through a supported board power input
-- connect the required host-controlled reset/enable GPIO so Linux can reset ESP during initialization or recovery
-- connect host and ESP grounds
+- **SPI:** connect the host-controlled reset/enable GPIO required by the SPI Device Tree integration.
+- **SDIO:** connect reset/enable only when the platform uses it for MMC power sequencing or initial enumeration; normal post-enumeration recovery is in-band.
+- **USB:** no ESP reset GPIO is required by the hosted USB transport.
+- **All wired transports:** provide the required common ground through the board/interconnect.
 
 Continue with [Build, flash, and load](build-and-flash.md). Platform integration details are in [Porting](../porting.md).

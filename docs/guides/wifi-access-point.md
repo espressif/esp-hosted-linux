@@ -1,12 +1,14 @@
 # Wi-Fi access point
 
-AP mode uses Linux `hostapd`. Build the host driver with AP support first.
+AP mode uses Linux `hostapd`. Wi-Fi is independent of the `radio_service` setting used for hosted Bluetooth and Thread.
+
+Build the host driver with AP support first.
 
 On Raspberry Pi:
 
 ```sh
 cd host
-./rpi_init.sh <sdio-or-spi> ap_support
+./rpi_init.sh <sdio|spi|usb> ap_support
 ```
 
 Examples use `wlan0`. Replace it with the ESP-Hosted interface shown by `iw dev` if needed.

@@ -1,6 +1,6 @@
 # Architecture overview
 
-Linux keeps standard networking and Bluetooth interfaces. ESP firmware owns the radio/controller side. ESP-Hosted-Linux moves control messages and data between them over SDIO, SPI, or USB.
+Linux keeps standard networking and Bluetooth interfaces. The hosted IEEE 802.15.4 RCP is exposed separately as the `/dev/esp_rcp0` character device. The firmware backend uses ESP-IDF OpenThread RCP/Spinel, while Thread or Zigbee policy stays in the host stack. ESP firmware owns the radio/controller side, and ESP-Hosted-Linux moves control messages and data between Linux and the ESP over SDIO, SPI, or USB.
 
 ![ESP-Hosted-Linux system architecture](../assets/system-architecture.svg)
 
@@ -40,9 +40,22 @@ BlueZ / HCI user space
 ESP-Hosted driver
 ```
 
-Normal Wi-Fi and Bluetooth applications do not need a private ESP-Hosted user-space API. Module parameters and debugfs entries exist for setup, diagnostics, raw transport testing, OTA, and similar maintenance functions.
+IEEE 802.15.4 / Thread uses a Spinel/HDLC byte stream:
 
-When Bluetooth HCI is routed over UART instead, Linux attaches the UART HCI device through its normal Bluetooth UART path rather than sending HCI through the ESP-Hosted SDIO/SPI/USB driver.
+```text
+Thread or compatible Zigbee
+Radio Spinel host stack
+           ↓
+     /dev/esp_rcp0
+           ↓
+   ESP-Hosted driver
+```
+
+Wi-Fi is the primary service and is independent of the secondary-radio selector. On firmware that advertises runtime radio-service control, the host module parameter `radio_service` selects hosted Bluetooth and IEEE 802.15.4: `none`, `bt`, `154`, or `bt+154`. The read-only `radio_service_active` parameter reports the active selection.
+
+Normal Wi-Fi, Bluetooth, and Thread applications do not need a private ESP-Hosted user-space API. Module parameters and debugfs entries are used for setup, diagnostics, raw transport testing, OTA, and similar maintenance functions.
+
+When Bluetooth HCI is routed over UART instead, Linux attaches the UART HCI device through its normal Bluetooth UART path rather than sending HCI through the ESP-Hosted SDIO/SPI/USB driver. Similarly, firmware can optionally route OpenThread RCP to a dedicated UART interface if physical separation is required.
 
 ## ESP firmware
 
@@ -54,6 +67,7 @@ It handles:
 - host command processing and firmware responses/events
 - Wi-Fi data forwarding
 - Bluetooth HCI forwarding when HCI shares the hosted transport
+- IEEE 802.15.4 Spinel RCP forwarding when the RCP service is active
 
 ## Transport payload
 
@@ -61,7 +75,7 @@ SDIO, SPI, and USB use the same packed 12-byte ESP-Hosted header before payload 
 
 | Field | Size | Purpose |
 |---|---:|---|
-| Interface type | 4 bits | STA, AP, HCI, internal, or test interface |
+| Interface type | 4 bits | STA, AP, HCI, internal, test, or RCP interface |
 | Interface number | 4 bits | Interface instance |
 | Flags | 1 byte | Packet flags such as `MORE_FRAGMENT` |
 | Packet type | 1 byte | Data, command request/response, event, or EAPOL |
@@ -74,4 +88,4 @@ SDIO, SPI, and USB use the same packed 12-byte ESP-Hosted header before payload 
 
 Multi-byte header fields are carried in little-endian wire order by current host and firmware code.
 
-[SDIO](sdio.md) and [SPI](spi.md) describe bus-specific framing and transfer behavior.
+[SDIO](sdio.md), [SPI](spi.md), and [USB](usb.md) describe bus-specific framing and transfer behavior.

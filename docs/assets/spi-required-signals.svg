@@ -38,37 +38,38 @@
   <text class="title" x="137" y="92">Linux host</text>
   <text class="sub" x="137" y="116">SPI controller + GPIOs</text>
 
-  <rect class="esp" x="825" y="55" width="420" height="510" rx="14" ry="14"/>
-  <text class="title" x="1035" y="92">ESP device</text>
-  <text class="sub" x="1035" y="116">project default GPIOs</text>
-  <text class="pinHead" x="875" y="148">ESP32</text>
-  <text class="pinHead" x="950" y="148">S2/S3</text>
-  <text class="pinHead" x="1070" y="148">C2/C3/C5/C6</text>
-  <text class="pinHead" x="1190" y="148">C61</text>
-  <line class="divider" x1="845" y1="158" x2="1220" y2="158"/>
+  <rect class="esp" x="815" y="55" width="430" height="510" rx="14" ry="14"/>
+  <text class="title" x="1030" y="92">ESP device</text>
+  <text class="sub" x="1030" y="116">project default GPIOs</text>
+  <text class="pinHead" x="855" y="148">ESP32</text>
+  <text class="pinHead" x="925" y="148">S2/S3</text>
+  <text class="pinHead" x="995" y="148">S31</text>
+  <text class="pinHead" x="1100" y="148">C2/C3/C5/C6</text>
+  <text class="pinHead" x="1200" y="148">C61</text>
+  <line class="divider" x1="835" y1="158" x2="1225" y2="158"/>
 
-  <path class="toesp" d="M240 175 H825"/><rect class="labelBg" x="470" y="160" width="80" height="22" rx="4"/><text class="signal" x="510" y="176">SCLK</text>
-  <text class="pin" x="875" y="179">IO14</text><text class="pin" x="950" y="179">IO12</text><text class="pin" x="1070" y="179">IO6</text><text class="pin" x="1190" y="179">IO6</text>
+  <path class="toesp" d="M240 175 H815"/><rect class="labelBg" x="470" y="160" width="80" height="22" rx="4"/><text class="signal" x="510" y="176">SCLK</text>
+  <text class="pin" x="855" y="179">IO14</text><text class="pin" x="925" y="179">IO12</text><text class="pin" x="995" y="179">IO20</text><text class="pin" x="1100" y="179">IO6</text><text class="pin" x="1200" y="179">IO6</text>
 
-  <path class="toesp" d="M240 230 H825"/><rect class="labelBg" x="470" y="215" width="80" height="22" rx="4"/><text class="signal" x="510" y="231">MOSI</text>
-  <text class="pin" x="875" y="234">IO13</text><text class="pin" x="950" y="234">IO11</text><text class="pin" x="1070" y="234">IO7</text><text class="pin" x="1190" y="234">IO7</text>
+  <path class="toesp" d="M240 230 H815"/><rect class="labelBg" x="470" y="215" width="80" height="22" rx="4"/><text class="signal" x="510" y="231">MOSI</text>
+  <text class="pin" x="855" y="234">IO13</text><text class="pin" x="925" y="234">IO11</text><text class="pin" x="995" y="234">IO21</text><text class="pin" x="1100" y="234">IO7</text><text class="pin" x="1200" y="234">IO7</text>
 
-  <path class="tohost" d="M240 285 H825"/><rect class="labelBg" x="470" y="270" width="80" height="22" rx="4"/><text class="signal" x="510" y="286">MISO</text>
-  <text class="pin" x="875" y="289">IO12</text><text class="pin" x="950" y="289">IO13</text><text class="pin" x="1070" y="289">IO2</text><text class="pin" x="1190" y="289">IO2</text>
+  <path class="tohost" d="M240 285 H815"/><rect class="labelBg" x="470" y="270" width="80" height="22" rx="4"/><text class="signal" x="510" y="286">MISO</text>
+  <text class="pin" x="855" y="289">IO12</text><text class="pin" x="925" y="289">IO13</text><text class="pin" x="995" y="289">IO22</text><text class="pin" x="1100" y="289">IO2</text><text class="pin" x="1200" y="289">IO2</text>
 
-  <path class="toesp" d="M240 340 H825"/><rect class="labelBg" x="470" y="325" width="80" height="22" rx="4"/><text class="signal" x="510" y="341">CS</text>
-  <text class="pin" x="875" y="344">IO15</text><text class="pin" x="950" y="344">IO10</text><text class="pin" x="1070" y="344">IO10</text><text class="pin" x="1190" y="344">IO8</text>
+  <path class="toesp" d="M240 340 H815"/><rect class="labelBg" x="470" y="325" width="80" height="22" rx="4"/><text class="signal" x="510" y="341">CS</text>
+  <text class="pin" x="855" y="344">IO15</text><text class="pin" x="925" y="344">IO10</text><text class="pin" x="995" y="344">IO23</text><text class="pin" x="1100" y="344">IO10</text><text class="pin" x="1200" y="344">IO8</text>
 
-  <path class="required" d="M240 395 H825"/><rect class="labelBg" x="420" y="380" width="180" height="22" rx="4"/><text class="requiredText" x="510" y="396">Handshake — required</text>
-  <text class="pin" x="875" y="399">IO2</text><text class="pin" x="950" y="399">IO2</text><text class="pin" x="1070" y="399">IO3</text><text class="pin" x="1190" y="399">IO3</text>
+  <path class="required" d="M240 395 H815"/><rect class="labelBg" x="420" y="380" width="180" height="22" rx="4"/><text class="requiredText" x="510" y="396">Handshake — required</text>
+  <text class="pin" x="855" y="399">IO2</text><text class="pin" x="925" y="399">IO2</text><text class="pin" x="995" y="399">IO3</text><text class="pin" x="1100" y="399">IO3</text><text class="pin" x="1200" y="399">IO3</text>
 
-  <path class="required" d="M240 450 H825"/><rect class="labelBg" x="420" y="435" width="180" height="22" rx="4"/><text class="requiredText" x="510" y="451">Data Ready — required</text>
-  <text class="pin" x="875" y="454">IO4</text><text class="pin" x="950" y="454">IO4</text><text class="pin" x="1070" y="454">IO4</text><text class="pin" x="1190" y="454">IO4</text>
+  <path class="required" d="M240 450 H815"/><rect class="labelBg" x="420" y="435" width="180" height="22" rx="4"/><text class="requiredText" x="510" y="451">Data Ready — required</text>
+  <text class="pin" x="855" y="454">IO4</text><text class="pin" x="925" y="454">IO4</text><text class="pin" x="995" y="454">IO4</text><text class="pin" x="1100" y="454">IO4</text><text class="pin" x="1200" y="454">IO4</text>
 
-  <path class="reset" d="M240 505 H825"/><rect class="labelBg" x="420" y="490" width="180" height="22" rx="4"/><text class="requiredText" x="510" y="506">Reset / Enable — required</text>
-  <text class="pin" x="875" y="509">EN</text><text class="pin" x="950" y="509">RST</text><text class="pin" x="1070" y="509">RST</text><text class="pin" x="1190" y="509">RST</text>
+  <path class="reset" d="M240 505 H815"/><rect class="labelBg" x="420" y="490" width="180" height="22" rx="4"/><text class="requiredText" x="510" y="506">Reset / Enable — required</text>
+  <text class="pin" x="855" y="509">EN</text><text class="pin" x="925" y="509">RST</text><text class="pin" x="995" y="509">RST</text><text class="pin" x="1100" y="509">RST</text><text class="pin" x="1200" y="509">RST</text>
 
-  <path class="wire" d="M240 545 H825"/><rect class="labelBg" x="470" y="530" width="80" height="22" rx="4"/><text class="signal" x="510" y="546">Ground</text>
+  <path class="wire" d="M240 545 H815"/><rect class="labelBg" x="470" y="530" width="80" height="22" rx="4"/><text class="signal" x="510" y="546">Ground</text>
 
   <!-- Separate CS pull-up schematic avoids implying a connection to adjacent SPI lines. -->
   <rect class="inset" x="430" y="590" width="420" height="108" rx="12" ry="12"/>

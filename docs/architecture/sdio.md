@@ -66,13 +66,13 @@ If a custom board requires host-controlled power or reset before the SDIO functi
 
 ## Hosted payload
 
-Wi-Fi data, HCI data, commands, responses, and events can share the SDIO link. The common header identifies interface and packet type. See [Architecture overview](overview.md#transport-payload).
+Wi-Fi data, hosted Bluetooth HCI, OpenThread RCP, commands, responses, and events can share the SDIO link when the corresponding firmware features are enabled. The common header identifies the interface and packet type. See [Architecture overview](overview.md#transport-payload).
 
 ## Bring-up checklist
 
 If SDIO is not working, check in this order:
 
-1. power, reset, and common ground
+1. power and common ground; if the board uses host-controlled pre-enumeration reset/power sequencing, check that path too
 2. CMD/DAT pull-ups for the ESP target
 3. wiring length and signal quality
 4. Linux SDIO enumeration and device ID

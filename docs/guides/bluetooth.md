@@ -1,10 +1,28 @@
 # Bluetooth
 
-ESP-Hosted-Linux registers a standard Linux HCI controller when Bluetooth is enabled in ESP firmware. ESP32 supports BR/EDR and BLE; the other Bluetooth-capable targets in this repository use BLE. [Supported hardware](../reference/supported-hardware.md) has the target summary.
+For hosted Bluetooth, ESP-Hosted-Linux registers a standard Linux HCI controller after firmware advertises Bluetooth support and the host activates the Bluetooth service. ESP32 and ESP32-S31 support BR/EDR and BLE; the other Bluetooth-capable targets in this repository use BLE. [Supported hardware](../reference/supported-hardware.md) has the target summary.
 
 ## HCI over SDIO, SPI, or USB
 
-When Bluetooth shares the hosted transport, the kernel driver registers HCI directly with the Linux Bluetooth stack.
+Hosted Bluetooth is a runtime-selectable secondary service. Wi-Fi remains available regardless of the Bluetooth selection.
+
+Request Bluetooth while loading the module:
+
+```sh
+sudo insmod ./esp32_usb.ko radio_service=bt
+# Use radio_service=bt+154 when Thread RCP is also required.
+```
+
+For an already loaded module:
+
+```sh
+echo bt | sudo tee /sys/module/esp32_usb/parameters/radio_service
+cat /sys/module/esp32_usb/parameters/radio_service_active
+```
+
+Replace `esp32_usb` with `esp32_sdio` or `esp32_spi` for the selected transport. Once firmware confirms the service, the driver registers an HCI controller with the Linux Bluetooth stack.
+
+ESP32 and ESP32-S31 provide BR/EDR + BLE dual-mode HCI. The other Bluetooth-capable targets in the supported-hardware table provide BLE HCI.
 
 Check the controller with:
 
@@ -21,7 +39,7 @@ sudo btmon
 
 ## HCI over UART
 
-Some setups keep Wi-Fi on SDIO/SPI/USB and route Bluetooth HCI over UART. This needs matching configuration on both sides:
+Some setups keep Wi-Fi on SDIO/SPI/USB and route Bluetooth HCI over UART. UART HCI is a separate physical path and is not controlled by the hosted `radio_service` parameter. It needs matching configuration on both sides:
 
 1. build ESP firmware with HCI UART enabled
 2. choose the UART baud rate and flow-control mode in ESP firmware
@@ -94,5 +112,7 @@ bluetoothctl show
 sudo btmon
 journalctl -u bluetooth --no-pager
 ```
+
+For hosted HCI, also check that `radio_service_active` contains `bt`. Removing an active hosted Bluetooth service requires a controlled firmware restart because controller teardown crosses a firmware lifetime boundary.
 
 Also save host `dmesg` and ESP serial logs. For UART HCI, check baud rate, flow control, pinmux, and whether another service or serial console still owns the UART.

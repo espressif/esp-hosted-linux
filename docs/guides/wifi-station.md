@@ -1,6 +1,8 @@
 # Wi-Fi station
 
-ESP-Hosted-Linux exposes a normal Linux WLAN interface. Find its name first:
+ESP-Hosted-Linux exposes a normal Linux WLAN interface. Wi-Fi is independent of the `radio_service` setting used for hosted Bluetooth and Thread, so no secondary-radio selection is required for station mode.
+
+Find its name first:
 
 ```sh
 iw dev

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="740" viewBox="0 0 1280 740" role="img" aria-labelledby="title desc">
   <title id="title">ESP-Hosted-Linux SDIO wiring and required pull-ups</title>
-  <desc id="desc">Linux host connects CLK, CMD, DAT0 through DAT3, reset, and ground to an ESP device. A separate pull-up schematic shows CMD and DAT0 through DAT3 each connected to 3.3 volts through a 10 kilo-ohm resistor. ESP-side SDIO pin numbers are shown for ESP32, ESP32-C5, ESP32-C6, and ESP32-C61.</desc>
+  <desc id="desc">Linux host connects CLK, CMD, DAT0 through DAT3, and ground to an ESP device. Reset or enable can be connected when the platform needs MMC power sequencing before enumeration. A separate pull-up schematic shows CMD and DAT0 through DAT3 each connected to 3.3 volts through a 10 kilo-ohm resistor. ESP-side SDIO pin numbers are shown for ESP32, ESP32-C5, ESP32-C6, and ESP32-C61.</desc>
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto-start-reverse" markerUnits="strokeWidth">
       <path d="M0,0 L0,6 L9,3 z" fill="#4b5563"/>
@@ -68,7 +68,7 @@
   <text class="pin" x="900" y="454">IO13</text><text class="pin" x="990" y="454">IO13</text><text class="pin" x="1080" y="454">IO23</text><text class="pin" x="1170" y="454">IO23</text>
 
   <path class="reset" d="M240 505 H840"/>
-  <rect class="labelBg" x="445" y="490" width="150" height="22" rx="4"/><text class="signal" x="520" y="506">Reset / Enable</text>
+  <rect class="labelBg" x="385" y="490" width="270" height="22" rx="4"/><text class="signal" x="520" y="506">Reset / Enable (optional pwrseq)</text>
   <text class="pin" x="900" y="509">EN</text><text class="pin" x="990" y="509">RST</text><text class="pin" x="1080" y="509">RST</text><text class="pin" x="1170" y="509">RST</text>
 
   <path class="wire" d="M240 545 H840"/>
@@ -86,5 +86,5 @@
   <g><line class="pull" x1="770" y1="620" x2="770" y2="635"/><rect class="pull" x="763" y="635" width="14" height="26" rx="2"/><line class="pull" x1="770" y1="661" x2="770" y2="675"/><text class="resText" x="770" y="650">10 kΩ</text><text class="netText" x="770" y="691">DAT2</text></g>
   <g><line class="pull" x1="860" y1="620" x2="860" y2="635"/><rect class="pull" x="853" y="635" width="14" height="26" rx="2"/><line class="pull" x1="860" y1="661" x2="860" y2="675"/><text class="resText" x="860" y="650">10 kΩ</text><text class="netText" x="860" y="691">DAT3</text></g>
 
-  <text class="note" x="640" y="724">The pull-up inset uses the same CMD/DAT net names as the bus above. Do not duplicate resistors already fitted on the board.</text>
+  <text class="note" x="640" y="724">CMD/DAT pull-ups are required. Reset/Enable is only needed when the host platform uses it for pre-enumeration power sequencing.</text>
 </svg>

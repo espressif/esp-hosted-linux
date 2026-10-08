@@ -5,7 +5,7 @@ ESP-Hosted-Linux has two build products:
 1. ESP firmware in `esp/esp_driver/network_adapter/`
 2. Linux host driver in `host/`
 
-The ESP firmware flow is independent of the Linux host. The host driver can run on any Linux platform with the required SDIO/SPI, GPIO, and kernel integration.
+The ESP firmware flow is independent of the Linux host. The host driver can run on any Linux platform with the required SDIO/SPI/USB, GPIO, and kernel integration.
 
 ## 1. Prepare ESP-IDF
 
@@ -139,6 +139,32 @@ sudo modprobe bluetooth
 sudo modprobe cfg80211
 sudo insmod ./esp32_usb.ko
 ```
+
+### Select Bluetooth and IEEE 802.15.4 services
+
+Wi-Fi does not require a secondary-radio selection. Hosted Bluetooth and the IEEE 802.15.4 RCP are selected with `radio_service` when firmware advertises runtime radio-service control:
+
+| Value | Result |
+|---|---|
+| `none` | Wi-Fi only |
+| `bt` | Wi-Fi + hosted Bluetooth HCI |
+| `154` | Wi-Fi + IEEE 802.15.4 RCP |
+| `bt+154` | Wi-Fi + hosted Bluetooth HCI + IEEE 802.15.4 RCP |
+
+Set the value at module insertion:
+
+```sh
+sudo insmod ./esp32_usb.ko radio_service=154
+```
+
+or change it later:
+
+```sh
+echo bt+154 | sudo tee /sys/module/esp32_usb/parameters/radio_service
+cat /sys/module/esp32_usb/parameters/radio_service_active
+```
+
+Use `esp32_sdio` or `esp32_spi` in the sysfs path for those transports. Adding a service is applied in place. Removing any active hosted secondary service requires a controlled ESP firmware restart.
 
 Unload with:
 

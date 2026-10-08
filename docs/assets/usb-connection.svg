@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="520" viewBox="0 0 1120 520" role="img" aria-labelledby="title desc">
+  <title id="title">ESP-Hosted-Linux USB connection and architecture</title>
+  <desc id="desc">Linux host connects to ESP32-S31 over USB 2.0 High-Speed using VBUS, D minus, D plus, and GND. ESP-Hosted needs no sideband GPIO lines. Vendor control requests provide ready replay and firmware restart.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto-start-reverse" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#4b5563"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto-start-reverse" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#e7352c"/>
+    </marker>
+    <style>
+      .host{fill:#f7f8fa;stroke:#4b5563;stroke-width:2}
+      .esp{fill:#fffafa;stroke:#e7352c;stroke-width:2}
+      .box{fill:#ffffff;stroke:#9ca3af;stroke-width:1.5;rx:8;ry:8}
+      .boxRed{fill:#fff4f3;stroke:#e7352c;stroke-width:1.5;rx:8;ry:8}
+      .callout{fill:#f0fdf4;stroke:#16a34a;stroke-width:1.5;rx:10;ry:10}
+      .title{font:700 20px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#111827;text-anchor:middle}
+      .sub{font:600 13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#6b7280;text-anchor:middle}
+      .label{font:600 15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#111827;text-anchor:middle}
+      .labelRed{font:700 15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#c92f27;text-anchor:middle}
+      .small{font:12px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#4b5563;text-anchor:middle}
+      .wireLabel{font:700 12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#111827;text-anchor:middle}
+      .wire{stroke:#4b5563;stroke-width:2.2;fill:none}
+      .wireRed{stroke:#e7352c;stroke-width:2.5;fill:none}
+      .wirePower{stroke:#dc2626;stroke-width:2.2;fill:none}
+      .wireGnd{stroke:#1f2937;stroke-width:2.2;fill:none}
+      .labelBg{fill:#ffffff;opacity:.95}
+      .calloutTitle{font:700 14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#15803d}
+      .calloutText{font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#374151}
+    </style>
+  </defs>
+
+  <!-- Linux Host -->
+  <rect class="host" x="35" y="45" width="280" height="330" rx="14" ry="14"/>
+  <text class="title" x="175" y="80">Linux host</text>
+  <text class="sub" x="175" y="102">Standard USB 2.0 host controller</text>
+
+  <rect class="box" x="55" y="125" width="240" height="65"/>
+  <text class="label" x="175" y="152">USB core &amp; HCD</text>
+  <text class="small" x="175" y="172">xHCI / EHCI standard root hub</text>
+
+  <rect class="boxRed" x="55" y="210" width="240" height="85"/>
+  <text class="labelRed" x="175" y="238">esp32_usb host driver</text>
+  <text class="small" x="175" y="258">8 preallocated 16 KiB RX URBs</text>
+  <text class="small" x="175" y="278">4 async TX URBs · in-band control</text>
+
+  <rect class="box" x="105" y="315" width="140" height="38"/>
+  <text class="wireLabel" x="175" y="339">USB Type-A / Type-C</text>
+
+  <!-- ESP Device -->
+  <rect class="esp" x="805" y="45" width="280" height="330" rx="14" ry="14"/>
+  <text class="title" x="945" y="80" fill="#c92f27">ESP device</text>
+  <text class="sub" x="945" y="102">ESP32-S31 (VID: 0x303A, PID: 0x4002)</text>
+
+  <rect class="boxRed" x="825" y="125" width="240" height="70"/>
+  <text class="labelRed" x="945" y="150">ESP-Hosted firmware</text>
+  <text class="small" x="945" y="169">Wi-Fi · BR/EDR + BLE</text>
+  <text class="small" x="945" y="185">IEEE 802.15.4 / Thread RCP</text>
+
+  <rect class="box" x="825" y="210" width="240" height="85"/>
+  <text class="label" x="945" y="238">TinyUSB vendor bulk class</text>
+  <text class="small" x="945" y="258">EP 0x82 Bulk-IN (MPS 512)</text>
+  <text class="small" x="945" y="278">EP 0x02 Bulk-OUT (MPS 512)</text>
+
+  <rect class="box" x="875" y="315" width="140" height="38"/>
+  <text class="wireLabel" x="945" y="339">USB high-speed port</text>
+
+  <!-- USB 4-wire Cable -->
+  <path class="wirePower" d="M315 140 H805"/>
+  <rect class="labelBg" x="515" y="129" width="90" height="22" rx="4"/>
+  <text class="wireLabel" x="560" y="145" fill="#dc2626">VBUS (+5 V)</text>
+
+  <path class="wireRed" d="M315 195 H805"/>
+  <rect class="labelBg" x="515" y="184" width="90" height="22" rx="4"/>
+  <text class="wireLabel" x="560" y="200" fill="#c92f27">D- (Data -)</text>
+
+  <path class="wireRed" d="M315 250 H805"/>
+  <rect class="labelBg" x="515" y="239" width="90" height="22" rx="4"/>
+  <text class="wireLabel" x="560" y="255" fill="#c92f27">D+ (Data +)</text>
+
+  <path class="wireGnd" d="M315 305 H805"/>
+  <rect class="labelBg" x="515" y="294" width="90" height="22" rx="4"/>
+  <text class="wireLabel" x="560" y="310" fill="#1f2937">GND (Ground)</text>
+
+  <!-- Center Protocol Note Box -->
+  <rect class="box" x="420" y="340" width="280" height="34"/>
+  <text class="small" x="560" y="362">USB 2.0 High-Speed Bulk · 480 Mbps</text>
+
+  <!-- Bottom Callouts Box -->
+  <rect class="callout" x="35" y="405" width="1050" height="90"/>
+  <text class="calloutTitle" x="65" y="435">✓ No sideband GPIO lines</text>
+  <text class="calloutText" x="65" y="458">Handshake, Data Ready, and Reset GPIOs are eliminated.</text>
+  <text class="calloutText" x="65" y="478">0xA0 requests READY replay; 0xA1 requests a firmware restart.</text>
+
+  <text class="calloutTitle" x="560" y="435">✓ No Device Tree or pull-up setup</text>
+  <text class="calloutText" x="560" y="458">No external pull-up resistors required on differential data lines.</text>
+  <text class="calloutText" x="560" y="478">Linux USB subsystem automatically enumerates device 303a:4002 and binds esp32_usb.</text>
+</svg>
