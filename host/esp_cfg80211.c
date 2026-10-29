@@ -1190,7 +1190,15 @@ static int esp_cfg80211_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 #else
 				struct cfg80211_mgmt_tx_params *params,
 #endif
-		u64 *cookie)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+				u64 cookie
+#else
+				u64 *cookie
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 2, 0)
+, const u8 *rx_addr
+#endif
+)
 {
 	struct esp_wifi_device *priv = NULL;
 
@@ -1207,8 +1215,11 @@ static int esp_cfg80211_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 		esp_err("empty priv\n");
 		return -EINVAL;
 	}
-
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+	return cmd_mgmt_request(priv, params, &cookie);
+#else
 	return cmd_mgmt_request(priv, params, cookie);
+#endif
 }
 
 static int esp_cfg80211_set_ap_chanwidth(struct wiphy *wiphy,
@@ -2444,11 +2455,17 @@ static void esp_cfg80211_mgmt_frame_registrations(struct wiphy *wiphy,
 }
 #endif
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0))
+static int esp_cfg80211_probe_peer(struct wiphy *wiphy, struct net_device *dev,
+                                  const u8 *peer, u64 cookie)
+#else
 static int esp_cfg80211_probe_client(struct wiphy *wiphy, struct net_device *dev,
                                   const u8 *peer, u64 *cookie)
+#endif
 {
 	return -EOPNOTSUPP;
 }
+
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0))
 static int esp_cfg80211_del_station(struct wiphy *wiphy, struct wireless_dev *wdev,
@@ -2675,7 +2692,11 @@ static struct cfg80211_ops esp_cfg80211_ops = {
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0))
 	.update_mgmt_frame_registrations = esp_cfg80211_mgmt_frame_registrations,
 #endif
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0))
+	.probe_peer = esp_cfg80211_probe_peer,
+#else
 	.probe_client = esp_cfg80211_probe_client,
+#endif
 	.del_station = esp_cfg80211_del_station,
 	.add_station = esp_cfg80211_add_station,
 	.change_station = esp_cfg80211_change_station,
