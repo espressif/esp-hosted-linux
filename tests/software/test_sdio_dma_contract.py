@@ -1,4 +1,4 @@
-"""Source policy for SDIO DMA-safe buffers.
+"""Source policy for SDIO page-backed bulk buffers.
 
 This is a compile/source contract only. It does not emulate MMC DMA mapping.
 """
@@ -10,36 +10,50 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class SDIODMABufferContractTests(unittest.TestCase):
-    def test_persistent_cmd53_buffers_use_dma_safe_allocator(self):
+    def test_persistent_cmd53_buffers_use_page_allocator(self):
         source = (ROOT / "host/sdio/esp_sdio.c").read_text()
 
-        self.assertIn("#if defined(CONFIG_ZONE_DMA32)", source)
-        self.assertIn("#define ESP_SDIO_DMA_GFP (GFP_KERNEL | GFP_DMA32)", source)
-        self.assertIn("#define ESP_SDIO_DMA_GFP (GFP_KERNEL | GFP_DMA)", source)
+        self.assertIn("#define ESP_SDIO_BULK_GFP GFP_KERNEL", source)
 
         expected = {
-            "reg_buf": r"context->reg_buf\s*=\s*kmalloc\(sizeof\(u32\),\s*ESP_SDIO_DMA_GFP\)",
-            "rx_len_buf": r"context->rx_len_buf\s*=\s*kmalloc\(sizeof\(u32\),\s*ESP_SDIO_DMA_GFP\)",
-            "token_buf": r"context->token_buf\s*=\s*kmalloc\(sizeof\(u32\),\s*ESP_SDIO_DMA_GFP\)",
-            "tx_aggr_buf": r"context->tx_aggr_buf\s*=\s*kzalloc\(ESP_TX_AGGR_SIZE_MAX,\s*ESP_SDIO_DMA_GFP\)",
+            "tx_aggr_buf": (
+                r"context->tx_aggr_buf\s*=\s*\(u8 \*\)__get_free_pages\(\s*"
+                r"ESP_SDIO_BULK_GFP \| __GFP_ZERO,\s*"
+                r"get_order\(ESP_TX_AGGR_SIZE_MAX\)\)"
+            ),
+            "rx_bounce_buf": (
+                r"context->rx_bounce_buf\s*=\s*\(u8 \*\)__get_free_pages\(\s*"
+                r"ESP_SDIO_BULK_GFP,\s*get_order\(ESP_HOST_RX_AGGR_SIZE\)\)"
+            ),
         }
         for name, pattern in expected.items():
             with self.subTest(buffer=name):
                 self.assertRegex(source, pattern)
 
-        # Allocation is deliberately completed before IRQ registration; ISR
-        # register access must never depend on an on-demand DMA allocation.
-        alloc = source.index("context->reg_buf = kmalloc")
+        # Bulk buffers exist before IRQ registration. The ISR must not depend
+        # on an allocation that can fail after the function IRQ is live.
+        alloc = source.index("context->tx_aggr_buf = (u8 *)__get_free_pages")
         claim_irq = source.index("sdio_claim_irq(func, esp_handle_isr)", alloc)
         self.assertLess(alloc, claim_irq)
 
-    def test_dma_buffers_are_freed_together_and_pointers_cleared(self):
+    def test_page_buffers_are_freed_together_and_pointers_cleared(self):
         source = (ROOT / "host/sdio/esp_sdio.c").read_text()
         fn = source.split("static void esp_sdio_free_dma_bufs", 1)[1].split(
             "#ifdef ESP_DEBUG_STATS", 1)[0]
-        for member in ("reg_buf", "rx_len_buf", "token_buf", "tx_aggr_buf"):
+        expected = {
+            "tx_aggr_buf": "ESP_TX_AGGR_SIZE_MAX",
+            "rx_bounce_buf": "ESP_HOST_RX_AGGR_SIZE",
+        }
+        for member, size in expected.items():
             with self.subTest(buffer=member):
-                self.assertIn("kfree(context->" + member + ");", fn)
+                self.assertRegex(
+                    fn,
+                    r"free_pages\(\(unsigned long\)context->"
+                    + re.escape(member)
+                    + r",\s*get_order\("
+                    + re.escape(size)
+                    + r"\)\)",
+                )
                 self.assertIn("context->" + member + " = NULL;", fn)
 
 
