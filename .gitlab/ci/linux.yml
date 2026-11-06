@@ -1,6 +1,6 @@
 # ESP-Hosted Linux software-only CI.
 #
-# All 11 kernel SDKs compile four transports when host/build inputs change.
+# All 12 kernel SDKs compile four transports when host/build inputs change.
 # Dedicated espdevpool hardware is intentionally not used here.
 
 .linux_rules:
@@ -116,6 +116,12 @@ host:linux-7.2:
   image: "$LINUX_IMAGE_7_2"
   variables:
     KERNEL_VERSION: "7.2.0"
+
+host:linux-7.3:
+  extends: .linux_compile
+  image: "$LINUX_IMAGE_7_3"
+  variables:
+    KERNEL_VERSION: "7.3.0"
 
 # Quality gates use a recent LTS kernel so they test the current Linux API
 # without multiplying static-analysis cost across every compatibility anchor.

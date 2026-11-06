@@ -81,8 +81,8 @@ class PipelineLayoutTests(unittest.TestCase):
         x86 = read(".gitlab/ci/linux.yml")
         arm = read(".gitlab/ci/software-cross-arch.yml")
         versions = re.findall(r'(?m)^    KERNEL_VERSION: "([\d.]+)"$', x86)
-        self.assertEqual(len(versions), 11)
-        self.assertEqual(len(set(versions)), 11)
+        self.assertEqual(len(versions), 12)
+        self.assertEqual(len(set(versions)), 12)
         self.assertEqual(len(re.findall(r'(?m)^    PAGE_SIZE: "\d+"$', arm)), 5)
         for size in ("4096", "16384", "65536"):
             self.assertIn('PAGE_SIZE: "' + size + '"', arm)
