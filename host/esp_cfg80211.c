@@ -1637,6 +1637,35 @@ static int esp_cfg80211_set_tx_power(struct wiphy *wiphy,
 	return ret;
 }
 
+static int esp_cfg80211_set_power_mgmt(struct wiphy *wiphy,
+				       struct net_device *dev,
+				       bool enabled, int timeout)
+{
+	struct esp_wifi_device *priv;
+
+	if (!wiphy || !dev)
+		return -EINVAL;
+
+	/* Monitor uses a different netdev private type. */
+	if (esp_cfg80211_is_monitor_dev(dev))
+		return -EOPNOTSUPP;
+
+	priv = netdev_priv(dev);
+	if (!priv)
+		return -EINVAL;
+
+	/* esp_wifi_set_ps() is station modem-sleep. timeout is cfg80211's
+	 * dynamic-PS hint (-1 means the driver may choose). The slave has
+	 * no dynamic timeout, so on maps to WIFI_PS_MIN_MODEM. */
+	if (priv->if_type != ESP_STA_IF)
+		return -EOPNOTSUPP;
+
+	if (timeout > 0)
+		esp_dbg("dynamic ps timeout %d ignored\n", timeout);
+
+	return cmd_set_power_save(priv, enabled);
+}
+
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0))
 static int esp_cfg80211_get_station(struct wiphy *wiphy, struct wireless_dev *wdev,
 				    const u8 *mac, struct station_info *sinfo)
@@ -2681,6 +2710,7 @@ static struct cfg80211_ops esp_cfg80211_ops = {
 	.set_wakeup = esp_cfg80211_set_wakeup,
 	.set_tx_power = esp_cfg80211_set_tx_power,
 	.get_tx_power = esp_cfg80211_get_tx_power,
+	.set_power_mgmt = esp_cfg80211_set_power_mgmt,
 	.set_wiphy_params = esp_cfg80211_set_wiphy_params,
 	.set_txq_params = esp_cfg80211_set_txq_params,
 	.change_beacon = esp_cfg80211_change_beacon,

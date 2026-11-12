@@ -1166,6 +1166,7 @@ static bool esp_cmd_timeout_is_commit_ambiguous(u8 cmd_code)
 	case CMD_SET_IP_ADDR:
 	case CMD_SET_MCAST_MAC_ADDR:
 	case CMD_SET_TXPOWER:
+	case CMD_SET_POWER_SAVE:
 	case CMD_SET_REG_DOMAIN:
 	case CMD_RAW_TP_ESP_TO_HOST:
 	case CMD_RAW_TP_HOST_TO_ESP:
@@ -1384,6 +1385,7 @@ static int wait_and_decode_cmd_resp(struct esp_wifi_device *priv,
 	case CMD_SET_DEFAULT_KEY:
 	case CMD_SET_IP_ADDR:
 	case CMD_SET_MCAST_MAC_ADDR:
+	case CMD_SET_POWER_SAVE:
 	case CMD_GET_REG_DOMAIN:
 	case CMD_SET_REG_DOMAIN:
 	case CMD_RAW_TP_ESP_TO_HOST:
@@ -4050,6 +4052,29 @@ int cmd_set_tx_power(struct esp_wifi_device *priv, int power)
 	val = (struct cmd_set_get_val *)(cmd_node->cmd_skb->data +
 					 sizeof(struct esp_payload_header));
 	val->value = esp_wire_cpu_to_le32((u32)power);
+
+	queue_cmd_node(priv->adapter, cmd_node, ESP_CMD_DFLT_PRIO);
+	return wait_and_decode_cmd_resp(priv, cmd_node);
+}
+
+int cmd_set_power_save(struct esp_wifi_device *priv, bool enabled)
+{
+	struct command_node *cmd_node;
+	struct cmd_set_get_val *val;
+
+	if (!priv || !priv->adapter)
+		return -EINVAL;
+	if (test_bit(ESP_CLEANUP_IN_PROGRESS, &priv->adapter->state_flags))
+		return 0;
+
+	cmd_node = prepare_command_request(priv->adapter, CMD_SET_POWER_SAVE,
+					   sizeof(struct cmd_set_get_val));
+	if (IS_ERR_OR_NULL(cmd_node))
+		return cmd_prepare_err(cmd_node);
+
+	val = (struct cmd_set_get_val *)(cmd_node->cmd_skb->data +
+					 sizeof(struct esp_payload_header));
+	val->value = esp_wire_cpu_to_le32(enabled ? ESP_PS_MIN : ESP_PS_OFF);
 
 	queue_cmd_node(priv->adapter, cmd_node, ESP_CMD_DFLT_PRIO);
 	return wait_and_decode_cmd_resp(priv, cmd_node);
