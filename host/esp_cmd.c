@@ -2891,6 +2891,7 @@ int cmd_mgmt_request(struct esp_wifi_device *priv,
 	struct cmd_mgmt_tx *cmd;
 	size_t total_len;
 	u64 tx_id;
+	u64 status_cookie;
 	int ret;
 
 	if (!priv || !priv->adapter || !req || !cookie || !req->buf || !req->len)
@@ -2930,12 +2931,18 @@ int cmd_mgmt_request(struct esp_wifi_device *priv,
 		return cmd_prepare_err(cmd_node);
 	}
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0))
+	/* cfg80211 pre-assigns this cookie. TX status must report it. */
+	status_cookie = *cookie;
+#else
+	status_cookie = (u64)cmd_node->cmd_seq;
+	*cookie = status_cookie;
+#endif
 	spin_lock_bh(&priv->bss_lock);
-	priv->pending_mgmt_cookie = (u64)cmd_node->cmd_seq;
+	priv->pending_mgmt_cookie = status_cookie;
 	spin_unlock_bh(&priv->bss_lock);
 
-	cmd_node->cookie = (u64)cmd_node->cmd_seq;
-	*cookie = cmd_node->cookie;
+	cmd_node->cookie = status_cookie;
 	cmd_node->mgmt_dont_wait_for_ack = req->dont_wait_for_ack;
 	cmd_node->mgmt_frame = kmemdup(req->buf, req->len, GFP_KERNEL);
 	if (!cmd_node->mgmt_frame) {
