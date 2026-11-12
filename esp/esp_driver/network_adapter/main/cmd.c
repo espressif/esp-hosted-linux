@@ -2058,7 +2058,10 @@ esp_err_t initialise_wifi(void)
      * sleep enabled the AP buffers downlink frames and delivers them at the
      * DTIM beacon interval (~102ms), which shows up as a ~100ms sawtooth on
      * ping latency for traffic sourced from peers behind the AP. esp_hosted
-     * is a line-powered adapter, so we trade power for minimum RX latency. */
+     * is a line-powered adapter, so we trade power for minimum RX latency.
+     * WIFI_PS_NONE also matches cfg80211, which reports power save off until
+     * `iw set power_save on` (CMD_SET_POWER_SAVE -> WIFI_PS_MIN_MODEM).
+     * That command is station modem-sleep, not light sleep. */
     esp_wifi_set_ps(WIFI_PS_NONE);
 
     esp_wifi_set_debug_log();
@@ -2321,6 +2324,40 @@ int process_set_tx_power(uint8_t if_type, uint8_t *payload, uint16_t payload_len
                              CMD_RESPONSE_SUCCESS,
                              (uint8_t *)&wire_value,
                              sizeof(wire_value));
+}
+
+int process_set_power_save(uint8_t if_type, uint8_t *payload, uint16_t payload_len)
+{
+    struct cmd_set_get_val *val;
+    wifi_ps_type_t mode;
+    esp_err_t ret;
+    uint32_t ps;
+
+    if (!payload || payload_len < sizeof(*val))
+        return send_command_resp(if_type, CMD_SET_POWER_SAVE,
+                                 CMD_RESPONSE_INVALID, NULL, 0);
+
+    val = (struct cmd_set_get_val *)payload;
+    ps = le32toh(val->value);
+    if (ps == ESP_PS_OFF)
+        mode = WIFI_PS_NONE;
+    else if (ps == ESP_PS_MIN)
+        mode = WIFI_PS_MIN_MODEM;
+    else
+        return send_command_resp(if_type, CMD_SET_POWER_SAVE,
+                                 CMD_RESPONSE_INVALID, NULL, 0);
+
+    ret = esp_wifi_set_ps(mode);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "SET_POWER_SAVE mode=%d ret=%d", mode, ret);
+        return send_command_resp(if_type, CMD_SET_POWER_SAVE,
+                                 CMD_RESPONSE_FAIL, NULL, 0);
+    }
+
+    ESP_LOGI(TAG, "SET_POWER_SAVE %s",
+             mode == WIFI_PS_NONE ? "off" : "min_modem");
+    return send_command_resp(if_type, CMD_SET_POWER_SAVE,
+                             CMD_RESPONSE_SUCCESS, NULL, 0);
 }
 
 int process_rssi(uint8_t if_type, uint8_t *payload, uint16_t payload_len)
@@ -4534,6 +4571,7 @@ static const struct esp_cmd_entry s_cmd_table[] = {
     { CMD_SET_MCAST_MAC_ADDR,  sizeof(struct cmd_set_mcast_mac_addr),  process_set_mcast_mac_list, "SET_MCAST" },
     { CMD_GET_TXPOWER,         0,                                      process_get_tx_power,       "GET_TXPOWER" },
     { CMD_SET_TXPOWER,         sizeof(struct cmd_set_get_val),         process_set_tx_power,       "SET_TXPOWER" },
+    { CMD_SET_POWER_SAVE,      sizeof(struct cmd_set_get_val),         process_set_power_save,     "SET_POWER_SAVE" },
     { CMD_GET_REG_DOMAIN,      0,                                      process_reg_get,            "GET_REG" },
     { CMD_SET_REG_DOMAIN,      sizeof(struct cmd_reg_domain),          process_reg_set,            "SET_REG" },
     { CMD_RAW_TP_ESP_TO_HOST,  0,                                      process_raw_tp,             "RAW_TP_E2H" },

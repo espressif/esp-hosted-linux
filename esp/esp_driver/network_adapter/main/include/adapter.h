@@ -217,8 +217,15 @@ enum COMMAND_CODE {
 	CMD_MONITOR_CONFIG = 37,
 	/* QSPI raw-bidirectional test; new append-only ID after master commands. */
 	CMD_RAW_TP_BIDIRECTIONAL = 38,
+	/* Station modem-sleep. cmd_set_get_val.value is ESP_PS_OFF or ESP_PS_MIN.
+	 * Not light sleep, and not WIFI_PS_MAX_MODEM. */
+	CMD_SET_POWER_SAVE = 39,
 	CMD_MAX,
 };
+
+/* CMD_SET_POWER_SAVE payload. nl80211 only has on/off. */
+#define ESP_PS_OFF	0 /* WIFI_PS_NONE */
+#define ESP_PS_MIN	1 /* WIFI_PS_MIN_MODEM */
 
 enum EVENT_CODE {
 	EVENT_SCAN_RESULT = 1,
