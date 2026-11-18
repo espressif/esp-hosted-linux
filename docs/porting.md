@@ -131,7 +131,7 @@ The kernel build directory must be prepared for external modules and match the m
 
 Choose the ESP transport under **Example Configuration → Transport layer**.
 
-SPI options include Handshake/Data Ready GPIOs, queue sizes, checksum, controller choice where available, and `ESP_SPI_DEASSERT_HS_ON_CS`.
+SPI options include SPI CPOL/CPHA mode (`CONFIG_ESP_SPI_MODE`, default 2), Handshake/Data Ready GPIOs, queue sizes, checksum, controller choice where available, and `ESP_SPI_DEASSERT_HS_ON_CS`.
 
 SDIO appears only on targets with SDIO-slave support. Checksum, speed, card-detect, and host-wakeup settings are also in project Kconfig.
 
@@ -148,7 +148,7 @@ Before raising clock speed:
 - if a host reset GPIO is present, confirm that it resets ESP; otherwise confirm the acknowledged SPI reboot fallback is supported
 - make sure Linux can claim the intended SPI bus and CS
 - check Handshake and Data Ready interrupts
-- confirm both sides use SPI mode 2 unless you deliberately changed both
+- confirm both sides use the same SPI mode (default mode 2; if selecting another mode `0`–`3`, match firmware `CONFIG_ESP_SPI_MODE` with Linux Device Tree `spi-cpol`/`spi-cpha`: Mode 0 = CPOL0/CPHA0, Mode 1 = CPOL0/CPHA1, Mode 2 = CPOL1/CPHA0, Mode 3 = CPOL1/CPHA1)
 - start at a low clock
 - use short wiring
 - repeat boot and data transfers until they are clean

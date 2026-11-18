@@ -26,6 +26,8 @@
 /* The first boot/ready event precedes firmware clock negotiation. */
 #define SPI_BOOTSTRAP_CLK_MHZ      1
 #define SPI_REBOOT_ACK_TIMEOUT_MS 2000
+#define SPI_RESET_SETTLE_MS       500
+#define SPI_REMOVE_RESET_SETTLE_MS 200
 #define SPI_MAX_CLK_MHZ         40U
 #define TX_MAX_PENDING_COUNT    100
 #define TX_RESUME_THRESHOLD     (TX_MAX_PENDING_COUNT/5)
@@ -51,6 +53,11 @@ static volatile u8 data_path;
 volatile u8 host_sleep;
 static struct esp_spi_context spi_context;
 static atomic_t tx_pending;
+/* Incremented on every HANDSHAKE rising edge. A post-transfer worker may
+ * still observe the previous slot's HANDSHAKE high until the slave's
+ * post-transaction callback runs. Requeue only after a new generation proves
+ * that the next DMA slot has actually been armed. */
+static atomic_t spi_handshake_generation = ATOMIC_INIT(0);
 static DEFINE_MUTEX(spi_reset_lock);
 static bool spi_driver_registered;
 static atomic_t spi_soft_reboot_attempts = ATOMIC_INIT(0);
@@ -151,7 +158,18 @@ static void esp_spi_kick(void)
 		queue_work(spi_context.spi_workqueue, &spi_context.spi_work);
 }
 
-static void esp_spi_requeue_if_pending(void)
+static bool esp_spi_next_slot_ready(bool handshake,
+				    u32 handshake_generation_before,
+				    u32 handshake_generation_now)
+{
+	/* A high HANDSHAKE by itself can still belong to the slot that just
+	 * completed. Only a fresh rising-edge generation proves that firmware
+	 * has armed the next DMA slot. */
+	return handshake &&
+	       handshake_generation_now != handshake_generation_before;
+}
+
+static void esp_spi_requeue_if_pending(u32 handshake_generation_before)
 {
 	bool handshake = false;
 	bool data_ready = false;
@@ -175,7 +193,19 @@ static void esp_spi_requeue_if_pending(void)
 	 * pending/running, so explicitly drain the remaining level-triggered
 	 * work one transfer at a time.
 	 */
-	if (!handshake)
+	/* spi_sync_transfer() may return before the slave-side post-transaction
+	 * callback has lowered HANDSHAKE for the slot we just consumed. Never use
+	 * that stale high level to start another transfer: doing so can clock the
+	 * slave before its next DMA descriptor is armed and return an all-zero
+	 * MISO frame while DATA_READY is asserted.
+	 *
+	 * A new HANDSHAKE rising-edge generation proves that firmware completed
+	 * the low->high slot handoff. If that IRQ has not arrived yet, simply
+	 * return; the IRQ handler will queue the worker once the next slot is
+	 * actually ready. */
+	if (!esp_spi_next_slot_ready(
+			handshake, handshake_generation_before,
+			(u32)atomic_read(&spi_handshake_generation)))
 		return;
 
 	if (atomic_read(&spi_context.adapter->state) >= ESP_CONTEXT_READY)
@@ -223,8 +253,8 @@ static int esp_spi_reinit_after_fw_reset(struct esp_adapter *adapter)
 {
 	if (!adapter || adapter != spi_context.adapter)
 		return -EINVAL;
-	open_data_path();
 	atomic_set(&adapter->state, ESP_CONTEXT_READY);
+	open_data_path();
 	/* A parsed boot TLV is insufficient to refill the retry budget.
 	 * WLAN/HCI/RCP publication still has to succeed. */
 	return 0;
@@ -419,6 +449,31 @@ static void esp_spi_restore_startup_clock(void)
 			(u32)spi_context.spi_clk_mhz * NUMBER_1M;
 }
 
+static int esp_spi_pulse_reset_gpio_locked(struct esp_spi_context *context,
+					   unsigned int settle_ms,
+					   const char *reason)
+{
+	int ret;
+
+	if (!context || !context->reset_gpio)
+		return -ENODEV;
+
+	ret = gpiod_direction_output(context->reset_gpio, 0);
+	if (ret) {
+		esp_err("Failed to configure SPI reset GPIO as output: %d\n", ret);
+		return ret;
+	}
+	context->reset_gpio_driven = true;
+
+	esp_info("Resetting ESP SPI target (%s) via reset-gpios\n", reason);
+	gpiod_set_value_cansleep(context->reset_gpio, 1);
+	usleep_range(200, 500);
+	gpiod_set_value_cansleep(context->reset_gpio, 0);
+	if (settle_ms)
+		msleep(settle_ms);
+	return 0;
+}
+
 static int esp_spi_hw_reset(struct esp_adapter *adapter)
 {
 	int ret = 0;
@@ -435,23 +490,11 @@ static int esp_spi_hw_reset(struct esp_adapter *adapter)
 		ret = -ESHUTDOWN;
 		goto out;
 	}
-	if (!spi_context.reset_gpio) {
-		ret = -ENODEV;
+	ret = esp_spi_pulse_reset_gpio_locked(&spi_context,
+					      SPI_RESET_SETTLE_MS,
+					      "recovery");
+	if (ret)
 		goto out;
-	}
-
-	ret = gpiod_direction_output(spi_context.reset_gpio, 0);
-	if (ret) {
-		esp_err("Failed to configure SPI reset GPIO as output: %d\n", ret);
-		goto out;
-	}
-	spi_context.reset_gpio_driven = true;
-
-	esp_info("Resetting ESP SPI target via reset-gpios\n");
-	gpiod_set_value_cansleep(spi_context.reset_gpio, 1);
-	usleep_range(200, 500);
-	gpiod_set_value_cansleep(spi_context.reset_gpio, 0);
-	msleep(500);
 	/*
 	 * Firmware restart returns the peripheral to its startup SPI timing.
 	 * Do not try to receive the new boot event at a clock negotiated by the
@@ -495,17 +538,24 @@ static bool esp_spi_bootstrap_frame_valid(struct esp_adapter *adapter,
 	int left;
 
 	(void)adapter;
-	if (hdr->if_type != ESP_INTERNAL_IF || !ESP_OFFSET_VALID(off) ||
+	if (hdr->if_type != ESP_INTERNAL_IF || hdr->if_num != 0 ||
+	    hdr->flags != 0 || hdr->reserved1 != 0 ||
+	    hdr->reserved2 != 0 || hdr->reserved3 != 0 ||
+	    !ESP_OFFSET_VALID(off) ||
 	    off > SPI_BUF_SIZE || !len || len > SPI_BUF_SIZE - off)
 		return false;
 	if (boot) {
-		if (hdr->packet_type != PACKET_TYPE_EVENT ||
+		if (off != sizeof(*hdr) ||
+		    (hdr->packet_type != PACKET_TYPE_EVENT &&
+		     hdr->packet_type != PACKET_TYPE_DATA) ||
 		    len < offsetof(struct esp_internal_bootup_event, data))
 			return false;
 		evt = (void *)(frame + off);
 		if (evt->header.event_code != ESP_INTERNAL_BOOTUP_EVENT ||
 		    evt->header.status ||
-		    evt->len > len - offsetof(struct esp_internal_bootup_event, data))
+		    len != offsetof(struct esp_internal_bootup_event, data) +
+		           evt->len ||
+		    esp_wire_le16_to_cpu(evt->header.len) != (u16)evt->len + 1)
 			return false;
 		pos = evt->data;
 		left = evt->len;
@@ -646,6 +696,11 @@ static int esp_spi_bootstrap_check_boot(struct esp_adapter *adapter,
 			msleep(10);
 			continue;
 		}
+		if (!allow_firmware_reboot && !data_ready) {
+			/* No boot event is queued on the slave; avoid clocking
+			 * dummy 0xFF transactions before physical GPIO reset. */
+			break;
+		}
 
 		memset(tx, 0, SPI_BUF_SIZE);
 		memset(rx, 0, SPI_BUF_SIZE);
@@ -676,7 +731,8 @@ static int esp_spi_bootstrap_check_boot(struct esp_adapter *adapter,
 
 		wire = (struct esp_payload_header *)rx;
 		if (!sent && wire->if_type == ESP_INTERNAL_IF &&
-		    wire->packet_type == PACKET_TYPE_EVENT &&
+		    (wire->packet_type == PACKET_TYPE_EVENT ||
+		     wire->packet_type == PACKET_TYPE_DATA) &&
 		    esp_spi_bootstrap_frame_valid(adapter, rx, true,
 							  &frame_len)) {
 			/* Preserve the published event and let the common boot event
@@ -874,6 +930,7 @@ static irqreturn_t spi_data_ready_interrupt_handler(int irq, void *dev)
 
 static irqreturn_t spi_interrupt_handler(int irq, void *dev)
 {
+	atomic_inc(&spi_handshake_generation);
 	if (spi_accepting_work() && spi_context.spi_workqueue)
 		queue_work(spi_context.spi_workqueue, &spi_context.spi_work);
 	return IRQ_HANDLED;
@@ -1164,7 +1221,7 @@ static int process_rx_buf(struct sk_buff *skb, bool rx_pending)
 	u16 len = 0;
 	u16 offset = 0;
 
-	if (!skb)
+	if (!skb || !skb->data || skb->len < sizeof(*header))
 		return -EINVAL;
 	header = (struct esp_payload_header *)skb->data;
 	if (spi_is_dummy_rx(header) ||
@@ -1192,18 +1249,47 @@ static int process_rx_buf(struct sk_buff *skb, bool rx_pending)
 		esp_spi_fail_rcp_rx("invalid length/offset");
 		return -EINVAL;
 	}
-	/* The initial boot-first exception ends as soon as a BOOT frame is
-	 * actually consumed from the wire. If reconstruction later fails, the
-	 * ensuing explicit hardware reset is authoritative and cannot be cancelled
-	 * by another stale/replayed BOOT frame from the same incarnation. */
-	if (header->if_type == ESP_INTERNAL_IF &&
-	    header->packet_type == PACKET_TYPE_EVENT &&
-	    len >= sizeof(struct event_header)) {
-		const struct event_header *event =
-			(const struct event_header *)(skb->data + offset);
+	if (header->if_type == ESP_INTERNAL_IF) {
+		u16 frame_len = 0;
+		bool is_boot_evt = len >= sizeof(struct event_header) &&
+			((const struct event_header *)(skb->data + offset))->event_code ==
+			ESP_INTERNAL_BOOTUP_EVENT;
 
-		if (event->event_code == ESP_INTERNAL_BOOTUP_EVENT)
+		if (header->if_num != 0 || header->flags != 0 ||
+		    header->reserved1 != 0 || header->reserved2 != 0 ||
+		    header->reserved3 != 0) {
+			esp_err("Drop non-canonical internal SPI RX: if_num=%u type=%u flags=0x%02x\n",
+				header->if_num, header->packet_type,
+				header->flags);
+			esp_spi_fail_rcp_rx("non-canonical internal header");
+			return -EINVAL;
+		}
+		if (is_boot_evt ||
+		    header->packet_type == PACKET_TYPE_EVENT ||
+		    header->packet_type == PACKET_TYPE_DATA) {
+			if (!esp_spi_bootstrap_frame_valid(spi_context.adapter,
+							   skb->data, true,
+							   &frame_len)) {
+				esp_err("Drop invalid SPI boot RX frame: type=%u len=%u off=%u\n",
+					header->packet_type, len, offset);
+				esp_spi_fail_rcp_rx("invalid boot frame");
+				return -EINVAL;
+			}
+			/* The initial boot-first exception ends as soon as a
+			 * validated BOOT frame is consumed from the wire. If
+			 * reconstruction later fails, the ensuing explicit
+			 * hardware reset is authoritative and cannot be
+			 * cancelled by a stale/replayed BOOT frame. */
 			esp_spi_retire_boot_rescue();
+		} else if (header->packet_type != PACKET_TYPE_COMMAND_RESPONSE ||
+			   !esp_spi_bootstrap_frame_valid(spi_context.adapter,
+							  skb->data, false,
+							  &frame_len)) {
+			esp_err("Drop invalid internal SPI RX frame: type=%u len=%u off=%u\n",
+				header->packet_type, len, offset);
+			esp_spi_fail_rcp_rx("invalid internal frame");
+			return -EINVAL;
+		}
 	}
 
 	len += offset;
@@ -1239,6 +1325,7 @@ static void esp_spi_work(struct work_struct *work)
 	bool is_cmd = false;
 	bool is_stateful_pkt = false;
 	bool has_tx = false;
+	u32 handshake_generation_before;
 
 	if (!spi_accepting_work())
 		return;
@@ -1256,6 +1343,8 @@ static void esp_spi_work(struct work_struct *work)
 	}
 	if (!trans_ready)
 		return;
+	handshake_generation_before =
+		(u32)atomic_read(&spi_handshake_generation);
 
 	if (data_path &&
 	    atomic_read(&spi_context.adapter->state) >= ESP_CONTEXT_READY) {
@@ -1402,7 +1491,7 @@ static void esp_spi_work(struct work_struct *work)
 		if (process_rx_buf(rx_skb, rx_pending))
 			dev_kfree_skb(rx_skb);
 		dev_kfree_skb(tx_skb);
-		esp_spi_requeue_if_pending();
+		esp_spi_requeue_if_pending(handshake_generation_before);
 	}
 }
 
@@ -1746,6 +1835,20 @@ static void esp_spi_remove_common(struct spi_device *spi)
 		adapter->dev = NULL;
 	}
 
+	/*
+	 * The ESP SPI slave queues its boot-up event only once at startup and
+	 * has no in-band close-datapath interrupt on SPI. When a hardware
+	 * reset line is described in DT, pulse it on module unload/unbind so
+	 * the target reboots and arms a fresh boot-up event before the next
+	 * insmod probes.
+	 */
+	mutex_lock(&spi_reset_lock);
+	if (context->reset_gpio)
+		esp_spi_pulse_reset_gpio_locked(context,
+						SPI_REMOVE_RESET_SETTLE_MS,
+						"remove");
+	mutex_unlock(&spi_reset_lock);
+
 	spi_release_reset_gpio(context);
 	clear_bit(ESP_SPI_GPIO_HS_REQUESTED, &context->spi_flags);
 	clear_bit(ESP_SPI_GPIO_DR_REQUESTED, &context->spi_flags);
@@ -1810,6 +1913,7 @@ static int spi_init(void)
 	}
 	INIT_WORK(&spi_context.spi_work, esp_spi_work);
 	INIT_WORK(&spi_context.reset_work, esp_spi_reset_work);
+	atomic_set(&spi_handshake_generation, 0);
 	atomic_set(&spi_soft_reboot_attempts, 0);
 	for (prio_q_idx = 0; prio_q_idx < MAX_PRIORITY_QUEUES; prio_q_idx++) {
 		skb_queue_head_init(&spi_context.tx_q[prio_q_idx]);

@@ -1942,7 +1942,13 @@ void app_main()
         return;
     }
 
+#if !CONFIG_ESP_SPI_HOST_INTERFACE
+    /* SPI boot readiness is synchronized in hardware via spi_post_setup_cb(),
+     * which asserts HANDSHAKE and DATA_READY only after the boot-up event DMA
+     * descriptor is armed. Keep the legacy startup delay scoped to non-SPI
+     * transports. */
     sleep(1);
+#endif
 
     for (prio_q_idx = 0; prio_q_idx < MAX_PRIORITY_QUEUES; prio_q_idx++) {
         to_host_queue[prio_q_idx] = xQueueCreate(TO_HOST_QUEUE_SIZE, sizeof(interface_buffer_handle_t));

@@ -48,13 +48,15 @@ static const char TAG[] = "FW_SPI";
 #define SPI_MODE_2              2
 #define SPI_MODE_3              3
 
+#if CONFIG_ESP_SPI_MODE < SPI_MODE_0 || CONFIG_ESP_SPI_MODE > SPI_MODE_3
+#error "CONFIG_ESP_SPI_MODE must be in range 0..3"
+#endif
+
 #define SPI_DMA_ALIGNMENT_BYTES 4
 #define SPI_DMA_ALIGNMENT_MASK  (SPI_DMA_ALIGNMENT_BYTES-1)
 #define IS_SPI_DMA_ALIGNED(VAL) (!(((uintptr_t)(VAL)) & SPI_DMA_ALIGNMENT_MASK))
 #define MAKE_SPI_DMA_ALIGNED(VAL)  (VAL += SPI_DMA_ALIGNMENT_BYTES - \
                 ((VAL)& SPI_DMA_ALIGNMENT_MASK))
-
-uint8_t g_spi_mode = SPI_MODE_2;
 
 /* Chipset specific configurations */
 #ifdef CONFIG_IDF_TARGET_ESP32
@@ -182,8 +184,8 @@ uint8_t g_spi_mode = SPI_MODE_2;
 
 static interface_context_t context;
 static interface_handle_t if_handle_g;
-static uint8_t gpio_handshake = CONFIG_ESP_SPI_GPIO_HANDSHAKE;
-static uint8_t gpio_data_ready = CONFIG_ESP_SPI_GPIO_DATA_READY;
+static uint8_t gpio_handshake;
+static uint8_t gpio_data_ready;
 static QueueHandle_t spi_rx_queue[MAX_PRIORITY_QUEUES] = {NULL};
 static QueueHandle_t spi_tx_queue[MAX_PRIORITY_QUEUES] = {NULL};
 
@@ -194,6 +196,7 @@ typedef struct {
     spi_slave_transaction_t trans;
     uint8_t *dma_tx;
     bool in_use;
+    bool has_tx;
     bool is_raw_tp;
     bool reboot_ack;
     uint32_t raw_tp_run_id;
@@ -217,6 +220,50 @@ static esp_err_t esp_spi_reset(interface_handle_t *handle);
 static void esp_spi_deinit(interface_handle_t *handle);
 static void esp_spi_read_done(void *handle);
 static void queue_next_transaction(void);
+
+static esp_err_t spi_validate_output_gpio(int gpio, const char *name)
+{
+    if (gpio < 0 || gpio >= GPIO_NUM_MAX ||
+#if !defined(GPIO_OUT1_W1TS_REG) || !defined(GPIO_OUT1_W1TC_REG)
+        gpio >= 32 ||
+#else
+        gpio >= 64 ||
+#endif
+        !GPIO_IS_VALID_OUTPUT_GPIO(gpio)) {
+        ESP_LOGE(TAG, "Invalid SPI %s GPIO %d for output", name, gpio);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (gpio == GPIO_MOSI || gpio == GPIO_MISO ||
+        gpio == GPIO_SCLK || gpio == GPIO_CS) {
+        ESP_LOGE(TAG, "SPI %s GPIO %d collides with SPI bus pin", name, gpio);
+        return ESP_ERR_INVALID_ARG;
+    }
+    return ESP_OK;
+}
+
+/* Caller must validate gpio via spi_validate_output_gpio() before calling. */
+static inline void IRAM_ATTR spi_gpio_set_high(uint8_t gpio)
+{
+#ifdef GPIO_OUT1_W1TS_REG
+    if (gpio >= 32) {
+        WRITE_PERI_REG(GPIO_OUT1_W1TS_REG, (1U << (gpio - 32)));
+        return;
+    }
+#endif
+    WRITE_PERI_REG(GPIO_OUT_W1TS_REG, (1U << gpio));
+}
+
+/* Caller must validate gpio via spi_validate_output_gpio() before calling. */
+static inline void IRAM_ATTR spi_gpio_set_low(uint8_t gpio)
+{
+#ifdef GPIO_OUT1_W1TC_REG
+    if (gpio >= 32) {
+        WRITE_PERI_REG(GPIO_OUT1_W1TC_REG, (1U << (gpio - 32)));
+        return;
+    }
+#endif
+    WRITE_PERI_REG(GPIO_OUT_W1TC_REG, (1U << gpio));
+}
 
 if_ops_t if_ops = {
     .init = esp_spi_init,
@@ -250,7 +297,7 @@ static void IRAM_ATTR gpio_disable_hs_isr_handler(void* arg)
     int level = gpio_get_level(GPIO_CS);
     if (level == 0) {
         /* CS is asserted, disable HS */
-        WRITE_PERI_REG(GPIO_OUT_W1TC_REG, (1ULL << gpio_handshake));
+        spi_gpio_set_low(gpio_handshake);
     } else {
         /* Last transaction complete, populate next one */
         if (wait_cs_deassert_sem)
@@ -305,6 +352,7 @@ esp_err_t send_bootup_event_to_host(uint32_t cap, uint32_t ext_cap)
 
     header->if_type = ESP_INTERNAL_IF;
     header->if_num = 0;
+    header->packet_type = PACKET_TYPE_EVENT;
     header->offset = htole16(sizeof(struct esp_payload_header));
 
     event = (struct esp_internal_bootup_event*)(buf_handle.payload + sizeof(struct esp_payload_header));
@@ -394,19 +442,73 @@ esp_err_t send_bootup_event_to_host(uint32_t cap, uint32_t ext_cap)
 
     xQueueSend(spi_tx_queue[PRIO_Q_HIGH], &buf_handle, portMAX_DELAY);
 
-    /* indicate waiting data on ready pin */
-    WRITE_PERI_REG(GPIO_OUT_W1TS_REG, (1ULL << gpio_data_ready));
-    /* process first data packet here to start transactions */
+    /* Arm the initial SPI slot; because no prior dummy slot is mounted at
+     * startup, spi_post_setup_cb() asserts both data_ready and handshake
+     * once the boot frame's DMA descriptor is loaded. */
     queue_next_transaction();
 
     return ESP_OK;
 }
 
-/* Invoked after transaction is queued and ready for pickup by master */
+/*
+ * Two-stage SPI E2H readiness contract:
+ * 1. Slot setup (spi_post_setup_cb):
+ *    - HANDSHAKE is asserted only after spi_intr() has loaded the active
+ *      slot's DMA descriptors and armed the slave peripheral. The host
+ *      never clocks a transfer unless HANDSHAKE is high.
+ *    - When the armed slot itself carries an E2H payload (slot->has_tx,
+ *      including the initial boot-up event in slot 0), DATA_READY is raised
+ *      here together with HANDSHAKE so the host cannot observe
+ *      (HANDSHAKE && DATA_READY) before the TX DMA descriptor is armed.
+ * 2. Runtime wake-up behind an armed idle dummy slot (esp_spi_write):
+ *    - When the slave is idle (spi_tx_queue[] empty), queue_next_transaction()
+ *      arms a dummy slot (0xF header, slot->has_tx == false) with HANDSHAKE
+ *      high and DATA_READY low so the host may still initiate H2E transfers.
+ *    - ESP-IDF's spi_slave driver cannot replace an already-armed dummy DMA
+ *      descriptor in place without a master clock cycle. When esp_spi_write()
+ *      enqueues an E2H frame while an idle dummy slot is armed, it raises
+ *      DATA_READY ("E2H TX pending") to wake the host. The host clocks out
+ *      and discards the armed dummy slot (spi_is_dummy_rx()), whose completion
+ *      triggers queue_next_transaction() to arm the queued E2H frame in the
+ *      next slot.
+ */
+static bool spi_tx_queues_pending(void)
+{
+    return uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_HIGH]) ||
+           uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_MID]) ||
+           uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_LOW]);
+}
+
+/*
+ * Synchronize DATA_READY when arming an idle dummy slot (slot->has_tx == false).
+ *
+ * Clear DATA_READY first, issue a full barrier, and recheck spi_tx_queue[].
+ * Because esp_spi_write() enqueues into spi_tx_queue[] before asserting
+ * DATA_READY, this store-before-load ordering guarantees that a concurrent
+ * producer cannot have its DATA_READY wakeup clobbered while an idle dummy
+ * slot is being prepared.
+ */
+static bool spi_sync_dummy_slot_data_ready(void)
+{
+    spi_gpio_set_low(gpio_data_ready);
+    __sync_synchronize();
+    if (spi_tx_queues_pending()) {
+        spi_gpio_set_high(gpio_data_ready);
+        return true;
+    }
+    return false;
+}
+
 static void IRAM_ATTR spi_post_setup_cb(spi_slave_transaction_t *trans)
 {
-    /* ESP peripheral ready for spi transaction. Set hadnshake line high. */
-    WRITE_PERI_REG(GPIO_OUT_W1TS_REG, (1ULL << gpio_handshake));
+    const spi_slot_t *slot = trans ? (const spi_slot_t *)trans->user : NULL;
+
+    /* Assert data_ready (when this armed slot carries TX data) and handshake
+     * only after spi_intr() has armed the SPI slave DMA peripheral. */
+    if (slot && slot->has_tx) {
+        spi_gpio_set_high(gpio_data_ready);
+    }
+    spi_gpio_set_high(gpio_handshake);
 }
 
 /* Invoked after transaction is sent/received.
@@ -415,7 +517,7 @@ static void IRAM_ATTR spi_post_trans_cb(spi_slave_transaction_t *trans)
 {
 #if !HS_DEASSERT_ON_CS
     /* Clear handshake line */
-    WRITE_PERI_REG(GPIO_OUT_W1TC_REG, (1ULL << gpio_handshake));
+    spi_gpio_set_low(gpio_handshake);
 #endif
 }
 
@@ -627,12 +729,14 @@ static void queue_next_transaction(void)
 
     /* 3. Mark slot in use BEFORE dequeuing TX buffer, guaranteeing resources are held */
     slot->in_use = true;
+    slot->has_tx = false;
     slot->is_raw_tp = false;
     slot->reboot_ack = false;
     slot->raw_tp_run_id = 0;
 
     /* 4. Dequeue next TX buffer if available */
     has_tx = get_next_tx_buffer(&buf_handle);
+    slot->has_tx = has_tx;
     if (has_tx) {
         slot->is_raw_tp = (buf_handle.if_type == ESP_TEST_IF);
         slot->raw_tp_run_id = buf_handle.raw_tp_run_id;
@@ -666,9 +770,6 @@ static void queue_next_transaction(void)
             buf_handle.free_buf_handle(buf_handle.priv_buffer_handle);
             buf_handle.free_buf_handle = NULL;
         }
-
-        /* Current transaction has data for host: assert data_ready */
-        WRITE_PERI_REG(GPIO_OUT_W1TS_REG, (1ULL << gpio_data_ready));
     } else {
         /* No pending frame: prepare dummy header */
         memset(slot->dma_tx, 0, RX_BUF_SIZE);
@@ -677,12 +778,9 @@ static void queue_next_transaction(void)
         dummy_hdr->if_num  = 0xF;
         dummy_hdr->len     = 0;
 
-        /* If no pending frame in slot and no more frames waiting in TX queues, clear data_ready */
-        if (!uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_HIGH]) &&
-            !uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_MID]) &&
-            !uxQueueMessagesWaiting(spi_tx_queue[PRIO_Q_LOW])) {
-            WRITE_PERI_REG(GPIO_OUT_W1TC_REG, (1ULL << gpio_data_ready));
-        }
+        /* Clear data_ready before rechecking TX queues so a concurrent
+         * esp_spi_write() producer cannot lose its wakeup. */
+        (void)spi_sync_dummy_slot_data_ready();
     }
 
     /* 5. Set up transaction */
@@ -828,16 +926,26 @@ static interface_handle_t * esp_spi_init(void)
 #endif
     };
 
-    ESP_LOGI(TAG, "Using SPI MODE %d", g_spi_mode);
+    ESP_LOGI(TAG, "Using SPI MODE %d", CONFIG_ESP_SPI_MODE);
     /* Configuration for the SPI slave interface */
     spi_slave_interface_config_t slvcfg = {
-        .mode = g_spi_mode,
+        .mode = CONFIG_ESP_SPI_MODE,
         .spics_io_num = GPIO_CS,
         .queue_size = SPI_QUEUE_SIZE,
         .flags = 0,
         .post_setup_cb = spi_post_setup_cb,
         .post_trans_cb = spi_post_trans_cb
     };
+
+    ESP_ERROR_CHECK(spi_validate_output_gpio(CONFIG_ESP_SPI_GPIO_HANDSHAKE, "handshake"));
+    ESP_ERROR_CHECK(spi_validate_output_gpio(CONFIG_ESP_SPI_GPIO_DATA_READY, "data_ready"));
+    if (CONFIG_ESP_SPI_GPIO_HANDSHAKE == CONFIG_ESP_SPI_GPIO_DATA_READY) {
+        ESP_LOGE(TAG, "SPI handshake and data_ready cannot share GPIO %d",
+                 CONFIG_ESP_SPI_GPIO_HANDSHAKE);
+        ESP_ERROR_CHECK(ESP_ERR_INVALID_ARG);
+    }
+    gpio_handshake = (uint8_t)CONFIG_ESP_SPI_GPIO_HANDSHAKE;
+    gpio_data_ready = (uint8_t)CONFIG_ESP_SPI_GPIO_DATA_READY;
 
     /* Configuration for the handshake line */
     gpio_config_t io_conf = {
@@ -853,19 +961,20 @@ static interface_handle_t * esp_spi_init(void)
         .pin_bit_mask = (1ULL << gpio_data_ready)
     };
 
-    /* Configure handshake and data_ready lines as output */
-    gpio_config(&io_conf);
-    gpio_config(&io_data_ready_conf);
-    WRITE_PERI_REG(GPIO_OUT_W1TC_REG, (1ULL << gpio_handshake));
-    WRITE_PERI_REG(GPIO_OUT_W1TC_REG, (1ULL << gpio_data_ready));
+    /* Configure handshake and data_ready lines as output, initially low */
+    spi_gpio_set_low(gpio_handshake);
+    spi_gpio_set_low(gpio_data_ready);
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+    ESP_ERROR_CHECK(gpio_config(&io_data_ready_conf));
+    spi_gpio_set_low(gpio_handshake);
+    spi_gpio_set_low(gpio_data_ready);
 
     /* Enable pull-ups on SPI lines
      * so that no rogue pulses when no master is connected
      */
-    gpio_set_pull_mode(GPIO_MOSI, GPIO_PULLUP_ONLY);
-    gpio_set_pull_mode(GPIO_SCLK, GPIO_PULLUP_ONLY);
-    gpio_set_pull_mode(GPIO_CS, GPIO_PULLUP_ONLY);
-
+    ESP_ERROR_CHECK(gpio_set_pull_mode(GPIO_MOSI, GPIO_PULLUP_ONLY));
+    ESP_ERROR_CHECK(gpio_set_pull_mode(GPIO_SCLK, GPIO_PULLUP_ONLY));
+    ESP_ERROR_CHECK(gpio_set_pull_mode(GPIO_CS, GPIO_PULLUP_ONLY));
 
     ESP_LOGI(TAG, "SPI Ctrl:%u mode: %u, GPIOs: MOSI: %u, MISO: %u, CS: %u, CLK: %u HS: %u DR: %u\n",
         ESP_SPI_CONTROLLER, slvcfg.mode,
@@ -902,6 +1011,7 @@ static interface_handle_t * esp_spi_init(void)
         s_slots[i].dma_tx = heap_caps_malloc(RX_BUF_SIZE, MALLOC_CAP_DMA);
         assert(s_slots[i].dma_tx != NULL);
         s_slots[i].in_use = false;
+        s_slots[i].has_tx = false;
         s_slots[i].is_raw_tp = false;
         s_slots[i].raw_tp_run_id = 0;
     }
@@ -1093,8 +1203,11 @@ static int32_t esp_spi_write(interface_handle_t *handle, interface_buffer_handle
         return ESP_FAIL;
     }
 
-    /* indicate waiting data on ready pin */
-    WRITE_PERI_REG(GPIO_OUT_W1TS_REG, (1ULL << gpio_data_ready));
+    /* Signal E2H TX pending on data_ready. If an idle dummy slot (0xF header,
+     * slot->has_tx == false) is currently armed with HANDSHAKE high, this wakes
+     * the host to clock and discard that dummy slot so queue_next_transaction()
+     * can arm this queued frame in the next slot (see spi_post_setup_cb()). */
+    spi_gpio_set_high(gpio_data_ready);
 
     return buf_handle->payload_len;
 }
@@ -1173,6 +1286,7 @@ static void esp_spi_deinit(interface_handle_t *handle)
             s_slots[i].dma_tx = NULL;
         }
         s_slots[i].in_use = false;
+        s_slots[i].has_tx = false;
     }
 
     if (s_emergency_rx_buf) {
