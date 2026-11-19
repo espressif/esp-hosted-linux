@@ -140,6 +140,9 @@ MODULE_PARM_DESC(raw_tp_mode, "Mode chosen to test raw throughput");
 module_param(ota_file, charp, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 MODULE_PARM_DESC(ota_file, "Ota file to update ESP firmware");
 
+module_param_string(fw_version, version_str, sizeof(version_str), 0444);
+MODULE_PARM_DESC(fw_version, "Firmware release reported by the ESP at boot-up");
+
 module_param_cb(radio_service, &radio_service_param_ops, NULL, 0644);
 MODULE_PARM_DESC(radio_service,
 		 "Secondary radio services: none, bt, 154, or bt+154 (runtime selectable)");

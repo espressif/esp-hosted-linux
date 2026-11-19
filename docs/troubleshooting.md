@@ -160,6 +160,15 @@ If activation fails, collect both host `dmesg` and the ESP serial log. Firmware-
 
 When debugging protocol or command failures, start with host driver and ESP firmware from the same repository revision or release. Mixing versions can introduce capability or command-format differences.
 
+Compare the two releases on the running system:
+
+```sh
+cat /sys/module/<esp32-module>/version
+cat /sys/module/<esp32-module>/parameters/fw_version
+```
+
+`fw_version` is the firmware release that the ESP reported at boot-up. It is empty until the ESP has booted, and it does not depend on debugfs.
+
 Save both sides of the boot exchange before changing higher-level Wi-Fi configuration.
 
 ## Unknown SDIO kernel symbols
