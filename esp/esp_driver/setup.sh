@@ -20,6 +20,9 @@ apply_idf_patch_once() {
 
 apply_hosted_idf_patches() {
     apply_idf_patch_once ../lib/rom.patch
+    # Remove esp32c5_sdio_slave.patch once in-tree ESP-IDF is rebased to a revision
+    # that already contains the sdio_slave_hal_recv_start() recv_stop fix.
+    apply_idf_patch_once ../lib/esp32c5_sdio_slave.patch
 
     # The pinned ESP-IDF v6.1 revision does not contain the generic OpenThread
     # custom RCP host transport. If a future IDF already provides it, do not

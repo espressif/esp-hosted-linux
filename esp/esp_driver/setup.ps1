@@ -31,6 +31,9 @@ function Apply-IdfPatchOnce {
 
 function Apply-HostedIdfPatches {
     Apply-IdfPatchOnce "../lib/rom.patch"
+    # Remove esp32c5_sdio_slave.patch once in-tree ESP-IDF is rebased to a revision
+    # that already contains the sdio_slave_hal_recv_start() recv_stop fix.
+    Apply-IdfPatchOnce "../lib/esp32c5_sdio_slave.patch"
 
     $kconfig = "components/openthread/Kconfig"
     if (Select-String -Path $kconfig -SimpleMatch "config OPENTHREAD_RCP_CUSTOM" -Quiet) {
