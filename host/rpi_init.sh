@@ -91,6 +91,41 @@ remove_runtime_overlay()
     fi
 }
 
+rpi_compatible_has()
+{
+    local compat="$1"
+
+    [ -r /proc/device-tree/compatible ] || return 1
+    tr '\0' '\n' </proc/device-tree/compatible | grep -qx "$compat"
+}
+
+rpi_detected()
+{
+    [ -r /proc/device-tree/compatible ] || return 1
+    tr '\0' '\n' </proc/device-tree/compatible | grep -q '^raspberrypi,'
+}
+
+rpi3b_plus_detected()
+{
+    rpi_compatible_has "raspberrypi,3-model-b-plus" &&
+        rpi_compatible_has "brcm,bcm2837"
+}
+
+require_rpi_overlay_host()
+{
+    rpi_detected ||
+        die "Raspberry Pi Device Tree overlays are only supported on Raspberry Pi; describe the ESP SPI node in the target board DT instead"
+}
+
+spi_overlay_name()
+{
+    if rpi3b_plus_detected; then
+        printf '%s\n' esp32-spi-rpi3b-plus
+    else
+        printf '%s\n' esp32-spi
+    fi
+}
+
 esp_sdio_device_present()
 {
     local dev=""
@@ -354,6 +389,7 @@ build_driver()
     fi
 
     if [ "$IF_TYPE" = "spi" ] || [ "$IF_TYPE" = "spi_hd" ]; then
+        require_rpi_overlay_host
         command -v dtc >/dev/null 2>&1 || die "dtc is required for SPI Device Tree setup"
         command -v dtoverlay >/dev/null 2>&1 || die "dtoverlay is required for SPI Device Tree setup"
         make spi-dtbo
@@ -394,6 +430,7 @@ unload_esp_modules()
 setup_spi()
 {
     local -a module_args
+    local overlay_name
 
     require_gpio resetgpio "$SPI_RESETGPIO"
     require_gpio handshakegpio "$SPI_HANDSHAKEGPIO"
@@ -420,7 +457,9 @@ setup_spi()
     # Only runtime SPI overlays are safe to replace here. A boot-time SDIO
     # configuration owns the MMC pinmux (and, with our pwrseq overlay, ESP EN)
     # before this script runs; it cannot be safely repurposed into SPI at runtime.
+    overlay_name="$(spi_overlay_name)"
     remove_runtime_overlay esp32-spi
+    remove_runtime_overlay esp32-spi-rpi3b-plus
     remove_runtime_overlay spidev_disabler
 
     module_args=("raw_tp_mode=$RAW_TP_MODE" "spi_cs_change=$SPI_CS_CHANGE")
@@ -436,8 +475,9 @@ setup_spi()
     run_root dtoverlay -d "$SCRIPT_DIR" spidev_disabler
 
     echo "Applying ESP SPI Device Tree overlay:"
+    echo "  overlay=$overlay_name"
     echo "  reset=$SPI_RESETGPIO handshake=$SPI_HANDSHAKEGPIO data-ready=$SPI_DATAREADYGPIO max-frequency=$SPI_MAX_FREQUENCY"
-    run_root dtoverlay -d "$SCRIPT_DIR/overlays" esp32-spi         "resetgpio=$SPI_RESETGPIO"         "handshakegpio=$SPI_HANDSHAKEGPIO"         "datareadygpio=$SPI_DATAREADYGPIO"         "max_frequency=$SPI_MAX_FREQUENCY"
+    run_root dtoverlay -d "$SCRIPT_DIR/overlays" "$overlay_name"         "resetgpio=$SPI_RESETGPIO"         "handshakegpio=$SPI_HANDSHAKEGPIO"         "datareadygpio=$SPI_DATAREADYGPIO"         "max_frequency=$SPI_MAX_FREQUENCY"
 
     # Normally the driver core binds immediately when the DT child appears.
     # Give it a short chance, then issue one explicit probe for bring-up kernels
@@ -583,6 +623,10 @@ setup_usb()
 
 wlan_init()
 {
+    if [ "$IF_TYPE" = "spi" ] || [ "$IF_TYPE" = "spi_hd" ]; then
+        require_rpi_overlay_host
+    fi
+
     if [ "$IF_TYPE" = "spi" ]; then
         # Refuse before unloading anything when the live SDIO boot pinmux or
         # pwrseq reset GPIO actually overlaps SPI0/control GPIOs. Alternate

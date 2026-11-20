@@ -20,7 +20,7 @@ MODULE_NAME := esp32_$(target)
 
 # Device Tree overlay compiler and generated Raspberry Pi SPI overlays.
 DTC ?= dtc
-SPI_DTBOS := spidev_disabler.dtbo overlays/esp32-spi.dtbo overlays/esp32-spi-hd-rpi5.dtbo
+SPI_DTBOS := spidev_disabler.dtbo overlays/esp32-spi.dtbo overlays/esp32-spi-rpi3b-plus.dtbo overlays/esp32-spi-hd-rpi5.dtbo
 SDIO_DTBOS := overlays/esp32-sdio-pwrseq.dtbo
 
 # Debug and AP support
@@ -91,6 +91,9 @@ spidev_disabler.dtbo: spidev_disabler.dts
 	$(DTC) -@ -I dts -O dtb -o $@ $<
 
 overlays/esp32-spi.dtbo: overlays/esp32-spi.dts
+	$(DTC) -@ -I dts -O dtb -o $@ $<
+
+overlays/esp32-spi-rpi3b-plus.dtbo: overlays/esp32-spi-rpi3b-plus.dts
 	$(DTC) -@ -I dts -O dtb -o $@ $<
 
 overlays/esp32-sdio-pwrseq.dtbo: overlays/esp32-sdio-pwrseq.dts
