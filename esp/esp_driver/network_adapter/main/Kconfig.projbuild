@@ -44,6 +44,18 @@ menu "Example Configuration"
         help
             SPI controller to be used. HSPI->2, VSPI->3
 
+    config ESP_SPI_MODE
+        int "SPI mode"
+        range 0 3
+        default 2
+        help
+            Full-duplex Hosted SPI CPOL/CPHA mode. The Linux Device Tree
+            spi-cpol and spi-cpha properties must match the firmware mode:
+              - Mode 0: CPOL=0, CPHA=0 (neither spi-cpol nor spi-cpha)
+              - Mode 1: CPOL=0, CPHA=1 (spi-cpha)
+              - Mode 2: CPOL=1, CPHA=0 (spi-cpol, default)
+              - Mode 3: CPOL=1, CPHA=1 (spi-cpol and spi-cpha)
+
     config ESP_SPI_GPIO_HANDSHAKE
         int "GPIO pin for handshake"
         default 3 if IDF_TARGET_ESP32C2

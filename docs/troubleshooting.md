@@ -45,12 +45,12 @@ Check:
 - host reset GPIO defined in Device Tree really resets ESP
 - ESP firmware is built for SPI
 - `spidev` does not own the same bus/CS
-- host and ESP use matching SPI mode (mode 2)
+- host and ESP use matching SPI mode (`CONFIG_ESP_SPI_MODE` on firmware matching Linux Device Tree `spi-cpol`/`spi-cpha`; default is mode 2)
 - Handshake and Data Ready GPIOs are described with correct active polarity in Device Tree and generate interrupts
 - wiring is short with a good ground
 - SPI clock is low enough for initial bring-up
 
-The host starts SPI in mode 2 at 10 MHz. After boot information arrives it can switch to the clock advertised by firmware.
+The host starts SPI in the Device Tree-configured mode (default mode 2) at 1 MHz for bootstrap/recovery, then switches to the operating clock advertised by firmware (or configured initial rate / 10 MHz fallback).
 
 If the controller keeps CS asserted longer than ESP expects, check firmware option `ESP_SPI_DEASSERT_HS_ON_CS`.
 

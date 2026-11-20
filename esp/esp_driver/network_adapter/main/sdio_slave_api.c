@@ -956,6 +956,7 @@ esp_err_t send_bootup_event_to_host(uint32_t cap, uint32_t ext_cap)
 
     header->if_type = ESP_INTERNAL_IF;
     header->if_num = 0;
+    header->packet_type = PACKET_TYPE_EVENT;
     header->offset = htole16(sizeof(struct esp_payload_header));
 
     event = (struct esp_internal_bootup_event*)(buf_handle.payload + sizeof(struct esp_payload_header));

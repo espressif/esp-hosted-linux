@@ -23,7 +23,11 @@ The SPI host driver binds to an `espressif,esp32-spi` Device Tree node rather th
 - `compatible = "espressif,esp32-spi"`: matches the Linux SPI driver
 - `reg`: SPI chip-select index on the controller
 - `spi-max-frequency`: controller and board safety maximum frequency (e.g. 30 MHz)
-- `spi-cpol`: standard Device Tree property selecting SPI mode 2 (CPOL=1, CPHA=0)
+- `spi-cpol`, `spi-cpha`: standard Device Tree properties selecting the SPI clock polarity/phase mode; must match firmware `CONFIG_ESP_SPI_MODE` (default Mode 2, `spi-cpol` only):
+  - Mode 0 (`CONFIG_ESP_SPI_MODE=0`): CPOL=0, CPHA=0 (neither `spi-cpol` nor `spi-cpha`)
+  - Mode 1 (`CONFIG_ESP_SPI_MODE=1`): CPOL=0, CPHA=1 (`spi-cpha`)
+  - Mode 2 (`CONFIG_ESP_SPI_MODE=2`, default): CPOL=1, CPHA=0 (`spi-cpol`)
+  - Mode 3 (`CONFIG_ESP_SPI_MODE=3`): CPOL=1, CPHA=1 (`spi-cpol` and `spi-cpha`)
 - `reset-gpios`: optional GPIO descriptor for ESP reset/enable (active-low); preferred when the board exposes EN/reset
 - `handshake-gpios`: required GPIO descriptor for Handshake interrupt input (active-high)
 - `data-ready-gpios`: required GPIO descriptor for Data Ready interrupt input (active-high)
@@ -50,18 +54,21 @@ The driver queries these pins via the standard Linux GPIO descriptor API and req
 
 ## Transfer size, mode, and clock
 
-Host-side framing uses `SPI_BUF_SIZE = 1600` bytes and SPI mode 2. Hosted frames include the 12-byte common header plus any alignment padding.
+Host-side framing uses `SPI_BUF_SIZE = 1600` bytes and defaults to SPI mode 2 (`CONFIG_ESP_SPI_MODE=2` on firmware paired with `spi-cpol` in Device Tree). Modes `0`–`3` are configurable when supported by both controllers and matched identically via Device Tree `spi-cpol`/`spi-cpha` and firmware `CONFIG_ESP_SPI_MODE`; Mode 2 is the default. Hosted frames include the 12-byte common header plus any alignment padding.
 
 Linux clocks the boot-first/recovery exchange at a conservative 1 MHz. After a valid boot event, firmware's optional clock TLV selects the steady-state SPI rate subject to the Device Tree/protocol maximum. Compatible older firmware that omits the TLV falls back to the configured `clockspeed` value or the historical 10 MHz default.
 
 ## Transfer sequence
 
 1. ESP prepares RX storage for the next full-duplex transfer.
-2. If ESP has data, it places a packet in TX and asserts Data Ready.
-3. ESP asserts Handshake when a transfer can start.
-4. Linux clocks a full-duplex transaction when either side has work.
-5. Both sides inspect the hosted header. A zero payload length means no packet in that direction.
-6. ESP prepares the next transaction.
+2. When the armed SPI slot carries an ESP-to-host (E2H) packet (including the initial boot up event), ESP asserts both **Data Ready** and **Handshake** from `spi_post_setup_cb()` only after the slot's DMA descriptor is loaded into the SPI peripheral.
+3. When ESP has no E2H packet at slot-arming time, it arms an idle dummy slot (`if_type = 0xF, if_num = 0xF`), clears **Data Ready** (rechecking the TX queues afterwards so a concurrent producer cannot lose its wakeup), and asserts **Handshake** so Linux can still initiate host-to-ESP (H2E) transfers.
+4. If an E2H packet is enqueued via `esp_spi_write()` while an idle dummy slot is already armed, ESP asserts **Data Ready** ("TX pending behind armed dummy"). Linux clocks and discards the armed `0xF` dummy slot, which advances `queue_next_transaction()` to arm the queued E2H packet in the next slot.
+5. Both sides inspect the received header:
+   - Linux treats only the canonical `if_type = 0xF, if_num = 0xF` dummy header (or an all-zero frame when **Data Ready** was not asserted) as idle from ESP; any other zero-length RX frame is dropped as a protocol error.
+   - ESP treats an all-zero H2E buffer (`len == 0`) from Linux as idle when the host only clocked the bus to service an E2H frame.
+6. ESP deasserts **Handshake** for the completed slot, prepares the next transaction, and asserts **Handshake** again only after that next DMA slot is armed.
+7. Linux does not treat a lingering high **Handshake** level from the just-completed slot as permission to clock again. Immediate requeue requires a fresh Handshake rising-edge generation; otherwise the Handshake interrupt for the newly armed slot schedules the next transfer. This prevents the master from clocking the bus in the interval between slave transaction completion and next-slot DMA setup.
 
 Linux keeps control traffic, hosted Bluetooth HCI, OpenThread RCP, and normal Wi-Fi data in the ESP-Hosted priority queues before sending them over SPI.
 

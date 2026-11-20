@@ -2009,7 +2009,8 @@ static bool esp_internal_checksum_required(const u8 *frame, u16 len,
 		tag_len = pos[1];
 		if (tag_len > left - 2)
 			break;
-		if (pos[0] == ESP_BOOTUP_CAPABILITY && tag_len == 1)
+		if (pos[0] == ESP_BOOTUP_CAPABILITY &&
+		    (tag_len == 1 || tag_len == 2 || tag_len == 4))
 			return (pos[2] & ESP_CHECKSUM_ENABLED) || wire_checksum != 0;
 		pos += tag_len + 2;
 		left -= tag_len + 2;
