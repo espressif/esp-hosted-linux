@@ -28,6 +28,7 @@ The SPI host driver binds to an `espressif,esp32-spi` Device Tree node rather th
   - Mode 1 (`CONFIG_ESP_SPI_MODE=1`): CPOL=0, CPHA=1 (`spi-cpha`)
   - Mode 2 (`CONFIG_ESP_SPI_MODE=2`, default): CPOL=1, CPHA=0 (`spi-cpol`)
   - Mode 3 (`CONFIG_ESP_SPI_MODE=3`): CPOL=1, CPHA=1 (`spi-cpol` and `spi-cpha`)
+- chip select: see [Chip select polarity](#chip-select-polarity) below
 - `reset-gpios`: optional GPIO descriptor for ESP reset/enable (active-low); preferred when the board exposes EN/reset
 - `handshake-gpios`: required GPIO descriptor for Handshake interrupt input (active-high)
 - `data-ready-gpios`: required GPIO descriptor for Data Ready interrupt input (active-high)
@@ -49,6 +50,19 @@ Example Device Tree snippet:
     };
 };
 ```
+
+### Chip select polarity
+
+ESP-Hosted firmware uses the [ESP-IDF SPI Slave driver](https://docs.espressif.com/projects/esp-idf/en/stable/api-reference/peripherals/spi_slave.html) on every supported SoC. The same SPI Slave guide is also published per chip (for example `.../stable/esp32c6/api-reference/peripherals/spi_slave.html`); chip-specific pages add target notes, but CS timing follows the same assert/idle model. ESP-IDF documents the usual SPI convention: a transaction starts when the **host asserts** chip select and ends when CS returns to **idle** (de-assertion). The `peripherals/spi_slave/receiver` example states that the master begins a transfer **by pulling CS low** and clocking SCLK; the example also enables an internal pull-up on the CS GPIO so the line stays **high when unselected**.
+
+Hosted `network_adapter` firmware configures `spi_slave_interface_config_t.spics_io_num` and does **not** flip CS polarity in software. The ESP slave therefore expects the Linux master to drive **active-low CS on the wire**: idle high, asserted low while clocking.
+
+Linux Device Tree must match that electrical behavior:
+
+- Do **not** set `spi-cs-high` on the ESP node (the Hosted driver rejects it).
+- When chip select is GPIO-backed, describe the line with the platform **active-low** (inverted) GPIO flag so CS idles high and drives low during a transfer. On Raspberry Pi overlays this is `cs-gpios = <&gpio N 1>` (`GPIO_ACTIVE_LOW`).
+
+The SPI core may set an internal `SPI_CS_HIGH` mode bit for GPIO-backed CS while gpiolib performs the electrical inversion. That is **not** the same as declaring active-high CS in Device Tree via `spi-cs-high`.
 
 The driver queries these pins via the standard Linux GPIO descriptor API and requests edge-triggered interrupts for Handshake and Data Ready based on the descriptor polarities. When `reset-gpios` is present, recovery can perform an authoritative physical ESP reset. When it is absent, matching firmware uses the sequence-ACKed `CMD_HOST_REBOOT` control transaction; the host accepts that reboot only after the ACK has crossed the SPI wire.
 
