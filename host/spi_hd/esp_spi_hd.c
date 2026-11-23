@@ -2377,6 +2377,12 @@ static int spihd_hw_reset(void)
 	gpiod_set_value_cansleep(spi_hd.reset_gpio, 1);
 	usleep_range(2000, 3000);
 	gpiod_set_value_cansleep(spi_hd.reset_gpio, 0);
+	ret = gpiod_direction_input(spi_hd.reset_gpio);
+	if (ret) {
+		esp_err("Failed to release SPI-HD reset GPIO as input: %d\n", ret);
+		return ret;
+	}
+	spi_hd.reset_gpio_driven = false;
 	msleep(300);
 	return 0;
 }

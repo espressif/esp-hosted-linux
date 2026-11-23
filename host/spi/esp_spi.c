@@ -469,6 +469,12 @@ static int esp_spi_pulse_reset_gpio_locked(struct esp_spi_context *context,
 	gpiod_set_value_cansleep(context->reset_gpio, 1);
 	usleep_range(200, 500);
 	gpiod_set_value_cansleep(context->reset_gpio, 0);
+	ret = gpiod_direction_input(context->reset_gpio);
+	if (ret) {
+		esp_err("Failed to release SPI reset GPIO as input: %d\n", ret);
+		return ret;
+	}
+	context->reset_gpio_driven = false;
 	if (settle_ms)
 		msleep(settle_ms);
 	return 0;
