@@ -976,6 +976,11 @@ static uint32_t get_extended_capabilities(void)
 {
     uint32_t cap = 0;
 
+#if CONFIG_SOC_WIFI_SUPPORTED
+    cap |= ESP_EXT_CAP_SCAN_IE;
+    ESP_LOGI(TAG, "- Probe-request IEs for host scans");
+#endif
+
 #if defined(CONFIG_ESP_HOSTED_RCP) || \
     (defined(CONFIG_BT_ENABLED) && defined(BLUETOOTH_HCI))
     cap |= ESP_EXT_CAP_RADIO_SERVICE_CTRL;

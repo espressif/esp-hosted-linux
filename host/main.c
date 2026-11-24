@@ -669,6 +669,8 @@ static void print_ext_capabilities(u32 cap)
 		esp_info("\t   - legacy IEEE 802.15.4 RCP active at boot\n");
 	if (cap & ESP_EXT_CAP_RCP_AVAILABLE)
 		esp_info("\t   - IEEE 802.15.4 RCP available for runtime activation\n");
+	if (cap & ESP_EXT_CAP_SCAN_IE)
+		esp_info("\t * Probe-request IEs for host scans\n");
 }
 
 static int init_bt(struct esp_adapter *adapter)
