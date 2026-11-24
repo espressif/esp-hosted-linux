@@ -12,7 +12,14 @@ the production source of truth for:
 - `data-ready-gpios` (required)
 
 The Raspberry Pi example preserves the historical ESP-Hosted wiring defaults:
-BCM GPIO6 for reset, GPIO22 for handshake, and GPIO27 for data-ready. The ESP SPI chip select remains electrically active-low; the overlay therefore does not request `spi-cs-high`. Linux may still use its internal `SPI_CS_HIGH` representation for GPIO-backed CS handling, which is distinct from requesting active-high CS in Device Tree. The
+BCM GPIO6 for reset, GPIO22 for handshake, and GPIO27 for data-ready.
+ESP-IDF SPI Slave expects standard active-low CS on the wire (idle high,
+asserted low when the master clocks a transfer). ESP-Hosted firmware does not
+invert CS in software, so these overlays do not request `spi-cs-high`. When an
+overlay uses GPIO-backed CS, the `cs-gpios` entry carries the active-low
+(inverted) GPIO flag. Linux may still use its internal `SPI_CS_HIGH`
+representation for GPIO-backed CS handling, which is distinct from requesting
+active-high CS in Device Tree. The
 overlay requests input directions (with a pull-up on reset) as part of the
 device pinctrl state. The driver acquires reset through the GPIO descriptor API
 as an input and switches it to output only for the deliberate reset pulse after
