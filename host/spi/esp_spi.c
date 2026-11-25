@@ -1650,6 +1650,25 @@ static int esp_spi_probe(struct spi_device *spi)
 		esp_err("Failed to get reset GPIO: %d\n", status);
 		goto err_clear_dev;
 	}
+	/*
+	 * A board can keep the ESP off until the host enables it, with a
+	 * pull-down on EN. The released (input) line then holds the ESP in
+	 * reset, and no boot event can come: enable the ESP now instead of
+	 * after the boot event timeout.
+	 */
+	if (spi_context.reset_gpio &&
+	    gpiod_get_value_cansleep(spi_context.reset_gpio) == 1) {
+		mutex_lock(&spi_reset_lock);
+		status = gpiod_direction_output(spi_context.reset_gpio, 0);
+		if (!status)
+			spi_context.reset_gpio_driven = true;
+		mutex_unlock(&spi_reset_lock);
+		if (status) {
+			esp_err("Failed to release the reset GPIO: %d\n", status);
+			goto err_clear_dev;
+		}
+		esp_info("ESP held in reset by its EN line, releasing it\n");
+	}
 	spi_context.handshake_gpio =
 		devm_gpiod_get(&spi->dev, "handshake", GPIOD_IN);
 	if (IS_ERR(spi_context.handshake_gpio)) {
