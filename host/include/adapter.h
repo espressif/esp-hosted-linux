@@ -20,6 +20,7 @@
 /* ESP Payload Header Flags */
 #define MORE_FRAGMENT                   (1 << 0)
 #define MAX_SSID_LEN                    32
+#define ESP_SCAN_IE_MAX_LEN             512
 #define OTA_CHUNK_SIZE                  1016
 
 #define MAX_MULTICAST_ADDR_COUNT        8
@@ -149,6 +150,8 @@ enum ESP_EXT_CAPABILITIES {
 	ESP_EXT_CAP_RADIO_SERVICE_CTRL = (1u << 14),
 	/* RCP implementation is compiled and can be activated by the runtime selector. */
 	ESP_EXT_CAP_RCP_AVAILABLE = (1u << 15),
+	/* Firmware can append host-provided IEs to active-scan probe requests. */
+	ESP_EXT_CAP_SCAN_IE = (1u << 16),
 };
 
 #define ESP_EXT_CAP_RCP_ANY (ESP_EXT_CAP_RCP | ESP_EXT_CAP_RCP_AVAILABLE)
@@ -309,7 +312,9 @@ struct scan_request {
 	uint16_t   duration;
 	char       ssid[MAX_SSID_LEN+1];
 	uint8_t    channel;
-	uint8_t    pad[2];
+	/* Reuses the two reserved bytes so the fixed wire prefix stays unchanged. */
+	uint16_t   ie_len;
+	uint8_t    ie[];
 } __packed;
 
 struct cmd_config_mac_address {

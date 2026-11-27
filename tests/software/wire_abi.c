@@ -19,6 +19,13 @@ _Static_assert(offsetof(struct esp_payload_header, offset) == 6, "wire offset fi
 _Static_assert(offsetof(struct esp_payload_header, checksum) == 8, "wire checksum field moved");
 _Static_assert(ESP_MAX_OFFSET_SIZE == 16, "maximum DMA padding changed");
 _Static_assert(MAX_PRIORITY_QUEUES == 3, "wire priority count changed");
+_Static_assert(offsetof(struct scan_request, ie_len) == 50,
+               "scan IE length no longer occupies the reserved wire bytes");
+_Static_assert(offsetof(struct scan_request, ie) == 52,
+               "scan request wire prefix changed");
+_Static_assert(sizeof(struct scan_request) == 52,
+               "scan request wire prefix size changed");
+_Static_assert(ESP_SCAN_IE_MAX_LEN == 512, "scan IE ABI limit changed");
 
 static uint16_t checksum_reference(const uint8_t *p, size_t len)
 {

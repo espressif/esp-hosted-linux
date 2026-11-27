@@ -3375,7 +3375,7 @@ int internal_scan_request(struct esp_wifi_device *priv, char *ssid,
 
 int cmd_scan_request(struct esp_wifi_device *priv, struct cfg80211_scan_request *request)
 {
-	u16 cmd_len;
+	size_t cmd_len;
 	struct command_node *cmd_node = NULL;
 	struct scan_request *scan_req;
 	int ret;
@@ -3394,8 +3394,13 @@ int cmd_scan_request(struct esp_wifi_device *priv, struct cfg80211_scan_request 
 		return -EOPNOTSUPP;
 	}
 
-	if (request->ie && request->ie_len) {
-		esp_err("Scan IEs not supported\n");
+	if (request->ie_len > ESP_SCAN_IE_MAX_LEN || (request->ie_len && !request->ie)) {
+		esp_err("Invalid scan IE length: %zu\n", request->ie_len);
+		return -EINVAL;
+	}
+	if (request->ie_len &&
+	    !(priv->adapter->ext_capabilities & ESP_EXT_CAP_SCAN_IE)) {
+		esp_err("Scan IEs not supported by firmware\n");
 		return -EOPNOTSUPP;
 	}
 
@@ -3430,7 +3435,9 @@ int cmd_scan_request(struct esp_wifi_device *priv, struct cfg80211_scan_request 
 		return -EBUSY;
 	}
 
-	cmd_len = sizeof(struct scan_request);
+	if (esp_size_add_overflow(sizeof(struct scan_request),
+				  request->ie_len, &cmd_len))
+		return -EOVERFLOW;
 
 	cmd_node = prepare_command_request(priv->adapter, CMD_SCAN_REQUEST, cmd_len);
 
@@ -3456,6 +3463,10 @@ int cmd_scan_request(struct esp_wifi_device *priv, struct cfg80211_scan_request 
 		scan_req->channel = request->channels[0]->hw_value;
 	else
 		scan_req->channel = 0;
+
+	scan_req->ie_len = esp_wire_cpu_to_le16((u16)request->ie_len);
+	if (request->ie_len)
+		memcpy(scan_req->ie, request->ie, request->ie_len);
 
 	priv->scan_in_progress = true;
 	priv->request = request;

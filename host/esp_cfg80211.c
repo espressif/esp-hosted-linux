@@ -2853,10 +2853,12 @@ int esp_add_wiphy(struct esp_adapter *adapter)
 		wiphy->n_cipher_suites = ARRAY_SIZE(esp_cipher_suites);
 	}
 
-	/* ESP scan supports at most 1 SSID, no probe request IEs, and no scheduled scans */
+	/* ESP scan supports at most one SSID and no scheduled scans. */
 	wiphy->max_scan_ssids = 1;
 	/*	wiphy->max_match_sets = 10;*/
-	wiphy->max_scan_ie_len = 0;
+	wiphy->max_scan_ie_len =
+		(adapter->ext_capabilities & ESP_EXT_CAP_SCAN_IE) ?
+		ESP_SCAN_IE_MAX_LEN : 0;
 	wiphy->max_sched_scan_ssids = 0;
 	wiphy->signal_type = CFG80211_SIGNAL_TYPE_MBM;
 #ifdef CONFIG_PM

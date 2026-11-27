@@ -227,6 +227,12 @@ static void hosted_scan_abort(void)
         esp_err_t ret = esp_wifi_scan_stop();
         if (ret != ESP_OK)
             ESP_LOGW(TAG, "scan abort ret=%d; waiting for any outstanding completion", ret);
+
+        /* Scan cancellation need not deliver SCAN_DONE. Clear probe IEs
+         * while Wi-Fi is still running, before hosted_wifi_stop(). */
+        ret = esp_wifi_unset_appie_internal(WIFI_APPIE_PROBEREQ);
+        if (ret != ESP_OK)
+            ESP_LOGW(TAG, "scan abort probe-request IE cleanup returned %d", ret);
     }
 }
 
@@ -1610,6 +1616,10 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                 clear_ret != ESP_ERR_WIFI_NOT_INIT)
                 ESP_LOGW(TAG, "scan AP-list cleanup returned %d", clear_ret);
 
+            clear_ret = esp_wifi_unset_appie_internal(WIFI_APPIE_PROBEREQ);
+            if (clear_ret != ESP_OK)
+                ESP_LOGD(TAG, "scan probe-request IE cleanup returned %d", clear_ret);
+
             portENTER_CRITICAL(&s_scan_lock);
             if (s_scan_drain_pending) {
                 s_scan_drain_pending = false;
@@ -2117,6 +2127,7 @@ int process_start_scan(uint8_t if_type, uint8_t *payload, uint16_t payload_len)
     esp_err_t ret = ESP_OK;
     uint8_t cmd_status = CMD_RESPONSE_SUCCESS;
     struct scan_request *scan_req;
+    uint16_t scan_ie_len;
     bool config_present = false;
     wifi_mode_t current_mode = WIFI_MODE_NULL;
 
@@ -2127,6 +2138,14 @@ int process_start_scan(uint8_t if_type, uint8_t *payload, uint16_t payload_len)
     }
 
     scan_req = (struct scan_request *) payload;
+    scan_ie_len = le16toh(scan_req->ie_len);
+    if (scan_ie_len > ESP_SCAN_IE_MAX_LEN ||
+        !cmd_flex_len_valid(payload_len, offsetof(struct scan_request, ie), scan_ie_len)) {
+        ESP_LOGE(TAG, "SCAN_REJECT invalid IE length payload=%u ie=%u",
+                 payload_len, scan_ie_len);
+        return send_command_resp(if_type, CMD_SCAN_REQUEST,
+                                 CMD_RESPONSE_INVALID, NULL, 0);
+    }
 
     /* Keep one explicit scan owner. A second scan can abort the first
      * and deliver its completion asynchronously. */
@@ -2185,11 +2204,6 @@ int process_start_scan(uint8_t if_type, uint8_t *payload, uint16_t payload_len)
     if (s_wifi_started && !s_wifi_stop_in_progress &&
         esp_wifi_get_mode(&current_mode) == ESP_OK &&
         current_mode != WIFI_MODE_NULL) {
-        /* Register to receive probe response and beacon frames */
-        type = (1 << WLAN_FC_STYPE_BEACON) | (1 << WLAN_FC_STYPE_PROBE_RESP) |
-               (1 << WLAN_FC_STYPE_ASSOC_RESP) | (1 << WLAN_FC_STYPE_REASSOC_RESP);
-        esp_wifi_register_mgmt_frame_internal(type, 0);
-
         /* Publish scan ownership before starting async Wi-Fi work so an
          * early SCAN_DONE cannot race a late flag write. */
         portENTER_CRITICAL(&s_scan_lock);
@@ -2204,6 +2218,32 @@ int process_start_scan(uint8_t if_type, uint8_t *payload, uint16_t payload_len)
         }
         s_scan_in_progress = true;
         portEXIT_CRITICAL(&s_scan_lock);
+
+        /* This app-IE slot applies to normal STA probe requests only. WPS
+         * uses WIFI_APPIE_WPS_PR, so the two owners do not overlap. */
+        ret = esp_wifi_unset_appie_internal(WIFI_APPIE_PROBEREQ);
+        if (ret != ESP_OK)
+            ESP_LOGD(TAG, "scan probe-request IE reset returned %d", ret);
+        if (scan_ie_len) {
+            ret = esp_wifi_set_appie_internal(WIFI_APPIE_PROBEREQ,
+                                              scan_req->ie, scan_ie_len, 0);
+            if (ret != ESP_OK) {
+                portENTER_CRITICAL(&s_scan_lock);
+                s_scan_in_progress = false;
+                portEXIT_CRITICAL(&s_scan_lock);
+                ESP_LOGE(TAG, "Failed to set scan probe-request IE len=%u ret=%d",
+                         scan_ie_len, ret);
+                cmd_status = CMD_RESPONSE_FAIL;
+                goto scan_cleanup;
+            }
+        }
+
+        /* Register to receive probe response and beacon frames only after
+         * the scan has been admitted and its probe-request IEs are ready. */
+        type = (1 << WLAN_FC_STYPE_BEACON) | (1 << WLAN_FC_STYPE_PROBE_RESP) |
+               (1 << WLAN_FC_STYPE_ASSOC_RESP) | (1 << WLAN_FC_STYPE_REASSOC_RESP);
+        esp_wifi_register_mgmt_frame_internal(type, 0);
+
         if (config_present) {
             ret = esp_wifi_scan_start(&params, false);
         } else {
@@ -2224,6 +2264,10 @@ int process_start_scan(uint8_t if_type, uint8_t *payload, uint16_t payload_len)
         ESP_LOGI(TAG, "Scan not permitted: Wi-Fi not started or mode NULL");
         cmd_status = CMD_RESPONSE_FAIL;
     }
+
+scan_cleanup:
+    if (cmd_status != CMD_RESPONSE_SUCCESS)
+        esp_wifi_unset_appie_internal(WIFI_APPIE_PROBEREQ);
 
     if (params.ssid) {
         free(params.ssid);
