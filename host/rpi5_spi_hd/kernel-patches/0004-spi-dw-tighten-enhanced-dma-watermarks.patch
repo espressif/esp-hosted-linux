@@ -1,0 +1,148 @@
+spi: dw: service byte-wide enhanced DMA before FIFO starvation
+
+Enhanced quad transfers consume or produce wire data four times faster
+than a single-lane transfer at the same SCLK.  With an 8-bit data frame
+the generic half-FIFO DMA watermarks leave only about half of a 31-entry
+FIFO as service latency.  At higher quad clocks that can let TX drain
+before the DMA engine refills it or RX overflow before the DMA engine
+starts draining it.
+
+This is a controller scheduling problem; protocol drivers must not need
+to change bits_per_word merely to enlarge the effective FIFO or reduce
+DMA request latency.
+
+For enhanced multi-lane TX DMA, use an eight-entry peripheral burst,
+including native 32-bit words. Keep RX changes byte-wide only.  Trigger TX DMA when eight FIFO entries are free and RX
+DMA when eight entries are present.  Keep the existing controller-wide
+burst settings for ordinary SPI and wider enhanced data frames.
+
+Cap the burst at the FIFO's remaining capacity after reserving enhanced
+control entries for transmit. A short FIFO must never underflow the
+DMA watermarks.
+
+The policy is limited to enhanced multi-lane TX, plus byte-wide RX,
+where the controller has already accepted the frame shape.  Restore the
+normal thresholds after the transfer.
+
+diff --git a/drivers/spi/spi-dw-dma.c b/drivers/spi/spi-dw-dma.c
+--- a/drivers/spi/spi-dw-dma.c
++++ b/drivers/spi/spi-dw-dma.c
+@@ -330,14 +330,46 @@ static void dw_spi_dma_tx_done(void *arg)
+ 	complete(&dws->dma_completion);
+ }
+ 
+-static int dw_spi_dma_config_tx(struct dw_spi *dws)
++static unsigned int dw_spi_dma_xfer_burst(struct dw_spi *dws,
++					  struct spi_transfer *xfer,
++					  bool tx)
++{
++	unsigned int burst = tx ? dws->txburst : dws->rxburst;
++	u8 nbits = tx ? xfer->tx_nbits : xfer->rx_nbits;
++
++	/*
++	 * Multi-lane frames consume FIFO entries much faster than their
++	 * SCLK suggests.  Request DMA service early instead of requiring a
++	 * peripheral driver to add controller-specific scheduling workarounds.
++	 */
++	if (dws->enh.ctrl_len && nbits > SPI_NBITS_SINGLE &&
++	    (tx || dws->n_bytes == 1)) {
++		unsigned int available = dws->fifo_len;
++
++		/* Control entries occupy the TX FIFO while the enhanced
++		 * frame is being primed. Never request more DMA beats than
++		 * the FIFO can hold on a smaller DesignWare integration.
++		 */
++		if (tx) {
++			if (available <= dws->enh.ctrl_len)
++				return 1;
++			available -= dws->enh.ctrl_len;
++		}
++		burst = min(burst, min(8U, available));
++	}
++
++	return max(burst, 1U);
++}
++
++static int dw_spi_dma_config_tx(struct dw_spi *dws, struct spi_transfer *xfer)
+ {
+ 	struct dma_slave_config txconf;
++	unsigned int burst = dw_spi_dma_xfer_burst(dws, xfer, true);
+ 
+ 	memset(&txconf, 0, sizeof(txconf));
+ 	txconf.direction = DMA_MEM_TO_DEV;
+ 	txconf.dst_addr = dws->dma_addr;
+-	txconf.dst_maxburst = dws->txburst;
++	txconf.dst_maxburst = burst;
+ 	txconf.dst_addr_width = dw_spi_dma_convert_width(dws->n_bytes);
+ 	txconf.device_fc = false;
+ 
+@@ -430,14 +462,15 @@ static void dw_spi_dma_rx_done(void *arg)
+ 	complete(&dws->dma_completion);
+ }
+ 
+-static int dw_spi_dma_config_rx(struct dw_spi *dws)
++static int dw_spi_dma_config_rx(struct dw_spi *dws, struct spi_transfer *xfer)
+ {
+ 	struct dma_slave_config rxconf;
++	unsigned int burst = dw_spi_dma_xfer_burst(dws, xfer, false);
+ 
+ 	memset(&rxconf, 0, sizeof(rxconf));
+ 	rxconf.direction = DMA_DEV_TO_MEM;
+ 	rxconf.src_addr = dws->dma_addr;
+-	rxconf.src_maxburst = dws->rxburst;
++	rxconf.src_maxburst = burst;
+ 	rxconf.src_addr_width = dw_spi_dma_convert_width(dws->n_bytes);
+ 	rxconf.device_fc = false;
+ 
+@@ -486,17 +519,35 @@ static int dw_spi_dma_setup(struct dw_spi *dws, struct spi_transfer *xfer)
+ 	u16 imr, dma_ctrl;
++	unsigned int burst;
+ 	int ret;
+ 
+ 	/* Setup DMA channels */
+ 	if (xfer->tx_buf) {
+-		ret = dw_spi_dma_config_tx(dws);
++		ret = dw_spi_dma_config_tx(dws, xfer);
+ 		if (ret)
+ 			return ret;
+ 	}
+ 
+ 	if (xfer->rx_buf) {
+-		ret = dw_spi_dma_config_rx(dws);
++		ret = dw_spi_dma_config_rx(dws, xfer);
+ 		if (ret)
+ 			return ret;
+ 	}
+ 
++	/*
++	 * Do not modify controller FIFO thresholds before both DMA channel
++	 * configurations have succeeded: a failed dma_setup() must not leave
++	 * enhanced-QIO thresholds active for the next SPI client.
++	 */
++	if (dws->enh.ctrl_len) {
++		if (xfer->tx_buf && xfer->tx_nbits > SPI_NBITS_SINGLE) {
++			burst = dw_spi_dma_xfer_burst(dws, xfer, true);
++			dw_writel(dws, DW_SPI_DMATDLR, dws->fifo_len - burst);
++		}
++		if (dws->n_bytes == 1 && xfer->rx_buf &&
++		    xfer->rx_nbits > SPI_NBITS_SINGLE) {
++			burst = dw_spi_dma_xfer_burst(dws, xfer, false);
++			dw_writel(dws, DW_SPI_DMARDLR, burst - 1);
++		}
++	}
++
+ 	/* Set the DMA handshaking interface */
+@@ -795,10 +846,13 @@ err_clear_dmac:
+ 	}
+ 	if (quad_dma)
+ 		dw_writel(dws, DW_SPI_DMATDLR, dws->txburst);
++	if (xfer->rx_buf && xfer->rx_nbits > SPI_NBITS_SINGLE &&
++	    dws->n_bytes == 1)
++		dw_writel(dws, DW_SPI_DMARDLR, dws->rxburst - 1);
+ 	if (tx_sg_trimmed) {
+ 		sg_dma_address(tx_sg) = tx_trimmed_addr;
+ 		sg_dma_len(tx_sg) = tx_trimmed_len;
+ 	}
+ 
+ 	return ret;
+ }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract four production SPI-HD batch/ACK functions; compile and run C oracle."""
+"""Extract production SPI-HD capability and ACK functions; compile and run C oracle."""
 import argparse
 import os
 from pathlib import Path
@@ -7,15 +7,14 @@ import shlex
 import subprocess
 import sys
 
-from run_usb_parser import extract_function
+from run_usb_parser import extract_function, extract_typed_function
 
 ROOT = Path(__file__).resolve().parents[3]
 SOURCE = ROOT / "host/spi_hd/esp_spi_hd.c"
 HARNESS = ROOT / "tests/software/spi_hd_batch_harness.c"
 FUNCTIONS = (
+    "spihd_batch_fits",
     "spihd_combined_wrdma",
-    "spihd_combined_rddma",
-    "spihd_batch_rx_ack",
     "spihd_rx_ack_required",
 )
 
@@ -31,7 +30,14 @@ def main():
     marker = "/* GENERATED_SPIDH_FUNCTIONS */"
     if harness.count(marker) != 1:
         raise ValueError("SPI-HD harness marker changed")
-    harness = harness.replace(marker, "\n\n".join(extract_function(code, n) for n in FUNCTIONS))
+    extracted = [extract_function(code, n) for n in FUNCTIONS]
+    extracted.append(extract_typed_function(code, "spihd_effective_tx_segment", "u32"))
+    extracted.append(extract_typed_function(code, "spihd_select_data_lines", "u8"))
+    extracted.append(extract_typed_function(code, "spihd_phase_lane_supported", "bool"))
+    extracted.append(extract_typed_function(code, "spihd_validate_rx_batch", "int"))
+    extracted.append(extract_typed_function(code, "spihd_credit_delta", "u32"))
+    extracted.append(extract_typed_function(code, "spihd_payload_lines", "u8"))
+    harness = harness.replace(marker, "\n\n".join(extracted))
     source = out / "spi-hd-production-ack.c"
     source.write_text(harness)
     exe = out / "spi-hd-production-ack"
@@ -40,7 +46,8 @@ def main():
         raise ValueError("unsupported sanitizer")
     cmd = shlex.split(os.environ.get("CC", "gcc")) + [
         "-std=c11", "-g", "-O1", "-Wall", "-Wextra", "-Werror",
-        "-fno-omit-frame-pointer", str(source), "-o", str(exe),
+        "-fno-omit-frame-pointer", "-I", str(ROOT / "host/include"),
+        str(source), "-o", str(exe),
     ]
     if sanitizer != "none":
         cmd += ["-fsanitize=" + sanitizer]

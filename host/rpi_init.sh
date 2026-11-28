@@ -21,12 +21,6 @@ SPI_DATAREADYGPIO="27"
 SPI_DATAREADYGPIO_SET="0"
 SPI_MAX_FREQUENCY="30000000"
 SPI_CS_CHANGE="0"
-SPI_HD_TX_SEGMENT="32"
-SPI_HD_FORCE_SIO="0"
-SPI_HD_FORCE_SIO_H2E="0"
-SPI_HD_FORCE_SIO_E2H="0"
-SPI_HD_FORCE_SIO_WREND="0"
-SPI_HD_QIO_ADDR_SINGLE="1"
 
 if [ "$(id -u)" -eq 0 ]; then
     SUDO=()
@@ -522,17 +516,13 @@ setup_spi_hd()
     [ "$SPI_MAX_FREQUENCY" -le 40000000 ] ||
         die "max_frequency exceeds the initial SPI-HD 40 MHz qualification limit"
 
-    case "$SPI_HD_TX_SEGMENT" in
-        ''|*[!0-9]*) die "spi_hd_tx_segment must be an integer in bytes" ;;
-    esac
-    [ "$SPI_HD_TX_SEGMENT" -ge 4 ] ||
-        die "spi_hd_tx_segment must be at least 4 bytes"
 
     remove_runtime_overlay esp32-spi-hd-rpi5
     remove_runtime_overlay esp32-spi
     remove_runtime_overlay spidev_disabler
 
-    module_args=("raw_tp_mode=$RAW_TP_MODE" "spi_hd_tx_segment=$SPI_HD_TX_SEGMENT" "spi_hd_force_sio=$SPI_HD_FORCE_SIO" "spi_hd_force_sio_h2e=$SPI_HD_FORCE_SIO_H2E" "spi_hd_force_sio_e2h=$SPI_HD_FORCE_SIO_E2H" "spi_hd_force_sio_wrend=$SPI_HD_FORCE_SIO_WREND" "spi_hd_qio_addr_single=$SPI_HD_QIO_ADDR_SINGLE")
+    module_args=()
+    [ "$RAW_TP_MODE" = "0" ] || module_args+=("raw_tp_mode=$RAW_TP_MODE")
     if [ -n "$OTA_FILE" ]; then
         module_args+=("ota_file=$OTA_FILE")
     fi
@@ -712,12 +702,6 @@ SPI Device Tree options:
   datareadygpio=N       ESP data-ready BCM GPIO (SPI: 27; SPI-HD: 12)
   max_frequency=N       spi-max-frequency in Hz (default: 30000000)
   spi_cs_change=0|1     Optional full-duplex controller workaround (default: 0)
-  spi_hd_tx_segment=N    QIO WRDMA segment bytes (default: 32; Pi 5 SPI-HD only)
-  spi_hd_force_sio=0|1    Keep all SPI-HD traffic in SIO after boot (default: 0)
-  spi_hd_force_sio_h2e=0|1 Keep host->ESP WRDMA/register writes in SIO (default: 0)
-  spi_hd_force_sio_e2h=0|1 Keep ESP->host RDDMA/register reads in SIO (default: 0)
-  spi_hd_force_sio_wrend=0|1 Send WR_END in SIO while WRDMA stays QIO (default: 0)
-  spi_hd_qio_addr_single=0|1 Use x1 address with x4 QIO H2E data (default: 1)
 
 Legacy:
   resetpin=N            Alias for resetgpio=N when using SPI
@@ -761,44 +745,6 @@ parse_arguments()
                 ;;
             spi_cs_change=*)
                 SPI_CS_CHANGE="${1#*=}"
-                ;;
-            spi_hd_tx_segment=*)
-                SPI_HD_TX_SEGMENT="${1#*=}"
-                ;;
-            spi_hd_force_sio=*)
-                SPI_HD_FORCE_SIO="${1#*=}"
-                case "$SPI_HD_FORCE_SIO" in
-                    0|1) ;;
-                    *) die "spi_hd_force_sio must be 0 or 1" ;;
-                esac
-                ;;
-            spi_hd_force_sio_h2e=*)
-                SPI_HD_FORCE_SIO_H2E="${1#*=}"
-                case "$SPI_HD_FORCE_SIO_H2E" in
-                    0|1) ;;
-                    *) die "spi_hd_force_sio_h2e must be 0 or 1" ;;
-                esac
-                ;;
-            spi_hd_force_sio_e2h=*)
-                SPI_HD_FORCE_SIO_E2H="${1#*=}"
-                case "$SPI_HD_FORCE_SIO_E2H" in
-                    0|1) ;;
-                    *) die "spi_hd_force_sio_e2h must be 0 or 1" ;;
-                esac
-                ;;
-            spi_hd_force_sio_wrend=*)
-                SPI_HD_FORCE_SIO_WREND="${1#*=}"
-                case "$SPI_HD_FORCE_SIO_WREND" in
-                    0|1) ;;
-                    *) die "spi_hd_force_sio_wrend must be 0 or 1" ;;
-                esac
-                ;;
-            spi_hd_qio_addr_single=*)
-                SPI_HD_QIO_ADDR_SINGLE="${1#*=}"
-                case "$SPI_HD_QIO_ADDR_SINGLE" in
-                    0|1) ;;
-                    *) die "spi_hd_qio_addr_single must be 0 or 1" ;;
-                esac
                 ;;
             btuart|btuart_4pins|btuart_4pin)
                 BT_INIT_SET="4"

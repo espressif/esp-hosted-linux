@@ -1,0 +1,87 @@
+spi: dw: reject unsupported quad-memory frames and unsafe RX-only DMA
+
+Make enhanced spi-mem support predicates match the real 32-bit address
+word and 31-cycle dummy limit. Do not advertise multi-lane address or
+dummy traffic that cannot be emitted without a multi-lane data frame.
+
+Do not dispatch fragmented RX-only DMA to the per-segment full-duplex
+fallback, which dereferences an absent TX scatterlist. Until a safe
+PIO fallback is available for that DMAengine configuration, reject
+the transfer explicitly without a kernel crash or bogus wire data.
+
+diff --git a/drivers/spi/spi-dw-core.c b/drivers/spi/spi-dw-core.c
+--- a/drivers/spi/spi-dw-core.c
++++ b/drivers/spi/spi-dw-core.c
+@@ -886,10 +886,44 @@
+ 		    (op->dummy.buswidth && op->dummy.buswidth != 1) ||
+ 		    (op->addr.nbytes && op->addr.buswidth != 1) ||
+ 		    op->dummy.nbytes >
+ 			FIELD_MAX(DW_SPI_ENH_CTRLR0_WAIT_CYCLE_MASK) / BITS_PER_BYTE ||
+ 		    op->addr.nbytes + op->dummy.nbytes > sizeof(u32))
++			return false;
++	}
++
++
++	/*
++	 * The enhanced message fallback collects one instruction and at
++	 * most one 32-bit address word. A multi-lane data operation must
++	 * not be advertised if the generic SPI transfer path would reject
++	 * it after a memory client has selected the opcode.
++	 *
++	 * Widths used by address/dummy phases must also be meaningful when
++	 * there is no enhanced data phase: the native mem_op implementation
++	 * supports single-lane operation only.
++	 */
++	if (op->addr.nbytes && op->addr.buswidth > SPI_NBITS_SINGLE &&
++	    (!op->data.nbytes || op->data.buswidth != SPI_NBITS_QUAD))
++		return false;
++	if (op->dummy.nbytes && op->dummy.buswidth > SPI_NBITS_SINGLE &&
++	    (!op->data.nbytes || op->data.buswidth != SPI_NBITS_QUAD))
++		return false;
++
++	if (op->data.nbytes && op->data.buswidth == SPI_NBITS_QUAD) {
++		unsigned int dummy_width = op->dummy.buswidth ?:
++					   SPI_NBITS_SINGLE;
++
++		if (op->addr.nbytes > sizeof(u32))
++			return false;
++		if (op->addr.nbytes && op->addr.buswidth != SPI_NBITS_SINGLE &&
++		    op->addr.buswidth != SPI_NBITS_QUAD)
++			return false;
++		if (op->dummy.nbytes &&
++		    op->dummy.nbytes >
++			FIELD_MAX(DW_SPI_ENH_CTRLR0_WAIT_CYCLE_MASK) *
++			dummy_width / BITS_PER_BYTE)
+ 			return false;
+ 	}
+ 
+ 	return spi_mem_default_supports_op(mem, op);
+ }
+
+diff --git a/drivers/spi/spi-dw-dma.c b/drivers/spi/spi-dw-dma.c
+--- a/drivers/spi/spi-dw-dma.c
++++ b/drivers/spi/spi-dw-dma.c
+@@ -984,10 +984,23 @@
+ 	int ret;
+ 
+ 	nents = max(xfer->tx_sg.nents, xfer->rx_sg.nents);
+ 
+ 	/*
++	 * The per-SG DMA fallback resubmits RX and TX in lockstep and
++	 * dereferences both mapped SG lists. An RX-only transfer has
++	 * no TX list; if the DMAengine cannot traverse all RX entries in
++	 * hardware, reject safely rather than dereferencing a NULL TX SG
++	 * or risking FIFO overrun during software resubmission.
++	 */
++	if (xfer->rx_buf && !xfer->tx_buf && dws->dma_sg_burst &&
++	    nents > dws->dma_sg_burst) {
++		dw_writel(dws, DW_SPI_DMACR, 0);
++		return -EOPNOTSUPP;
++	}
++
++	/*
+ 	 * Execute normal DMA-based transfer (which submits the Rx and Tx SG
+ 	 * lists directly to the DMA engine at once) if either full hardware
+ 	 * accelerated SG list traverse is supported by both channels, or the
+ 	 * Tx-only SPI transfer is requested, or the DMA engine is capable to
+ 	 * handle both SG lists on hardware accelerated basis.

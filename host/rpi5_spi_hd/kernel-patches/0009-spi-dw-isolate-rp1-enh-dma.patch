@@ -1,0 +1,170 @@
+spi: dw: isolate legacy enhanced DMA tuning in RP1 integration
+
+Keep the downstream enhanced-message DMA prefill, burst, alignment and
+RX arm interval in the measured RP1 SPI/DMA integration. Other DW
+controllers select PIO for enhanced messages before DMA mapping;
+unsupported FIFO-limited frames fail rather than inherit an unverified
+DMA sequence. Ordinary single-lane DMA remains unchanged.
+
+Legacy downstream RP1 DTs are identified by the existing SSI clock
+provider. Mainline should use documented per-IP capability matching.
+
+diff --git a/drivers/spi/spi-dw-core.c b/drivers/spi/spi-dw-core.c
+--- a/drivers/spi/spi-dw-core.c
++++ b/drivers/spi/spi-dw-core.c
+@@ -626,7 +626,8 @@
+ 	 * without starting an incomplete CS frame. The external-CS
+ 	 * enhanced DMA variant needs separate qualification.
+ 	 */
+-	if (dws->dma_mapped && !dw_readl(dws, DW_SPI_SER))
++	if (dws->dma_mapped && (!dws->enh_dma_config ||
++			       !dw_readl(dws, DW_SPI_SER)))
+ 		return -EOPNOTSUPP;
+ 
+ 	/* Standalone enhanced data has no representable control frame here. */
+diff --git a/drivers/spi/spi-dw-dma.c b/drivers/spi/spi-dw-dma.c
+--- a/drivers/spi/spi-dw-dma.c
++++ b/drivers/spi/spi-dw-dma.c
+@@ -16,7 +16,6 @@
+ #include <linux/vmalloc.h>
+ #include <linux/pci.h>
+ #include <linux/platform_data/dma-dw.h>
+-#include <linux/dma-mapping.h>
+ #include <linux/scatterlist.h>
+ #include <linux/spi/spi.h>
+ #include <linux/types.h>
+@@ -257,6 +256,13 @@
+ 
+ 	if (!nbytes)
+ 		return false;
++
++	/* Legacy enhanced DMA requires an integration-specific policy. */
++	if (!dws->enh_dma_config &&
++	    (xfer->tx_nbits > SPI_NBITS_SINGLE ||
++	     xfer->rx_nbits > SPI_NBITS_SINGLE))
++		return false;
++
+ 	/* DMA capacity is measured in FIFO words, not SPI wire bytes.
+ 	 * Reserve instruction/address FIFO entries on enhanced quad writes.
+ 	 */
+@@ -401,8 +407,8 @@
+ 	 * SCLK suggests.  Request DMA service early instead of requiring a
+ 	 * peripheral driver to add controller-specific scheduling workarounds.
+ 	 */
+-	if (dws->enh.ctrl_len && nbits > SPI_NBITS_SINGLE &&
+-	    (tx || dws->n_bytes == 1)) {
++	if (dws->enh_dma_config && dws->enh.ctrl_len &&
++	    nbits > SPI_NBITS_SINGLE && (tx || dws->n_bytes == 1)) {
+ 		unsigned int available = dws->fifo_len;
+ 
+ 		/* Control entries occupy the TX FIFO while the enhanced
+@@ -414,7 +420,7 @@
+ 				return 1;
+ 			available -= dws->enh.ctrl_len;
+ 		}
+-		burst = min(burst, min(8U, available));
++		burst = min(burst, min(dws->enh_dma_config->maxburst, available));
+ 	}
+ 
+ 	return max(burst, 1U);
+@@ -686,7 +692,8 @@
+ 	 * Use only the mapped tail; reject unsupported layouts.
+ 	 */
+ 	if (quad_dma) {
+-		if ((dws->n_bytes != 1 && dws->n_bytes != 2 &&
++		if (!dws->enh_dma_config ||
++		    (dws->n_bytes != 1 && dws->n_bytes != 2 &&
+ 		     dws->n_bytes != 4) || !tx_nents ||
+ 		    dws->enh.ctrl_len >= dws->fifo_len ||
+ 		    !dws->txburst || dws->txburst >= dws->fifo_len) {
+@@ -707,7 +714,9 @@
+ 		prime_bytes = min_t(unsigned int,
+ 					min_t(unsigned int,
+ 					      dws->fifo_len - dws->enh.ctrl_len,
+-					      dws->n_bytes == 4 ? 16 : dws->fifo_len) *
++					      dws->n_bytes == 4 ?
++					      dws->enh_dma_config->tx_prefill_words :
++					      dws->fifo_len) *
+ 					      dws->n_bytes,
+ 					xfer->len - dws->n_bytes);
+ 		/*
+@@ -719,7 +728,8 @@
+ 		 */
+ 		if (dws->n_bytes == 1 && xfer->tx_nbits > SPI_NBITS_SINGLE)
+ 			prime_bytes -= min_t(unsigned int, prime_bytes,
+-				(sg_dma_address(xfer->tx_sg.sgl) + prime_bytes) & 3U);
++				(sg_dma_address(xfer->tx_sg.sgl) + prime_bytes) &
++				(dws->enh_dma_config->byte_tx_align - 1));
+ 		if (!prime_bytes) {
+ 			ret = -EINVAL;
+ 			goto err_clear_dmac;
+@@ -854,14 +864,9 @@
+ 		}
+ 	} else {
+ 
+-		/* For enhanced RX, wait at least 5 us after DMA issue
+-		 * before starting the frame. The original usleep_range(5, 10)
+-		 * required the same minimum, but scheduling an hrtimer for
+-		 * this brief DMA arm interval adds avoidable latency.
+-		 * Ordinary single-line SPI stays unchanged.
+-		 */
++		/* Empirical RX arm interval from the qualified integration. */
+ 		if (xfer->rx_nbits > SPI_NBITS_SINGLE && dws->enh.ctrl_len)
+-			fsleep(5);
++			fsleep(dws->enh_dma_config->rx_arm_delay_us);
+ 		else
+ 			usleep_range(5, 10);
+ 
+diff --git a/drivers/spi/spi-dw.h b/drivers/spi/spi-dw.h
+--- a/drivers/spi/spi-dw.h
++++ b/drivers/spi/spi-dw.h
+@@ -195,8 +195,17 @@
+ 	void (*dma_stop)(struct dw_spi *dws);
+ };
+ 
++/* Enhanced-message DMA policy supplied by a qualified IP integration. */
++struct dw_spi_enh_dma_config {
++	u32 tx_prefill_words;
++	u32 maxburst;
++	u32 rx_arm_delay_us;
++	u32 byte_tx_align;
++};
++
+ struct dw_spi {
+ 	struct spi_controller	*host;
++	const struct dw_spi_enh_dma_config *enh_dma_config;
+ 
+ 	u32			ip;		/* Synopsys DW SSI IP-core ID */
+ 	u32			ver;		/* Synopsys component version */
+diff --git a/drivers/spi/spi-dw-mmio.c b/drivers/spi/spi-dw-mmio.c
+--- a/drivers/spi/spi-dw-mmio.c
++++ b/drivers/spi/spi-dw-mmio.c
+@@ -211,9 +211,28 @@
+ 	return 0;
+ }
+ 
++/*
++ * Downstream RP1 enhanced-message DMA tuning, measured on its SPI/DMA
++ * integration. The RX wait is empirical, not a DMAengine guarantee.
++ */
++static const struct dw_spi_enh_dma_config dw_spi_rp1_enh_dma = {
++	.tx_prefill_words = 16,
++	.maxburst = 8,
++	.rx_arm_delay_us = 5,
++	.byte_tx_align = 4,
++};
++
+ static int dw_spi_pssi_init(struct platform_device *pdev,
+ 			    struct dw_spi_mmio *dwsmmio)
+ {
++	struct device_node *clock;
++
++	/* Legacy RP1 DTs use snps,dw-apb-ssi and the RP1 SSI clock. */
++	clock = of_parse_phandle(pdev->dev.of_node, "clocks", 0);
++	if (clock && of_device_is_compatible(clock, "raspberrypi,rp1-clocks"))
++		dwsmmio->dws.enh_dma_config = &dw_spi_rp1_enh_dma;
++	of_node_put(clock);
++
+ 	dw_spi_dma_setup_generic(&dwsmmio->dws);
+ 
+ 	return 0;

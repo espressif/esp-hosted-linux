@@ -115,63 +115,79 @@ menu "Example Configuration"
 
     config ESP_SPI_HD_GPIO_CS
         int "CS GPIO"
-        default 10 if IDF_TARGET_ESP32C5
-        default 8 if IDF_TARGET_ESP32C61
-        default 10
+        default 10 if IDF_TARGET_ESP32S2 || IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32C2 || IDF_TARGET_ESP32C3
+        default 13 if IDF_TARGET_ESP32C5
+        default 23 if IDF_TARGET_ESP32C6 || IDF_TARGET_ESP32C61 || IDF_TARGET_ESP32S31
 
     config ESP_SPI_HD_GPIO_CLK
         int "CLK GPIO"
-        default 6 if IDF_TARGET_ESP32C5
         default 12 if IDF_TARGET_ESP32S2 || IDF_TARGET_ESP32S3
-        default 0 if IDF_TARGET_ESP32C2
-        default 6
+        default 6 if IDF_TARGET_ESP32C2 || IDF_TARGET_ESP32C3
+        default 9 if IDF_TARGET_ESP32C5
+        default 19 if IDF_TARGET_ESP32C6
+        default 26 if IDF_TARGET_ESP32C61
+        default 20 if IDF_TARGET_ESP32S31
 
     config ESP_SPI_HD_GPIO_D0
         int "D0 GPIO"
-        default 7 if IDF_TARGET_ESP32C5
         default 11 if IDF_TARGET_ESP32S2 || IDF_TARGET_ESP32S3
-        default 7
+        default 7 if IDF_TARGET_ESP32C2 || IDF_TARGET_ESP32C3
+        default 10 if IDF_TARGET_ESP32C5
+        default 18 if IDF_TARGET_ESP32C6
+        default 25 if IDF_TARGET_ESP32C61
+        default 21 if IDF_TARGET_ESP32S31
 
     config ESP_SPI_HD_GPIO_D1
         int "D1 GPIO"
-        default 2 if IDF_TARGET_ESP32C5
         default 13 if IDF_TARGET_ESP32S2 || IDF_TARGET_ESP32S3
-        default 2
+        default 2 if IDF_TARGET_ESP32C2 || IDF_TARGET_ESP32C3
+        default 8 if IDF_TARGET_ESP32C5
+        default 20 if IDF_TARGET_ESP32C6
+        default 27 if IDF_TARGET_ESP32C61
+        default 22 if IDF_TARGET_ESP32S31
 
     config ESP_SPI_HD_GPIO_D2
         int "D2 GPIO"
-        default 5 if IDF_TARGET_ESP32C5
         default 14 if IDF_TARGET_ESP32S2 || IDF_TARGET_ESP32S3
-        default 4 if IDF_TARGET_ESP32C61
-        default 5
+        default 5 if IDF_TARGET_ESP32C2 || IDF_TARGET_ESP32C3
+        default 7 if IDF_TARGET_ESP32C5
+        default 21 if IDF_TARGET_ESP32C6
+        default 28 if IDF_TARGET_ESP32C61
+        default 25 if IDF_TARGET_ESP32S31
 
     config ESP_SPI_HD_GPIO_D3
         int "D3 GPIO"
-        default 4 if IDF_TARGET_ESP32C5
         default 9 if IDF_TARGET_ESP32S2 || IDF_TARGET_ESP32S3
-        default 3 if IDF_TARGET_ESP32C61
-        default 4
+        default 4 if IDF_TARGET_ESP32C2 || IDF_TARGET_ESP32C3
+        default 14 if IDF_TARGET_ESP32C5
+        default 22 if IDF_TARGET_ESP32C6 || IDF_TARGET_ESP32C61
+        default 24 if IDF_TARGET_ESP32S31
 
     config ESP_SPI_HD_GPIO_DATA_READY
         int "Data Ready GPIO"
-        default 23 if IDF_TARGET_ESP32C5
-        default 1 if IDF_TARGET_ESP32C2
         default 4 if IDF_TARGET_ESP32S2 || IDF_TARGET_ESP32S3
-        default 23 if IDF_TARGET_ESP32C61
-        default 11
+        default 1 if IDF_TARGET_ESP32C2
+        default 3 if IDF_TARGET_ESP32C3
+        default 24 if IDF_TARGET_ESP32C5
+        default 6 if IDF_TARGET_ESP32C6
+        default 5 if IDF_TARGET_ESP32C61
+        default 18 if IDF_TARGET_ESP32S31
         help
-            ESP-to-host interrupt GPIO. This must be distinct from CS,
-            clock and all four data lanes and available on the board.
+            ESP-to-host interrupt GPIO, distinct from the six bus pins.
+            Defaults reuse the ROM download bus for runtime SPI-HD. On C3,
+            GPIO3 must be held low during SPI-download selection before
+            firmware takes ownership. Board overrides must respect boot straps,
+            console routing and flash/PSRAM pin reservations.
 
     config ESP_SPI_HD_RX_SEGMENT_SIZE
         int "Host-to-ESP segment buffer size"
         range 16 3200
         default 128
         help
-            Size of each queued SPI-HD RX segment. Raspberry Pi 5 may use
-            smaller WRDMA transactions while RP1 enhanced TX is FIFO-limited.
-            With streaming DMA, 1600 accommodates a full Hosted frame in one
-            segment. The size must be a multiple of four for DMA alignment.
+            Size of each queued SPI-HD RX segment. The host negotiates the
+            effective size using the controller transfer and message limits.
+            1600 accommodates a full Hosted frame in one segment. The size
+            must be a multiple of four for DMA alignment.
 
     config ESP_SPI_HD_RX_Q_SIZE
         int "Queued host-to-ESP segments"
@@ -204,7 +220,7 @@ menu "Example Configuration"
             Publish tagged counters at shared-buffer offsets 0x18 and 0x1c,
             higher address first. Tags use six spare bits in the existing
             counter. A supporting host compares both copies in one read and
-            falls back to stable legacy reads on a mismatch.
+            falls back to stable register reads on a mismatch.
             Requires one outstanding TX descriptor; adds no data buffers.
 
     config ESP_SPI_HD_TX_POOL_SIZE
@@ -221,6 +237,14 @@ menu "Example Configuration"
         range 1 80
         default 26 if IDF_TARGET_ESP32C6 || IDF_TARGET_ESP32C61 || IDF_TARGET_ESP32S31
         default 40
+
+    config ESP_SPI_HD_CONTROL_MAX_CLK_MHZ
+        int "Maximum single-line SPI-HD clock (MHz)"
+        range 1 80
+        default 20
+        help
+            Advertise the supported single-line control and data clock.
+            The effective limit also cannot exceed the payload clock.
 
     config ESP_SPI_HD_CHECKSUM
         bool "SPI-HD checksum"

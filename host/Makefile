@@ -54,7 +54,7 @@ ifeq ($(target), spi)
 endif
 
 ifeq ($(target), spi_hd)
-    ccflags-y += -I$(src)/spi_hd -DESP_SPI_HD_DEBUGFS
+    ccflags-y += -I$(src)/spi_hd
     EXTRA_CFLAGS += -I$(M)/spi_hd
     module_objects += spi_hd/esp_spi_hd.o
 endif

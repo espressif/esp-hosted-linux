@@ -160,20 +160,20 @@ static void test_command_parser(void)
     h->offset = sizeof(*h);
     cmd->cmd_code = CMD_SCAN_REQUEST;
     cmd->seq_num = 0x1234;
-    assert(spi_get_cmd_info(&skb, &opcode, &seq));
+    assert(esp_spi_get_cmd_info(&skb, &opcode, &seq));
     assert(opcode == CMD_SCAN_REQUEST && seq == 0x1234);
-    assert(spi_get_cmd_info(&skb, NULL, NULL));
+    assert(esp_spi_get_cmd_info(&skb, NULL, NULL));
     skb.len = sizeof(*h) - 1;
-    assert(!spi_get_cmd_info(&skb, &opcode, &seq));
+    assert(!esp_spi_get_cmd_info(&skb, &opcode, &seq));
     skb.len = sizeof(*h) + sizeof(*cmd) - 1;
-    assert(!spi_get_cmd_info(&skb, &opcode, &seq));
+    assert(!esp_spi_get_cmd_info(&skb, &opcode, &seq));
     skb.len = sizeof(*h) + sizeof(*cmd);
     h->packet_type = PACKET_TYPE_DATA;
-    assert(!spi_get_cmd_info(&skb, &opcode, &seq));
+    assert(!esp_spi_get_cmd_info(&skb, &opcode, &seq));
     h->packet_type = PACKET_TYPE_COMMAND_REQUEST;
     h->offset = 65535;
-    assert(!spi_get_cmd_info(&skb, &opcode, &seq));
-    assert(!spi_get_cmd_info(NULL, &opcode, &seq));
+    assert(!esp_spi_get_cmd_info(&skb, &opcode, &seq));
+    assert(!esp_spi_get_cmd_info(NULL, &opcode, &seq));
 }
 
 static void test_stateful_classifier(void)
@@ -182,17 +182,17 @@ static void test_stateful_classifier(void)
     struct esp_payload_header *h = (struct esp_payload_header *)data;
     struct sk_buff skb = {.data = data, .len = sizeof(*h)};
     h->if_type = ESP_HCI_IF;
-    assert(spi_is_stateful_packet(&skb));
+    assert(esp_spi_is_stateful_packet(&skb));
     h->if_type = ESP_RCP_IF;
-    assert(spi_is_stateful_packet(&skb));
+    assert(esp_spi_is_stateful_packet(&skb));
     h->if_type = ESP_STA_IF;
-    assert(!spi_is_stateful_packet(&skb));
+    assert(!esp_spi_is_stateful_packet(&skb));
     h->if_type = ESP_AP_IF;
-    assert(!spi_is_stateful_packet(&skb));
+    assert(!esp_spi_is_stateful_packet(&skb));
     skb.len--;
     h->if_type = ESP_HCI_IF;
-    assert(!spi_is_stateful_packet(&skb));
-    assert(!spi_is_stateful_packet(NULL));
+    assert(!esp_spi_is_stateful_packet(&skb));
+    assert(!esp_spi_is_stateful_packet(NULL));
 }
 
 static void test_exact_dummy_rx_sentinel(void)

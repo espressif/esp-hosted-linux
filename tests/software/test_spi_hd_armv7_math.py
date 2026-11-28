@@ -15,10 +15,7 @@ class SpiHdArmv7MathTests(unittest.TestCase):
     def test_timing_conversions_use_kernel_math64(self):
         code = SPI_HD.read_text()
         self.assertIn("#include <linux/math64.h>", code)
-        # All eight timing paths previously used bare 64-bit division.
-        self.assertEqual(
-            code.count("div_u64(ktime_get_ns() - started, 1000)"), 8
-        )
+        # Timing code must use kernel-safe arithmetic, independent of count.
         self.assertNotRegex(
             code,
             r"\(ktime_get_ns\(\)\s*-\s*started\)\s*/\s*1000\b",

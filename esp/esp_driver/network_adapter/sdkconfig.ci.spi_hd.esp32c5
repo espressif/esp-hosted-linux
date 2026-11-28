@@ -1,15 +1,6 @@
-# Experimental ESP32-C5 SPI-HD/QSPI build-only CI profile.
-# Do not enable for other chips without the required Slave-HD v2 capability
-# and independent board/controller qualification.
+# C5 SPI-HD runtime tuning; use the default ROM-compatible pin mapping.
 CONFIG_ESP_SPI_HD_HOST_INTERFACE=y
 CONFIG_ESP_SPI_HD_MODE=3
-CONFIG_ESP_SPI_HD_GPIO_CS=10
-CONFIG_ESP_SPI_HD_GPIO_CLK=6
-CONFIG_ESP_SPI_HD_GPIO_D0=7
-CONFIG_ESP_SPI_HD_GPIO_D1=2
-CONFIG_ESP_SPI_HD_GPIO_D2=5
-CONFIG_ESP_SPI_HD_GPIO_D3=4
-CONFIG_ESP_SPI_HD_GPIO_DATA_READY=23
 CONFIG_ESP_SPI_HD_RX_SEGMENT_SIZE=3200
 CONFIG_ESP_SPI_HD_RX_Q_SIZE=4
 CONFIG_ESP_SPI_HD_DMA_APPEND=y

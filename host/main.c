@@ -992,6 +992,7 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 	bool seen_fw_data = false;
 	bool seen_rx_buf_size = false;
 	bool seen_spi_clk = false;
+	u8 boot_spi_clk = 0;
 	bool seen_ext_capability = false;
 	bool seen_rcp_nonce = false;
 
@@ -1195,9 +1196,8 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 				ret = -EINVAL;
 				goto fail;
 			}
-			ret = esp_adjust_spi_clock(adapter, *(pos + 2));
-			if (!ret)
-				seen_spi_clk = true;
+			boot_spi_clk = *(pos + 2);
+			seen_spi_clk = true;
 			break;
 		default:
 			esp_warn("Unsupported tag=%x in boot-up event\n", *pos);
@@ -1256,15 +1256,6 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 		goto fail;
 	}
 
-	/* Older compatible SPI firmware may omit the optional clock TLV. Recovery
-	 * deliberately receives BOOT at 1 MHz; only after transport/chip validation
-	 * restore the historical configured startup rate (or 10 MHz default) so an
-	 * omitted TLV cannot pin the accepted session at the bootstrap rate. */
-	if (adapter->if_type == ESP_IF_TYPE_SPI && !seen_spi_clk) {
-		ret = esp_adjust_spi_clock(adapter, 0);
-		if (ret)
-			goto fail;
-	}
 
 	if (seen_rcp_nonce && !(adapter->ext_capabilities & ESP_EXT_CAP_RCP)) {
 		esp_err("RCP session nonce advertised without RCP capability\n");
@@ -1283,6 +1274,13 @@ static int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8
 		esp_err("Runtime-radio firmware published a zero RCP session nonce\n");
 		ret = -EPROTO;
 		goto fail;
+	}
+
+	/* Apply the SPI clock and lane policy after boot-event validation. */
+	if (adapter->if_type == ESP_IF_TYPE_SPI) {
+		ret = esp_adjust_spi_clock(adapter, boot_spi_clk);
+		if (ret)
+			goto fail;
 	}
 
 	if (reinitializing && adapter->if_ops &&

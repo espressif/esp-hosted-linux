@@ -1,0 +1,66 @@
+spi: dw: atomically prefill PIO enhanced RX controls before native SER
+
+DesignWare may begin shifting an enhanced read once the first control
+FIFO entry exists and SER is selected. During IRQ/poll PIO RX the
+original two control words were added with SER active, potentially
+allowing the frame to start before the address is present.
+
+Reuse the existing safe PIO write SER gate for all PIO enhanced
+frames: preload instruction and address while SER is inactive,
+then restore SER exactly once. DMA transfers (including the
+throughput-critical RX and TX paths) retain their existing gates
+and ordering unchanged. GPIO-CS stays owned by the SPI core.
+
+Report an unsupported standalone quad data-only frame with
+-EOPNOTSUPP rather than -EINVAL, without sending wire clocks.
+
+diff --git a/drivers/spi/spi-dw-core.c b/drivers/spi/spi-dw-core.c
+--- a/drivers/spi/spi-dw-core.c
++++ b/drivers/spi/spi-dw-core.c
+@@ -435,15 +435,15 @@
+  * Tx FIFO drains.
+  */
+ void dw_spi_start_frame(struct dw_spi *dws)
+ {
+ 	u32 saved_ser = 0;
+-	bool gate_enh_tx = false;
++	bool gate_enh_pio = false;
+ 
+ 	if (dws->enh.ctrl_len) {
+-		gate_enh_tx = dws->tx_len && !dws->dma_mapped;
+-		if (gate_enh_tx) {
++		gate_enh_pio = !dws->dma_mapped;
++		if (gate_enh_pio) {
+ 			saved_ser = dw_readl(dws, DW_SPI_SER);
+ 			if (saved_ser)
+ 				dw_writel(dws, DW_SPI_SER, 0);
+ 		}
+ 
+@@ -456,11 +456,11 @@
+ 
+ 		if (dws->tx_len && !dws->dma_mapped)
+ 			dw_writer(dws);
+ 
+ 		/* MMIO FIFO writes complete before native CS starts the frame. */
+-		if (gate_enh_tx && saved_ser)
++		if (gate_enh_pio && saved_ser)
+ 			dw_writel(dws, DW_SPI_SER, saved_ser);
+ 	} else if (!dws->tx_len) {
+ 		dw_writel(dws, DW_SPI_DR, 0);
+ 	}
+ }
+@@ -627,12 +627,13 @@
+ 	 * enhanced DMA variant needs separate qualification.
+ 	 */
+ 	if (dws->dma_mapped && !dw_readl(dws, DW_SPI_SER))
+ 		return -EOPNOTSUPP;
+ 
++	/* Standalone enhanced data has no representable control frame here. */
+ 	if (!dws->enh.ctrl_len)
+-		return -EINVAL;
++		return -EOPNOTSUPP;
+ 
+ 	/* Instruction/address lengths are specified independently in
+ 	 * SPI_CTRLR0. Allow mapped 16/32-bit data with supported DMA widths.
+ 	 */
+ 	if (dws->n_bytes != 1 &&

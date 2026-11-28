@@ -12,9 +12,14 @@ class SpiParserExtractionTests(unittest.TestCase):
     def test_real_spi_parser_and_stateful_paths_extracted(self):
         source = (ROOT / "host/spi/esp_spi.c").read_text()
         functions = {x: extract_function(source, x) for x in
-                     ("esp_spi_bootstrap_frame_valid", "spi_get_cmd_info",
-                      "spi_is_stateful_packet", "spi_is_dummy_rx",
+                     ("esp_spi_bootstrap_frame_valid",
+                      "spi_is_dummy_rx",
                       "spi_is_unadvertised_idle_rx")}
+        common = (ROOT / "host/include/esp_spi_common.h").read_text()
+        functions["esp_spi_get_cmd_info"] = extract_typed_function(
+            common, "esp_spi_get_cmd_info", "inline bool")
+        functions["esp_spi_is_stateful_packet"] = extract_typed_function(
+            common, "esp_spi_is_stateful_packet", "inline bool")
         rx_buf = extract_typed_function(source, "process_rx_buf", "int")
         self.assertIn("PACKET_TYPE_EVENT", functions["esp_spi_bootstrap_frame_valid"])
         self.assertIn("PACKET_TYPE_DATA", functions["esp_spi_bootstrap_frame_valid"])
@@ -22,12 +27,12 @@ class SpiParserExtractionTests(unittest.TestCase):
         self.assertIn("evt->header.len", functions["esp_spi_bootstrap_frame_valid"])
         self.assertIn("esp_spi_bootstrap_frame_valid(", rx_buf)
         self.assertIn("header->if_num != 0", rx_buf)
-        self.assertIn("PACKET_TYPE_COMMAND_REQUEST", functions["spi_get_cmd_info"])
-        self.assertIn("ESP_HCI_IF", functions["spi_is_stateful_packet"])
-        self.assertIn("ESP_RCP_IF", functions["spi_is_stateful_packet"])
+        self.assertIn("PACKET_TYPE_COMMAND_REQUEST", functions["esp_spi_get_cmd_info"])
+        self.assertIn("ESP_HCI_IF", functions["esp_spi_is_stateful_packet"])
+        self.assertIn("ESP_RCP_IF", functions["esp_spi_is_stateful_packet"])
         self.assertIn("header->if_type == 0xF", functions["spi_is_dummy_rx"])
         self.assertIn("spi_is_dummy_rx(", source)
-        self.assertIn("spi_get_cmd_info(", source)
+        self.assertIn("esp_spi_get_cmd_info(", source)
 
     def test_firmware_spi_two_stage_data_ready_contract(self):
         fw_source = (
