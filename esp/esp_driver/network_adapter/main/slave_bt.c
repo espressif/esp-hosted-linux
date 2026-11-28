@@ -21,6 +21,7 @@
 #include "soc/lldesc.h"
 #include "esp_bt.h"
 #include "esp_log.h"
+#include "esp_idf_version.h"
 #include "slave_bt.h"
 
 #if defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -317,6 +318,11 @@ static void init_uart(void)
     ESP_ERROR_CHECK(uart_param_config(BLUETOOTH_UART, &uart_config));
 
     // install DMA driver
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 1, 0)
+    /* ESP-IDF v6.1 allocates the TX/RX channel pair in one call */
+    gdma_channel_alloc_config_t channel_config = {0};
+    ESP_ERROR_CHECK(gdma_new_ahb_channel(&channel_config, &s_tx_channel, &s_rx_channel));
+#else
     gdma_channel_alloc_config_t tx_channel_config = {
         .flags.reserve_sibling = 1,
         .direction = GDMA_CHANNEL_DIRECTION_TX,
@@ -327,6 +333,7 @@ static void init_uart(void)
         .sibling_chan = s_tx_channel,
     };
     ESP_ERROR_CHECK(gdma_new_ahb_channel(&rx_channel_config, &s_rx_channel));
+#endif
 
     gdma_connect(s_tx_channel, GDMA_MAKE_TRIGGER(GDMA_TRIG_PERIPH_UHCI, 0));
     gdma_connect(s_rx_channel, GDMA_MAKE_TRIGGER(GDMA_TRIG_PERIPH_UHCI, 0));
