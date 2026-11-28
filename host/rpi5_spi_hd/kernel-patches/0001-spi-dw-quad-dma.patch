@@ -8,14 +8,17 @@ before the first clock to avoid ending a frame prematurely.
 Allow DMA-backed enhanced quad transfers beyond the FIFO capacity.
 For TX, hold native chip select inactive while priming the FIFO with
 the control words and a bounded payload prefix. Build a DMA tail
-from the remaining bytes of the SPI core's mapped scatterlist, then
-resume the frame after the descriptor is armed. For RX, preload all
-enhanced control words before starting the receive clocks.
+from the remaining bytes of the SPI core's mapped scatterlist without
+fabricating DMA SG metadata, then resume the frame after the descriptor
+is armed. For RX, preload all
+enhanced control words before starting the receive clocks. Preserve DMA
+arm time without sleep-scheduler jitter for enhanced multi-lane receives.
 
 Preserve chip-select boundaries and SPI mode 3 idle-clock behavior.
-Reject unsupported external chip-select paths, enhanced-write dummy
-clocks and unsafe DMA widths or alignments rather than transmitting
-an incomplete frame. Ordinary single-line SPI transfers retain
+Require a selected DesignWare SER channel, including when Linux uses a
+GPIO to drive physical chip select. Reject an unselected SER channel,
+unsupported dummy shapes or unsafe DMA widths/alignments rather than
+transmitting an incomplete frame. Ordinary single-line SPI transfers retain
 their existing execution path.
 
 This change depends on the enhanced quad support in Raspberry Pi
@@ -180,17 +183,16 @@ diff --git a/drivers/spi/spi-dw-core.c b/drivers/spi/spi-dw-core.c
 diff --git a/drivers/spi/spi-dw-dma.c b/drivers/spi/spi-dw-dma.c
 --- a/drivers/spi/spi-dw-dma.c
 +++ b/drivers/spi/spi-dw-dma.c
-@@ -14,6 +14,9 @@
+@@ -14,6 +14,8 @@
  #include <linux/module.h>
  #include <linux/pci.h>
  #include <linux/platform_data/dma-dw.h>
 +#include <linux/dma-mapping.h>
 +#include <linux/scatterlist.h>
-+#include <linux/slab.h>
  #include <linux/spi/spi.h>
  #include <linux/types.h>
  
-@@ -248,11 +251,24 @@
+@@ -248,11 +250,24 @@
  {
  	struct dw_spi *dws = spi_controller_get_devdata(host);
  	enum dma_slave_buswidth dma_bus_width;
@@ -217,7 +219,7 @@ diff --git a/drivers/spi/spi-dw-dma.c b/drivers/spi/spi-dw-dma.c
  
  	return dws->dma_addr_widths & BIT(dma_bus_width);
  }
-@@ -294,7 +310,8 @@
+@@ -294,7 +309,8 @@
  
  	nents = dw_readl(dws, DW_SPI_TXFLR);
  	delay.unit = SPI_DELAY_UNIT_SCK;
@@ -227,7 +229,7 @@ diff --git a/drivers/spi/spi-dw-dma.c b/drivers/spi/spi-dw-dma.c
  
  	while (dw_spi_dma_tx_busy(dws) && retry--)
  		spi_delay_exec(&delay, xfer);
-@@ -305,7 +322,8 @@
+@@ -305,7 +321,8 @@
  	}
  
  	if (!xfer->rx_buf) {
@@ -237,7 +239,7 @@ diff --git a/drivers/spi/spi-dw-dma.c b/drivers/spi/spi-dw-dma.c
  		while (dw_readl(dws, DW_SPI_SR) & DW_SPI_SR_BUSY)
  			spi_delay_exec(&delay, xfer);
  	}
-@@ -494,7 +512,11 @@
+@@ -494,7 +511,11 @@
  		dma_ctrl |= DW_SPI_DMACR_TDMAE;
  	if (xfer->rx_buf)
  		dma_ctrl |= DW_SPI_DMACR_RDMAE;
@@ -250,7 +252,7 @@ diff --git a/drivers/spi/spi-dw-dma.c b/drivers/spi/spi-dw-dma.c
  
  	/* Set the interrupt mask */
  	imr = 0;
-@@ -511,14 +533,150 @@
+@@ -511,42 +532,292 @@
  	return 0;
  }
  
@@ -264,7 +266,7 @@ diff --git a/drivers/spi/spi-dw-dma.c b/drivers/spi/spi-dw-dma.c
 +	 * the instruction and address FIFO writes. RX DMA is already armed.
 +	 */
 +	if (!saved_ser)
-+		return -EOPNOTSUPP; /* Native chip-select required for FIFO prefill */
++		return -EOPNOTSUPP; /* SER required even when CS uses a GPIO */
 +	if (!control_words || control_words > dws->fifo_len ||
 +	    dw_readl(dws, DW_SPI_TXFLR))
 +		return -EINVAL;
@@ -288,15 +290,16 @@ diff --git a/drivers/spi/spi-dw-dma.c b/drivers/spi/spi-dw-dma.c
  	int ret;
 +	bool quad_dma = xfer->tx_buf && dws->enh.ctrl_len;
  
-+	struct scatterlist tx_tail_one;
-+	struct scatterlist *tx_tail = NULL;
 +	struct scatterlist *tx_sg = xfer->tx_sg.sgl;
 +	struct scatterlist *sg;
++	dma_addr_t tx_trimmed_addr = 0;
++	unsigned int tx_trimmed_len = 0;
 +	unsigned int tx_nents = xfer->tx_sg.nents;
 +	unsigned int tail_nents = 0;
 +	unsigned int tail_bytes = 0;
++	unsigned int tail_skip = 0;
 +	unsigned int skip;
-+	bool tail_allocated = false;
++	bool tx_sg_trimmed = false;
 +	bool ser_gated = false;
 +	unsigned int prime_bytes = 0;
 +	unsigned int expected_fill = 0;
@@ -336,30 +339,29 @@ diff --git a/drivers/spi/spi-dw-dma.c b/drivers/spi/spi-dw-dma.c
 +					      dws->n_bytes == 4 ? 16 : dws->fifo_len) *
 +					      dws->n_bytes,
 +					xfer->len - dws->n_bytes);
++		/*
++		 * Keep the mapped DMA tail naturally word-aligned when a
++		 * byte-wide multi-lane frame is prefixed through the CPU FIFO.
++		 * The FIFO has a different control-word count from the payload
++		 * and an unrounded prefix may split a mapped DMA beat. Preserve
++		 * the exact payload ordering; no protocol-specific formatting.
++		 */
++		if (dws->n_bytes == 1 && xfer->tx_nbits > SPI_NBITS_SINGLE)
++			prime_bytes -= min_t(unsigned int, prime_bytes,
++				(sg_dma_address(xfer->tx_sg.sgl) + prime_bytes) & 3U);
 +		if (!prime_bytes) {
 +			ret = -EINVAL;
 +			goto err_clear_dmac;
 +		}
 +		expected_fill = prime_bytes / dws->n_bytes + dws->enh.ctrl_len;
-+		dw_writel(dws, DW_SPI_DMATDLR, dws->fifo_len - dws->txburst);
 +		/*
-+		 * The SPI core may map the TX buffer to any valid SG layout.
-+		 * Remove the FIFO-prefilled prefix without assuming one mapped
-+		 * DMA segment: preserve the remaining mapped segments and their
-+		 * original DMA addresses. No ESP peripheral assumptions here.
++		 * Walk the SPI core's already-mapped SG list to find the DMA
++		 * tail. Keep the original entries (including page/offset and
++		 * provider metadata) rather than fabricating a second SG list.
++		 * Only the first tail entry may need a temporary DMA-address
++		 * trim; it is restored after completion before the SPI core
++		 * unmaps the transfer.
 +		 */
-+		/* Keep the qualified single-SG hot path allocation-free. */
-+		if (tx_nents == 1) {
-+			tx_tail = &tx_tail_one;
-+		} else {
-+			tx_tail = kcalloc(tx_nents, sizeof(*tx_tail), GFP_KERNEL);
-+			if (!tx_tail) {
-+				ret = -ENOMEM;
-+				goto err_clear_dmac;
-+			}
-+			tail_allocated = true;
-+		}
-+		sg_init_table(tx_tail, tx_nents);
 +		skip = prime_bytes;
 +		for_each_sg(xfer->tx_sg.sgl, sg, tx_nents, i) {
 +			unsigned int nbytes = sg_dma_len(sg);
@@ -368,9 +370,10 @@ diff --git a/drivers/spi/spi-dw-dma.c b/drivers/spi/spi-dw-dma.c
 +				skip -= nbytes;
 +				continue;
 +			}
-+			sg_dma_address(&tx_tail[tail_nents]) =
-+				sg_dma_address(sg) + skip;
-+			sg_dma_len(&tx_tail[tail_nents]) = nbytes - skip;
++			if (!tail_nents) {
++				tx_sg = sg;
++				tail_skip = skip;
++			}
 +			tail_bytes += nbytes - skip;
 +			tail_nents++;
 +			skip = 0;
@@ -380,42 +383,41 @@ diff --git a/drivers/spi/spi-dw-dma.c b/drivers/spi/spi-dw-dma.c
 +			ret = -EINVAL;
 +			goto err_clear_dmac;
 +		}
-+		/* A DMA engine can require every mapped SG segment to align
++		/*
++		 * A DMA engine can require every mapped SG segment to align
 +		 * to the configured 8/16/32-bit peripheral data width.
 +		 */
-+		for (i = 0; i < tail_nents; i++) {
-+			if (!IS_ALIGNED(sg_dma_address(&tx_tail[i]), dws->n_bytes) ||
-+			    !IS_ALIGNED(sg_dma_len(&tx_tail[i]), dws->n_bytes)) {
++		for_each_sg(tx_sg, sg, tail_nents, i) {
++			dma_addr_t addr = sg_dma_address(sg);
++			unsigned int nbytes = sg_dma_len(sg);
++
++			if (!i) {
++				addr += tail_skip;
++				nbytes -= tail_skip;
++			}
++			if (!IS_ALIGNED(addr, dws->n_bytes) ||
++			    !IS_ALIGNED(nbytes, dws->n_bytes)) {
 +				ret = -EINVAL;
 +				goto err_clear_dmac;
 +			}
 +		}
-+		sg_mark_end(&tx_tail[tail_nents - 1]);
-+		tx_sg = tx_tail;
 +		tx_nents = tail_nents;
 +	}
 +
- 	/* Submit the DMA Tx transfer if required */
- 	if (xfer->tx_buf) {
--		ret = dw_spi_dma_submit_tx(dws, xfer->tx_sg.sgl, xfer->tx_sg.nents);
-+		ret = dw_spi_dma_submit_tx(dws, tx_sg, tx_nents);
- 		if (ret)
- 			goto err_clear_dmac;
- 	}
-@@ -533,20 +691,107 @@
- 		dma_async_issue_pending(dws->rxchan);
- 	}
- 
-+	/* native SER prevents any wire clocks
-+	 * while the CPU loads control and first payload entries. DMAC is
-+	 * submitted for *only the unprimed tail*. Resume SER only after DMA
-+	 * is armed, allowing TX FIFO threshold-driven DMA to begin.
++	/*
++	 * Native SER prevents wire clocks while control words and a bounded
++	 * payload prefix are loaded. The SPI core mapped the whole transfer
++	 * for the DMA device before transfer_one(), so return ownership to the
++	 * CPU only while no DMA descriptor is active. Restore device ownership
++	 * before trimming the first tail entry and preparing the descriptor.
 +	 */
 +	if (quad_dma) {
 +		saved_ser = dw_readl(dws, DW_SPI_SER);
 +		if (!saved_ser) {
-+			/* This prefill mechanism cannot maintain an enhanced
-+			 * frame across an unqualified GPIO/externally held CS.
++			/*
++			 * DesignWare needs SER asserted for its clock generator,
++			 * even when physical CS is driven by a GPIO. Without SER
++			 * there is no safe controller clock gate for FIFO prefill.
 +			 */
 +			ret = -EOPNOTSUPP;
 +			goto err_clear_dmac;
@@ -423,15 +425,11 @@ diff --git a/drivers/spi/spi-dw-dma.c b/drivers/spi/spi-dw-dma.c
 +		dw_writel(dws, DW_SPI_SER, 0);
 +		ser_gated = true;
 +		dw_spi_start_frame(dws);
-+		/* SPI core handed this streaming mapping to the DMA device
-+		 * before transfer_one. The DMA descriptor is submitted but
-+		 * has not been issued: transfer CPU ownership back while
-+		 * copying the prefix into the hardware FIFO.
-+		 */
 +		dma_sync_sgtable_for_cpu(dws->host->cur_tx_dma_dev,
 +					 &xfer->tx_sg, DMA_TO_DEVICE);
 +		for (i = 0; i < prime_bytes; i += dws->n_bytes) {
 +			u32 word = 0;
++
 +			/* Preserve native-endian FIFO order for 8/16/32-bit words. */
 +			memcpy(&word, src + i, dws->n_bytes);
 +			dw_write_io_reg(dws, DW_SPI_DR, word);
@@ -446,21 +444,58 @@ diff --git a/drivers/spi/spi-dw-dma.c b/drivers/spi/spi-dw-dma.c
 +		}
 +		dws->tx = (u8 *)dws->tx + prime_bytes;
 +		dws->tx_len -= prime_bytes / dws->n_bytes;
++
++		if (tail_skip) {
++			tx_trimmed_addr = sg_dma_address(tx_sg);
++			tx_trimmed_len = sg_dma_len(tx_sg);
++			sg_dma_address(tx_sg) += tail_skip;
++			sg_dma_len(tx_sg) -= tail_skip;
++			tx_sg_trimmed = true;
++		}
 +	}
++
+ 	/* Submit the DMA Tx transfer if required */
+ 	if (xfer->tx_buf) {
+-		ret = dw_spi_dma_submit_tx(dws, xfer->tx_sg.sgl, xfer->tx_sg.nents);
++		ret = dw_spi_dma_submit_tx(dws, tx_sg, tx_nents);
+ 		if (ret)
+ 			goto err_clear_dmac;
+ 	}
+ 
+ 	/* Submit the DMA Rx transfer if required */
+ 	if (xfer->rx_buf) {
+ 		ret = dw_spi_dma_submit_rx(dws, xfer->rx_sg.sgl, xfer->rx_sg.nents);
+ 		if (ret)
+ 			goto err_clear_dmac;
+ 
+ 		/* rx must be started before tx due to spi instinct */
+ 		dma_async_issue_pending(dws->rxchan);
+ 	}
+ 
  	if (xfer->tx_buf) {
  		dma_async_issue_pending(dws->txchan);
 +		if (quad_dma) {
++			/* Allow the armed DMA request to refill the FIFO before
++			 * native chip-select releases the first wire clocks.
++			 */
++			dw_writel(dws, DW_SPI_DMACR, DW_SPI_DMACR_TDMAE);
 +			dw_writel(dws, DW_SPI_SER, saved_ser);
 +			ser_gated = false;
-+			dw_writel(dws, DW_SPI_DMACR, DW_SPI_DMACR_TDMAE);
 +		}
  	} else {
 -		/* Pause to allow DMA channel to fetch RX descriptor */
 +
-+		/* Use the unchanged upstream DMA descriptor arm interval.
-+		 * SG count and word width alone are no hardware-ready signal.
++		/* For enhanced RX, wait at least 5 us after DMA issue
++		 * before starting the frame. The original usleep_range(5, 10)
++		 * required the same minimum, but scheduling an hrtimer for
++		 * this brief DMA arm interval adds avoidable latency.
++		 * Ordinary single-line SPI stays unchanged.
 +		 */
- 		usleep_range(5, 10);
+-		usleep_range(5, 10);
++		if (xfer->rx_nbits > SPI_NBITS_SINGLE && dws->enh.ctrl_len)
++			fsleep(5);
++		else
++			usleep_range(5, 10);
  
 -		/* Write something to the TX FIFO to start the transfer */
 -		dw_spi_start_frame(dws);
@@ -477,7 +512,7 @@ diff --git a/drivers/spi/spi-dw-dma.c b/drivers/spi/spi-dw-dma.c
  	ret = dw_spi_dma_wait(dws, xfer->len, xfer->effective_speed_hz);
 +	/* The error IRQ also completes the DMA wait object. A wake-up does
 +	 * not guarantee that either DMA channel stopped touching the
-+	 * temporary tail SG; distinguish normal callbacks from early IRQ.
++	 * mapped tail; distinguish normal callbacks from early IRQ.
 +	 */
 +	if (!ret && dws->host->cur_msg &&
 +	    dws->host->cur_msg->status != -EINPROGRESS)
@@ -489,7 +524,7 @@ diff --git a/drivers/spi/spi-dw-dma.c b/drivers/spi/spi-dw-dma.c
  err_clear_dmac:
  	dw_writel(dws, DW_SPI_DMACR, 0);
 +	/* Terminate every unfinished DMA channel synchronously before
-+	 * freeing the descriptor on error / early controller interrupt.
++	 * restoring a temporarily trimmed mapped SG entry.
 +	 */
 +	if (ret) {
 +		if (test_bit(DW_SPI_TX_BUSY, &dws->dma_chan_busy)) {
@@ -508,8 +543,10 @@ diff --git a/drivers/spi/spi-dw-dma.c b/drivers/spi/spi-dw-dma.c
 +	}
 +	if (quad_dma)
 +		dw_writel(dws, DW_SPI_DMATDLR, dws->txburst);
-+	if (tail_allocated)
-+		kfree(tx_tail);
++	if (tx_sg_trimmed) {
++		sg_dma_address(tx_sg) = tx_trimmed_addr;
++		sg_dma_len(tx_sg) = tx_trimmed_len;
++	}
  
  	return ret;
  }

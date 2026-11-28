@@ -17,6 +17,7 @@
 #include "esp_rcp_api.h"
 #include "esp_kernel_port.h"
 #include "esp_host_wire_bounds.h"
+#include "esp_spi_common.h"
 #include "esp_stats.h"
 #include "esp_utils.h"
 #include "esp_cfg80211.h"
@@ -45,7 +46,6 @@ static void adjust_spi_clock(u8 spi_clk_mhz);
 static void open_data_path(void);
 static bool spi_accepting_work(void);
 static void esp_spi_pause_for_transport_recovery(struct esp_adapter *adapter);
-static bool spi_get_cmd_info(struct sk_buff *skb, u8 *cmd_code, u16 *cmd_seq);
 static int esp_spi_reset_target(struct esp_adapter *adapter);
 static int process_rx_buf(struct sk_buff *skb, bool rx_pending);
 
@@ -83,18 +83,7 @@ static atomic_t spi_reboot_cmd_seq = ATOMIC_INIT(0);
 
 static struct sk_buff *esp_spi_alloc_skb(u32 len)
 {
-	struct sk_buff *skb = NULL;
-	u32 alloc_len;
-	u8 offset;
-
-	alloc_len = max(len, (u32)SPI_BUF_SIZE) + INTERFACE_HEADER_PADDING;
-	skb = netdev_alloc_skb(NULL, alloc_len);
-	if (skb) {
-		offset = ((unsigned long)skb->data) & (SKB_DATA_ADDR_ALIGNMENT - 1);
-		if (offset)
-			skb_reserve(skb, INTERFACE_HEADER_PADDING - offset);
-	}
-	return skb;
+	return esp_spi_alloc_aligned_skb(len, SPI_BUF_SIZE);
 }
 
 static void esp_spi_purge_queues(void)
@@ -106,7 +95,7 @@ static void esp_spi_purge_queues(void)
 
 	for (q = 0; q < MAX_PRIORITY_QUEUES; q++) {
 		while ((skb = skb_dequeue(&spi_context.tx_q[q])) != NULL) {
-			if (spi_context.adapter && spi_get_cmd_info(skb, &cmd_code, &cmd_seq))
+			if (spi_context.adapter && esp_spi_get_cmd_info(skb, &cmd_code, &cmd_seq))
 				esp_cmd_transport_failed(spi_context.adapter, cmd_code, cmd_seq, -EIO);
 #if TEST_RAW_TP
 			{
@@ -146,11 +135,6 @@ static int esp_spi_gpio_asserted(struct gpio_desc *gpio, const char *name,
 	return 0;
 }
 
-static unsigned long esp_spi_gpio_irq_flags(struct gpio_desc *gpio)
-{
-	return gpiod_is_active_low(gpio) ?
-		IRQF_TRIGGER_FALLING : IRQF_TRIGGER_RISING;
-}
 
 static void esp_spi_kick(void)
 {
@@ -453,31 +437,13 @@ static int esp_spi_pulse_reset_gpio_locked(struct esp_spi_context *context,
 					   unsigned int settle_ms,
 					   const char *reason)
 {
-	int ret;
-
 	if (!context || !context->reset_gpio)
 		return -ENODEV;
 
-	ret = gpiod_direction_output(context->reset_gpio, 0);
-	if (ret) {
-		esp_err("Failed to configure SPI reset GPIO as output: %d\n", ret);
-		return ret;
-	}
-	context->reset_gpio_driven = true;
-
 	esp_info("Resetting ESP SPI target (%s) via reset-gpios\n", reason);
-	gpiod_set_value_cansleep(context->reset_gpio, 1);
-	usleep_range(200, 500);
-	gpiod_set_value_cansleep(context->reset_gpio, 0);
-	ret = gpiod_direction_input(context->reset_gpio);
-	if (ret) {
-		esp_err("Failed to release SPI reset GPIO as input: %d\n", ret);
-		return ret;
-	}
-	context->reset_gpio_driven = false;
-	if (settle_ms)
-		msleep(settle_ms);
-	return 0;
+	return esp_spi_pulse_reset_gpio(context->reset_gpio,
+					&context->reset_gpio_driven,
+					200, 500, settle_ms);
 }
 
 static int esp_spi_hw_reset(struct esp_adapter *adapter)
@@ -983,6 +949,14 @@ static int write_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 		return -EINVAL;
 	}
 
+	if (skb->len < sizeof(*payload_header)) {
+		dev_kfree_skb(skb);
+		return -EINVAL;
+	}
+	if (skb_is_nonlinear(skb) && skb_linearize(skb)) {
+		dev_kfree_skb(skb);
+		return -ENOMEM;
+	}
 	payload_header = (struct esp_payload_header *)skb->data;
 	if (skb->len > max_pkt_size) {
 		esp_err("Drop pkt of len[%u] > max spi transport len[%u]\n", skb->len, max_pkt_size);
@@ -1105,37 +1079,7 @@ int esp_deinit_module(struct esp_adapter *adapter)
 	return 0;
 }
 
-static bool spi_get_cmd_info(struct sk_buff *skb, u8 *cmd_code, u16 *cmd_seq)
-{
-	struct esp_payload_header *payload_header;
-	struct command_header *cmd;
-	u16 offset;
 
-	if (!skb || skb->len < sizeof(*payload_header))
-		return false;
-	payload_header = (struct esp_payload_header *)skb->data;
-	if (payload_header->packet_type != PACKET_TYPE_COMMAND_REQUEST)
-		return false;
-	offset = esp_wire_le16_to_cpu(payload_header->offset);
-	if (offset + sizeof(*cmd) > skb->len)
-		return false;
-	cmd = (struct command_header *)(skb->data + offset);
-	if (cmd_code)
-		*cmd_code = cmd->cmd_code;
-	if (cmd_seq)
-		*cmd_seq = esp_wire_le16_to_cpu(cmd->seq_num);
-	return true;
-}
-
-static bool spi_is_stateful_packet(const struct sk_buff *skb)
-{
-	const struct esp_payload_header *header;
-
-	if (!skb || skb->len < sizeof(*header))
-		return false;
-	header = (const struct esp_payload_header *)skb->data;
-	return header->if_type == ESP_HCI_IF || header->if_type == ESP_RCP_IF;
-}
 
 static void spi_notify_tx_lost(bool is_cmd, bool is_stateful_pkt,
 		u8 cmd_code, u16 cmd_seq, int err, bool recover)
@@ -1412,8 +1356,8 @@ static void esp_spi_work(struct work_struct *work)
 	if (src_skb) {
 		copy_len = min_t(u32, src_skb->len, (u32)SPI_BUF_SIZE);
 		payload_header = (struct esp_payload_header *)src_skb->data;
-		is_cmd = spi_get_cmd_info(src_skb, &cmd_code, &cmd_seq);
-		is_stateful_pkt = spi_is_stateful_packet(src_skb);
+		is_cmd = esp_spi_get_cmd_info(src_skb, &cmd_code, &cmd_seq);
+		is_stateful_pkt = esp_spi_is_stateful_packet(src_skb);
 #if TEST_RAW_TP
 		if (raw_tp_mode == ESP_TEST_RAW_TP_HOST_TO_ESP &&
 		    payload_header->if_type == ESP_TEST_IF) {

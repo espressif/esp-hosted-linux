@@ -1,0 +1,84 @@
+spi: dw: select PIO before mapping fragmented RX-only transfers
+
+A finite DMAengine hardware SG burst capacity cannot service RX-only
+scatterlists larger than that capacity via the inherited per-segment
+fallback, which assumes TX DMA exists. A late -EOPNOTSUPP safely avoids
+a null TX SG dereference but still fails a valid SPI transaction.
+
+Pre-compute the worst-case number of SPI-core DMA SG entries before
+mapping, using the same segment bounds as spi_map_buf_attrs(). Select
+PIO early for RX-only buffers that the provider cannot DMA without
+unsafe fragmentation. Keep DMA for common single-SG and supported
+multi-SG transfers; no changes to the steady-state DMA transfer path.
+
+The post-mapping dispatch rejection remains as defense in depth.
+
+diff --git a/drivers/spi/spi-dw-dma.c b/drivers/spi/spi-dw-dma.c
+--- a/drivers/spi/spi-dw-dma.c
++++ b/drivers/spi/spi-dw-dma.c
+@@ -10,10 +10,12 @@
+ #include <linux/dma-mapping.h>
+ #include <linux/dmaengine.h>
+ #include <linux/irqreturn.h>
+ #include <linux/jiffies.h>
+ #include <linux/module.h>
++#include <linux/mm.h>
++#include <linux/vmalloc.h>
+ #include <linux/pci.h>
+ #include <linux/platform_data/dma-dw.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/scatterlist.h>
+ #include <linux/spi/spi.h>
+@@ -264,10 +266,52 @@
+ 			return false;
+ 		fifo_words -= 2;
+ 	}
+ 	if (xfer->len <= fifo_words * nbytes)
+ 		return false;
++
++	/*
++	 * The standard SPI core decides whether to DMA-map a transfer only
++	 * after can_dma() returns. An RX-only operation with more SG entries
++	 * than the DMAengine's hardware SG burst would otherwise reach the
++	 * older full-duplex per-SG fallback, which requires a TX SG list.
++	 *
++	 * Bound the exact SPI-core SG allocation before mapping, using the
++	 * same rules as spi_map_buf_attrs(). dma_map_sgtable() cannot return
++	 * more DMA entries than the original SG table. Select the existing
++	 * interrupt/poll-based PIO path for unsupported fragmented RX here,
++	 * while the transfer buffer is still CPU-owned. Never switch an
++	 * already DMA-mapped buffer to PIO during transfer_one().
++	 *
++	 * For the ordinary RX fast path (or a provider without a finite SG
++	 * limit), the DMA choice remains unchanged.
++	 */
++	/* Never opt into DMA without the required directional channel. */
++	if ((xfer->rx_buf && !dws->rxchan) ||
++	    (xfer->tx_buf && !dws->txchan))
++		return false;
++
++	if (xfer->rx_buf && !xfer->tx_buf && dws->dma_sg_burst) {
++		size_t desc_len = dma_get_max_seg_size(dws->rxchan->device->dev);
++		size_t max_nents;
++
++		if (!desc_len)
++			return false;
++		if (is_vmalloc_addr(xfer->rx_buf)) {
++			desc_len = min_t(size_t, desc_len, PAGE_SIZE);
++			max_nents = DIV_ROUND_UP(xfer->len +
++						offset_in_page(xfer->rx_buf), desc_len);
++		} else if (virt_addr_valid(xfer->rx_buf)) {
++			desc_len = min_t(size_t, desc_len, host->max_dma_len);
++			max_nents = DIV_ROUND_UP(xfer->len, desc_len);
++		} else {
++			/* Unrecognized memory: leave it CPU-owned. */
++			return false;
++		}
++		if (max_nents > dws->dma_sg_burst)
++			return false;
++	}
+ 
+ 	dma_bus_width = dw_spi_dma_convert_width(nbytes);
+ 
+ 	return dws->dma_addr_widths & BIT(dma_bus_width);
+ }

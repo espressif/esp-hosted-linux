@@ -18,6 +18,7 @@
     - if: '$CI_PIPELINE_SOURCE == "web"'
     - changes:
         - esp/esp_driver/network_adapter/**/*
+        - host/include/esp_spi_hd_wire.h
         - esp/esp_driver/setup.sh
         - esp/esp_driver/setup.ps1
         - .gitlab/ci/firmware-build.yml

@@ -2,9 +2,8 @@
 /*
  * ESP-Hosted SPI half-duplex/QIO firmware transport.
  *
- * The host may split one Hosted frame over several WRDMA + CMD7 transactions
- * because the initial Raspberry Pi RP1 quad controller support has a bounded
- * enhanced-TX FIFO. This backend treats each WRDMA as a segment and assembles
+ * The host may split a Hosted frame over several WRDMA + CMD7 transactions
+ * according to negotiated transfer limits. This backend assembles
  * segments until the standard esp_payload_header describes a complete frame.
  *
  * E2H frames are queued as one SPI Slave HD TX transaction and are consumed by
@@ -27,13 +26,14 @@
 #include "esp_system.h"
 #include "esp_heap_caps.h"
 #include "esp_fw_version.h"
+#include "../../../../host/include/esp_spi_hd_wire.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "hal/spi_types.h"
-#include "hal/spi_ll.h"
-#include "soc/spi_periph.h"
+#include "soc/soc_caps.h"
 #include "interface.h"
 #include "stats.h"
 #include "endian.h"
@@ -42,21 +42,9 @@
 #define SPI_HD_HOST                    SPI2_HOST
 #define SPI_HD_DMA_CHAN                SPI_DMA_CH_AUTO
 
-#define SPI_HD_REG_SLAVE_READY         0x00
-#define SPI_HD_REG_MAX_TX_BUF_LEN      0x04
-#define SPI_HD_REG_MAX_RX_BUF_LEN      0x08
-#define SPI_HD_REG_TX_BUF_LEN          0x0C
-#define SPI_HD_REG_RX_BUF_LEN          0x10
-#define SPI_HD_REG_SLAVE_CTRL          0x14
-#define SPI_HD_REG_TX_LEN_MIRROR       0x18
-/* Diagnostics occupy 0x38..0x3f of the 64-byte C5 shared buffer. */
-#define SPI_HD_REG_RX_DIAG_LEN          0x34
-#define SPI_HD_REG_RX_DIAG_BITS         0x38
-#define SPI_HD_REG_RX_DIAG_RAW          0x3C
-
-#define SPI_HD_STATE_SLAVE_READY       0xEE
-#define SPI_HD_CAP_TX_LEN_MIRROR        0x100U
-#define SPI_HD_TX_BUF_LEN_MASK         0x00FFFFFFU
+/* Verify the entire shared-register ABI against the selected silicon. */
+_Static_assert(SPIHD_REGISTER_BYTES <= SOC_SPI_MAXIMUM_BUFFER_SIZE,
+               "SPI-HD shared register layout exceeds hardware capacity");
 
 #define SPI_HD_FRAME_BUF_SIZE          1600U
 #define SPI_HD_RX_QUEUE_SIZE           CONFIG_ESP_SPI_HD_RX_Q_SIZE
@@ -73,18 +61,50 @@ _Static_assert((SPI_HD_RX_SEGMENT_SIZE % 4) == 0,
 #define GPIO_D3                        CONFIG_ESP_SPI_HD_GPIO_D3
 #define GPIO_DATA_READY                CONFIG_ESP_SPI_HD_GPIO_DATA_READY
 
+/* GPIO matrix selection is board policy, but bus pins must be usable and distinct. */
+_Static_assert(GPIO_IS_VALID_GPIO(GPIO_CS),
+               "SPI-HD CS pin is invalid");
+_Static_assert(GPIO_IS_VALID_GPIO(GPIO_SCLK),
+               "SPI-HD SCLK pin is invalid");
+_Static_assert(GPIO_IS_VALID_OUTPUT_GPIO(GPIO_D0),
+               "SPI-HD D0 pin is invalid");
+_Static_assert(GPIO_IS_VALID_OUTPUT_GPIO(GPIO_D1),
+               "SPI-HD D1 pin is invalid");
+_Static_assert(GPIO_IS_VALID_OUTPUT_GPIO(GPIO_D2),
+               "SPI-HD D2 pin is invalid");
+_Static_assert(GPIO_IS_VALID_OUTPUT_GPIO(GPIO_D3),
+               "SPI-HD D3 pin is invalid");
+_Static_assert(GPIO_IS_VALID_OUTPUT_GPIO(GPIO_DATA_READY),
+               "SPI-HD DATA_READY pin is invalid");
+_Static_assert(GPIO_CS != GPIO_SCLK &&
+               GPIO_CS != GPIO_D0 &&
+               GPIO_CS != GPIO_D1 &&
+               GPIO_CS != GPIO_D2 &&
+               GPIO_CS != GPIO_D3 &&
+               GPIO_CS != GPIO_DATA_READY &&
+               GPIO_SCLK != GPIO_D0 &&
+               GPIO_SCLK != GPIO_D1 &&
+               GPIO_SCLK != GPIO_D2 &&
+               GPIO_SCLK != GPIO_D3 &&
+               GPIO_SCLK != GPIO_DATA_READY &&
+               GPIO_D0 != GPIO_D1 &&
+               GPIO_D0 != GPIO_D2 &&
+               GPIO_D0 != GPIO_D3 &&
+               GPIO_D0 != GPIO_DATA_READY &&
+               GPIO_D1 != GPIO_D2 &&
+               GPIO_D1 != GPIO_D3 &&
+               GPIO_D1 != GPIO_DATA_READY &&
+               GPIO_D2 != GPIO_D3 &&
+               GPIO_D2 != GPIO_DATA_READY &&
+               GPIO_D3 != GPIO_DATA_READY,
+               "SPI-HD GPIOs must be distinct");
+
 static const char TAG[] = "FW_SPI_HD";
+static uint32_t s_host_rx_max;
 
 typedef struct {
     spi_slave_hd_data_t trans;
     uint8_t *buf;
-    uint32_t diag_hw_bits;
-    uint32_t diag_ready_dma_conf;
-    uint32_t diag_ready_dma_int_raw;
-    uint32_t diag_done_dma_conf;
-    uint32_t diag_done_dma_int_raw;
-    uint8_t diag_wrdma_raw;
-    uint8_t diag_cmd7_raw;
 } spi_hd_rx_slot_t;
 
 typedef struct {
@@ -94,7 +114,6 @@ typedef struct {
     uint32_t raw_tp_run_id;
     uint32_t raw_tp_frames;
 } spi_hd_tx_desc_t;
-
 
 #ifdef CONFIG_ESP_SPI_HD_TX_BATCH
 #define SPI_HD_TX_BATCH_FRAMES 2U
@@ -193,11 +212,85 @@ static bool spi_hd_release_tx_owner(spi_hd_tx_desc_t *desc)
 }
 static uint32_t s_tx_ready_bytes;
 static uint32_t s_rx_ready_segments;
-static unsigned int s_rx_diag_segments;
-/* Shared-register snapshots serve only the first bounded host probes. */
-static volatile unsigned int s_rx_hw_diag_segments;
-static unsigned int s_rx_payload_diag_segments;
-static bool s_rx_diag_done;
+/* Protect API admission and task-exit publication during teardown. */
+static portMUX_TYPE s_lifecycle_lock = portMUX_INITIALIZER_UNLOCKED;
+static unsigned int s_api_users;
+#define SPI_HD_WAIT_TICKS pdMS_TO_TICKS(100)
+#define SPI_HD_STOP_TICKS pdMS_TO_TICKS(3000)
+
+static bool spi_hd_is_running(void)
+{
+    bool running;
+    portENTER_CRITICAL(&s_lifecycle_lock);
+    running = s_running;
+    portEXIT_CRITICAL(&s_lifecycle_lock);
+    return running;
+}
+
+static void spi_hd_set_running(bool running)
+{
+    portENTER_CRITICAL(&s_lifecycle_lock);
+    s_running = running;
+    portEXIT_CRITICAL(&s_lifecycle_lock);
+}
+
+static bool spi_hd_api_enter(void)
+{
+    bool running;
+    portENTER_CRITICAL(&s_lifecycle_lock);
+    running = s_running;
+    if (running)
+        s_api_users++;
+    portEXIT_CRITICAL(&s_lifecycle_lock);
+    return running;
+}
+
+static void spi_hd_api_leave(void)
+{
+    portENTER_CRITICAL(&s_lifecycle_lock);
+    s_api_users--;
+    portEXIT_CRITICAL(&s_lifecycle_lock);
+}
+
+static BaseType_t spi_hd_wait_sem(SemaphoreHandle_t sem)
+{
+    while (spi_hd_is_running()) {
+        if (xSemaphoreTake(sem, SPI_HD_WAIT_TICKS) == pdTRUE) {
+            if (spi_hd_is_running())
+                return pdTRUE;
+            xSemaphoreGive(sem);
+            break;
+        }
+    }
+    return pdFALSE;
+}
+
+static BaseType_t spi_hd_wait_queue_send(QueueHandle_t queue, const void *item)
+{
+    while (spi_hd_is_running()) {
+        if (xQueueSend(queue, item, SPI_HD_WAIT_TICKS) == pdTRUE)
+            return pdTRUE;
+    }
+    return pdFALSE;
+}
+
+static BaseType_t spi_hd_wait_queue_receive(QueueHandle_t queue, void *item)
+{
+    while (spi_hd_is_running()) {
+        if (xQueueReceive(queue, item, SPI_HD_WAIT_TICKS) == pdTRUE)
+            return pdTRUE;
+    }
+    return pdFALSE;
+}
+
+static void spi_hd_task_exit(TaskHandle_t *handle)
+{
+    portENTER_CRITICAL(&s_lifecycle_lock);
+    *handle = NULL;
+    portEXIT_CRITICAL(&s_lifecycle_lock);
+    /* No transport resource may be accessed after publishing task exit. */
+    vTaskDelete(NULL);
+}
 
 static interface_handle_t *esp_spi_hd_init(void);
 static int32_t esp_spi_hd_write(interface_handle_t *handle,
@@ -220,17 +313,6 @@ static void spi_hd_set_data_ready(bool active)
     gpio_set_level(GPIO_DATA_READY, active ? 1 : 0);
 }
 
-static uint32_t spi_hd_diag_hash(const uint8_t *buf, size_t len)
-{
-    uint32_t hash = 2166136261U;
-
-    while (len--) {
-        hash ^= *buf++;
-        hash *= 16777619U;
-    }
-    return hash;
-}
-
 static void spi_hd_write_reg32(uint32_t addr, uint32_t value)
 {
     spi_slave_hd_write_buffer(SPI_HD_HOST, addr,
@@ -246,10 +328,10 @@ static void spi_hd_transport_fatal(const char *reason, esp_err_t err)
 {
     ESP_LOGE(TAG, "SPI-HD transport fatal: %s (%s); restarting firmware",
              reason, esp_err_to_name(err));
-    s_running = false;
+    spi_hd_set_running(false);
     spi_hd_set_data_ready(false);
     if (s_driver_initialized)
-        spi_hd_write_reg32(SPI_HD_REG_SLAVE_READY, 0);
+        spi_hd_write_reg32(SPIHD_REG_SLAVE_READY, 0);
     vTaskDelay(pdMS_TO_TICKS(20));
     esp_restart();
 }
@@ -265,24 +347,24 @@ static bool spi_hd_cb_tx_ready(void *arg, spi_slave_hd_event_t *event,
     if (!event || !event->trans)
         return false;
 
-    int_mask = s_tx_ready_bytes & ~SPI_HD_TX_BUF_LEN_MASK;
+    int_mask = s_tx_ready_bytes & ~SPIHD_TX_BUF_LEN_MASK;
 #ifdef CONFIG_ESP_SPI_HD_TX_LEN_MIRROR
     int_mask = (int_mask & 0x03000000U) |
                ((int_mask + 0x04000000U) & 0xFC000000U);
 #endif
     s_tx_ready_bytes =
-        ((s_tx_ready_bytes & SPI_HD_TX_BUF_LEN_MASK) + event->trans->len) &
-        SPI_HD_TX_BUF_LEN_MASK;
+        ((s_tx_ready_bytes & SPIHD_TX_BUF_LEN_MASK) + event->trans->len) &
+        SPIHD_TX_BUF_LEN_MASK;
     s_tx_ready_bytes |= int_mask;
 #ifdef CONFIG_ESP_SPI_HD_TX_LEN_MIRROR
-    spi_hd_write_reg32(SPI_HD_REG_TX_BUF_LEN, s_tx_ready_bytes & 0x03FFFFFFU);
+    spi_hd_write_reg32(SPIHD_REG_TX_BUF_LEN, s_tx_ready_bytes & 0x03FFFFFFU);
     /* The spare six bits tag each publication without another RAM counter.
      * Read low then high; publish high then low using aligned word stores.
      */
-    spi_hd_write_reg32(SPI_HD_REG_TX_LEN_MIRROR + 4, s_tx_ready_bytes);
-    spi_hd_write_reg32(SPI_HD_REG_TX_LEN_MIRROR, s_tx_ready_bytes);
+    spi_hd_write_reg32(SPIHD_REG_TX_LEN_MIRROR + 4, s_tx_ready_bytes);
+    spi_hd_write_reg32(SPIHD_REG_TX_LEN_MIRROR, s_tx_ready_bytes);
 #else
-    spi_hd_write_reg32(SPI_HD_REG_TX_BUF_LEN, s_tx_ready_bytes);
+    spi_hd_write_reg32(SPIHD_REG_TX_BUF_LEN, s_tx_ready_bytes);
 #endif
     spi_hd_set_data_ready(true);
     return true;
@@ -291,56 +373,13 @@ static bool spi_hd_cb_tx_ready(void *arg, spi_slave_hd_event_t *event,
 static bool spi_hd_cb_rx_ready(void *arg, spi_slave_hd_event_t *event,
                                int *awoken)
 {
-    spi_hd_rx_slot_t *slot;
-    spi_dev_t *hw;
-
     (void)arg;
     (void)awoken;
-
-    if (event && event->trans && s_rx_hw_diag_segments < 32) {
-        slot = (spi_hd_rx_slot_t *)event->trans;
-        hw = spi_periph_signal[SPI_HD_HOST].hw;
-        slot->diag_ready_dma_conf = hw->dma_conf.val;
-        slot->diag_ready_dma_int_raw = hw->dma_int_raw.val;
-    }
+    if (!event || !event->trans)
+        return false;
 
     s_rx_ready_segments++;
-    spi_hd_write_reg32(SPI_HD_REG_RX_BUF_LEN, s_rx_ready_segments);
-    return true;
-}
-
-static bool spi_hd_cb_rx_done(void *arg, spi_slave_hd_event_t *event,
-                              int *awoken)
-{
-    spi_hd_rx_slot_t *slot;
-    spi_dev_t *hw;
-
-    (void)arg;
-    (void)awoken;
-
-    if (!event || !event->trans || s_rx_hw_diag_segments >= 32)
-        return true;
-    s_rx_hw_diag_segments++;
-
-    /*
-     * trans is the first member of spi_hd_rx_slot_t, so the transaction
-     * pointer is also the slot base. Capture the peripheral's length/status
-     * in the completion callback, before the task can observe a later WRDMA.
-     */
-    slot = (spi_hd_rx_slot_t *)event->trans;
-    hw = spi_periph_signal[SPI_HD_HOST].hw;
-    slot->diag_hw_bits = spi_ll_slave_get_rcv_bitlen(hw);
-    slot->diag_done_dma_conf = hw->dma_conf.val;
-    slot->diag_done_dma_int_raw = hw->dma_int_raw.val;
-    slot->diag_wrdma_raw = !!spi_ll_get_intr(hw, SPI_LL_INTR_WRDMA);
-    slot->diag_cmd7_raw = !!spi_ll_get_intr(hw, SPI_LL_INTR_CMD7);
-    /*
-     * Hardware callback snapshot visible through standard SIO RDBUF,
-     * independent of firmware UART logs. Only the diagnostic host reads
-     * these reserved shared-buffer words, after WRDMA/WR_END.
-     */
-    spi_hd_write_reg32(SPI_HD_REG_RX_DIAG_BITS, slot->diag_hw_bits);
-    spi_hd_write_reg32(SPI_HD_REG_RX_DIAG_RAW, slot->diag_done_dma_int_raw);
+    spi_hd_write_reg32(SPIHD_REG_RX_BUF_LEN, s_rx_ready_segments);
     return true;
 }
 
@@ -498,12 +537,12 @@ static int spi_hd_queue_rx_frame(interface_buffer_handle_t *frame)
 
     if (frame->if_type == ESP_INTERNAL_IF)
         queue = spi_hd_rx_queue[PRIO_Q_HIGH];
-    else if (frame->if_type == ESP_HCI_IF)
+    else if (frame->if_type == ESP_HCI_IF || frame->if_type == ESP_RCP_IF)
         queue = spi_hd_rx_queue[PRIO_Q_MID];
     else
         queue = spi_hd_rx_queue[PRIO_Q_LOW];
 
-    ret = xQueueSend(queue, frame, portMAX_DELAY);
+    ret = spi_hd_wait_queue_send(queue, frame);
     if (ret != pdTRUE)
         return ESP_FAIL;
 
@@ -513,9 +552,13 @@ static int spi_hd_queue_rx_frame(interface_buffer_handle_t *frame)
 
 static void spi_hd_consume_segment(const uint8_t *data, size_t len)
 {
+    if (len & (SPIHD_FRAME_ALIGNMENT - 1)) {
+        spi_hd_transport_fatal("unaligned RX DMA segment", ESP_ERR_INVALID_SIZE);
+        return;
+    }
     while (data && len) {
         interface_buffer_handle_t frame = {0};
-        size_t target, count;
+        size_t target, count, padding;
 
         if (!s_frame_buf) {
             s_frame_buf = heap_caps_malloc(SPI_HD_FRAME_BUF_SIZE, MALLOC_CAP_8BIT);
@@ -545,13 +588,29 @@ static void spi_hd_consume_segment(const uint8_t *data, size_t len)
             spi_hd_transport_fatal("frame validation or checksum failure", ESP_ERR_INVALID_CRC);
             return;
         }
+        padding = SPIHD_WIRE_SPAN(s_frame_len) - s_frame_len;
+        if (padding > len) {
+            spi_hd_reset_assembly();
+            spi_hd_transport_fatal("missing frame padding", ESP_ERR_INVALID_SIZE);
+            return;
+        }
+        for (size_t i = 0; i < padding; i++) {
+            if (data[i]) {
+                spi_hd_reset_assembly();
+                spi_hd_transport_fatal("nonzero frame padding", ESP_ERR_INVALID_SIZE);
+                return;
+            }
+        }
+        data += padding;
+        len -= padding;
         s_frame_buf = NULL;
         s_frame_len = 0;
         s_frame_expected = 0;
         if (spi_hd_queue_rx_frame(&frame) != ESP_OK) {
             if (frame.free_buf_handle && frame.priv_buffer_handle)
                 frame.free_buf_handle(frame.priv_buffer_handle);
-            spi_hd_transport_fatal("hosted RX queue ownership lost", ESP_FAIL);
+            if (spi_hd_is_running())
+                spi_hd_transport_fatal("hosted RX queue ownership lost", ESP_FAIL);
             return;
         }
     }
@@ -573,22 +632,30 @@ static void spi_hd_rx_task(void *arg)
      * SLAVE_CTRL.DATAPATH_ON, matching the current esp-hosted-mcu SPI-HD
      * handshake.
      */
-    while (s_running) {
-        spi_slave_hd_read_buffer(SPI_HD_HOST, SPI_HD_REG_SLAVE_CTRL,
+    while (spi_hd_is_running()) {
+        spi_slave_hd_read_buffer(SPI_HD_HOST, SPIHD_REG_SLAVE_CTRL,
                                  (uint8_t *)&ctrl, sizeof(ctrl));
-        if (ctrl & 1U)
+        if (ctrl & SPIHD_CTRL_DATAPATH_ON)
             break;
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    if (!s_running)
+    if (!spi_hd_is_running())
         goto out;
+
+    spi_slave_hd_read_buffer(SPI_HD_HOST, SPIHD_REG_HOST_RX_MAX,
+                             (uint8_t *)&s_host_rx_max, sizeof(s_host_rx_max));
+    if (s_host_rx_max < SPI_HD_FRAME_BUF_SIZE ||
+        s_host_rx_max > SPI_HD_FRAME_BUF_SIZE * 2U) {
+        spi_hd_transport_fatal("invalid host receive capacity", ESP_ERR_INVALID_SIZE);
+        goto out;
+    }
 
     for (i = 0; i < SPI_HD_RX_QUEUE_SIZE; i++) {
         ret = spi_hd_queue_dma(SPI_SLAVE_CHAN_RX,
-                               &s_rx_slots[i].trans, portMAX_DELAY);
+                               &s_rx_slots[i].trans, SPI_HD_WAIT_TICKS);
         if (ret != ESP_OK) {
-            if (s_running)
+            if (spi_hd_is_running())
                 spi_hd_transport_fatal("initial RX DMA descriptor enqueue", ret);
             goto out;
         }
@@ -604,17 +671,17 @@ static void spi_hd_rx_task(void *arg)
              s_rx_ready_segments);
 #endif
     vTaskDelay(pdMS_TO_TICKS(100));
-    if (s_running && context.event_handler)
+    if (spi_hd_is_running() && context.event_handler)
         context.event_handler(ESP_OPEN_DATA_PATH);
 
-    while (s_running) {
+    while (spi_hd_is_running()) {
         ret_trans = NULL;
         ret = spi_hd_get_dma_result(SPI_SLAVE_CHAN_RX,
                                     &ret_trans, pdMS_TO_TICKS(100));
         if (ret == ESP_ERR_TIMEOUT)
             continue;
         if (ret != ESP_OK || !ret_trans) {
-            if (!s_running)
+            if (!spi_hd_is_running())
                 break;
             /* Descriptor ownership is unknown on a non-timeout result.
              * Do not continue advertising RX credits with a dead queue.
@@ -628,7 +695,7 @@ static void spi_hd_rx_task(void *arg)
         }
         /* Descriptor identity alone is insufficient if the DMA provider
          * overwrote its data/length fields. Validate ownership and bounds
-         * before any diagnostics read or memset the buffer.
+         * before accessing the buffer.
          */
         if (ret_trans->data != ((spi_hd_rx_slot_t *)ret_trans)->buf ||
             ret_trans->len != SPI_HD_RX_SEGMENT_SIZE) {
@@ -636,7 +703,7 @@ static void spi_hd_rx_task(void *arg)
             break;
         }
         /* DMA completion metadata must never index beyond its buffer.
-         * Reject impossible lengths before diagnostics, hashing or assembly.
+         * Reject impossible lengths before assembly.
          */
         if (ret_trans->trans_len > ret_trans->len) {
             ESP_LOGE(TAG, "SPI-HD RX DMA length overflow: actual=%u allocated=%u",
@@ -648,112 +715,21 @@ static void spi_hd_rx_task(void *arg)
             break;
         }
 
-        /*
-         * Bring-up diagnostic: log every returned RX descriptor, including
-         * zero-length/error completions.  A QIO WRDMA that advances the
-         * host-visible ready-credit counter but returns trans_len == 0 is a
-         * controller/protocol completion with no DMA payload, which is very
-         * different from payload corruption in the assembly layer.
-         */
-        if (!s_rx_diag_done && s_rx_diag_segments < 16) {
-            spi_hd_rx_slot_t *slot =
-                ret_trans ? (spi_hd_rx_slot_t *)ret_trans : NULL;
-            spi_dev_t *hw = spi_periph_signal[SPI_HD_HOST].hw;
-            unsigned int task_hw_bits = spi_ll_slave_get_rcv_bitlen(hw);
-            uint32_t raw4_hash = 0;
-            uint8_t b0 = 0, b1 = 0, b2 = 0, b3 = 0;
-
-            if (ret_trans && ret_trans->data && ret_trans->len >= 4) {
-                raw4_hash = spi_hd_diag_hash(ret_trans->data, 4);
-                b0 = ret_trans->data[0];
-                b1 = ret_trans->data[1];
-                b2 = ret_trans->data[2];
-                b3 = ret_trans->data[3];
-            }
-
-            if (ret_trans && ret_trans->trans_len) {
-                ESP_LOGI(TAG,
-                         "SPI-HD RX result diag: idx=%u ret=%s len=%u hash=0x%08" PRIx32 " raw4=0x%08" PRIx32 " bytes=%02x%02x%02x%02x cb_hw_bits=%u task_hw_bits=%u wrdma_raw=%u cmd7_raw=%u ready_dma_conf=0x%08" PRIx32 " done_dma_conf=0x%08" PRIx32 " ready_dma_raw=0x%08" PRIx32 " done_dma_raw=0x%08" PRIx32,
-                         s_rx_diag_segments, esp_err_to_name(ret),
-                         (unsigned int)ret_trans->trans_len,
-                         spi_hd_diag_hash(ret_trans->data,
-                                          ret_trans->trans_len),
-                         raw4_hash, b0, b1, b2, b3,
-                         slot ? (unsigned int)slot->diag_hw_bits : 0U,
-                         task_hw_bits,
-                         slot ? slot->diag_wrdma_raw : 0U,
-                         slot ? slot->diag_cmd7_raw : 0U,
-                         slot ? slot->diag_ready_dma_conf : 0U,
-                         slot ? slot->diag_done_dma_conf : 0U,
-                         slot ? slot->diag_ready_dma_int_raw : 0U,
-                         slot ? slot->diag_done_dma_int_raw : 0U);
-            } else {
-                ESP_LOGI(TAG,
-                         "SPI-HD RX result diag: idx=%u ret=%s trans=%p len=%u raw4=0x%08" PRIx32 " bytes=%02x%02x%02x%02x cb_hw_bits=%u task_hw_bits=%u wrdma_raw=%u cmd7_raw=%u ready_dma_conf=0x%08" PRIx32 " done_dma_conf=0x%08" PRIx32 " ready_dma_raw=0x%08" PRIx32 " done_dma_raw=0x%08" PRIx32,
-                         s_rx_diag_segments, esp_err_to_name(ret),
-                         (void *)ret_trans,
-                         ret_trans ? (unsigned int)ret_trans->trans_len : 0U,
-                         raw4_hash, b0, b1, b2, b3,
-                         slot ? (unsigned int)slot->diag_hw_bits : 0U,
-                         task_hw_bits,
-                         slot ? slot->diag_wrdma_raw : 0U,
-                         slot ? slot->diag_cmd7_raw : 0U,
-                         slot ? slot->diag_ready_dma_conf : 0U,
-                         slot ? slot->diag_done_dma_conf : 0U,
-                         slot ? slot->diag_ready_dma_int_raw : 0U,
-                         slot ? slot->diag_done_dma_int_raw : 0U);
-            }
-            s_rx_diag_segments++;
+        if (!ret_trans->trans_len) {
+            spi_hd_transport_fatal("empty RX DMA completion", ESP_ERR_INVALID_SIZE);
+            break;
         }
 
-        /* Bounded long-payload evidence includes the PIO32/DMA96 boundary. */
-        if (ret_trans->trans_len > 64 && s_rx_payload_diag_segments < 12) {
-            ESP_LOGI(TAG, "SPI-HD QIO RX bytes: idx=%u len=%u bits=%u hash=0x%08" PRIx32,
-                     ++s_rx_payload_diag_segments,
-                     (unsigned int)ret_trans->trans_len,
-                     (unsigned int)((spi_hd_rx_slot_t *)ret_trans)->diag_hw_bits,
-                     spi_hd_diag_hash(ret_trans->data, ret_trans->trans_len));
-            ESP_LOGI(TAG, "SPI-HD RX assembly prior: len=%u expected=%u",
-                     (unsigned int)s_frame_len, (unsigned int)s_frame_expected);
-            ESP_LOG_BUFFER_HEX_LEVEL(TAG, ret_trans->data,
-                                    ret_trans->trans_len < 48 ? ret_trans->trans_len : 48,
-                                    ESP_LOG_INFO);
-        }
+        spi_hd_consume_segment(ret_trans->data, ret_trans->trans_len);
+        if (!spi_hd_is_running())
+            break;
 
-        /*
-         * Task-side RX descriptor byte count published to C5 shared
-         * memory. The host polls over SIO to distinguish a master-side
-         * full-frame completion from what the Slave-HD DMA really returned.
-         */
-        if (s_rx_hw_diag_segments < 32)
-            spi_hd_write_reg32(SPI_HD_REG_RX_DIAG_LEN,
-                               ((s_rx_diag_segments & 0xFFFFU) << 16) |
-                               (ret_trans->trans_len & 0xFFFFU));
-
-        if (ret_trans->trans_len)
-            spi_hd_consume_segment(ret_trans->data, ret_trans->trans_len);
-
-        /*
-         * Re-arm this exact segment buffer immediately. Fill it first so a
-         * zero-length completion can be distinguished from DMA data that
-         * landed despite an incorrect descriptor byte count.
-         */
-        memset(ret_trans->data, 0xa5, ret_trans->len);
+        /* Reuse the descriptor only after its payload has been consumed. */
         ret_trans->trans_len = 0;
-        if (ret_trans) {
-            spi_hd_rx_slot_t *slot = (spi_hd_rx_slot_t *)ret_trans;
-            slot->diag_hw_bits = 0;
-            slot->diag_ready_dma_conf = 0;
-            slot->diag_ready_dma_int_raw = 0;
-            slot->diag_done_dma_conf = 0;
-            slot->diag_done_dma_int_raw = 0;
-            slot->diag_wrdma_raw = 0;
-            slot->diag_cmd7_raw = 0;
-        }
         ret = spi_hd_queue_dma(SPI_SLAVE_CHAN_RX,
-                               ret_trans, portMAX_DELAY);
+                               ret_trans, SPI_HD_WAIT_TICKS);
         if (ret != ESP_OK) {
-            if (s_running)
+            if (spi_hd_is_running())
                 spi_hd_transport_fatal("RX DMA descriptor requeue", ret);
             break;
         }
@@ -769,8 +745,7 @@ static void spi_hd_rx_task(void *arg)
     }
 
 out:
-    spi_hd_rx_task_handle = NULL;
-    vTaskDelete(NULL);
+    spi_hd_task_exit(&spi_hd_rx_task_handle);
 }
 
 static void spi_hd_tx_done_task(void *arg)
@@ -781,14 +756,14 @@ static void spi_hd_tx_done_task(void *arg)
 
     (void)arg;
 
-    while (s_running) {
+    while (spi_hd_is_running()) {
         ret_trans = NULL;
         ret = spi_hd_get_dma_result(SPI_SLAVE_CHAN_TX,
                                     &ret_trans, pdMS_TO_TICKS(100));
         if (ret == ESP_ERR_TIMEOUT)
             continue;
         if (ret != ESP_OK || !ret_trans) {
-            if (!s_running)
+            if (!spi_hd_is_running())
                 break;
             /* This queue has only one DMA owner. Ignoring a completion
              * failure can strand the semaphore and all future E2H TX.
@@ -815,8 +790,7 @@ static void spi_hd_tx_done_task(void *arg)
         xSemaphoreGive(spi_hd_tx_sem);
     }
 
-    spi_hd_tx_done_task_handle = NULL;
-    vTaskDelete(NULL);
+    spi_hd_task_exit(&spi_hd_tx_done_task_handle);
 }
 
 /* Takes ownership of the DMA-capable frame on every return path. */
@@ -826,12 +800,12 @@ static int spi_hd_queue_frame(uint8_t *frame, size_t len,
     spi_hd_tx_desc_t *desc;
     esp_err_t ret;
 
-    if (!s_running || !frame || !len || len > SPI_HD_FRAME_BUF_SIZE) {
+    if (!spi_hd_is_running() || !frame || !len || len > SPI_HD_FRAME_BUF_SIZE) {
         heap_caps_free(frame);
         return ESP_FAIL;
     }
 
-    if (xSemaphoreTake(spi_hd_tx_sem, portMAX_DELAY) != pdTRUE) {
+    if (spi_hd_wait_sem(spi_hd_tx_sem) != pdTRUE) {
         heap_caps_free(frame);
         return ESP_FAIL;
     }
@@ -858,7 +832,7 @@ static int spi_hd_queue_frame(uint8_t *frame, size_t len,
         return ESP_FAIL;
     }
     ret = spi_hd_queue_dma(SPI_SLAVE_CHAN_TX,
-                           &desc->trans, portMAX_DELAY);
+                           &desc->trans, SPI_HD_WAIT_TICKS);
     if (ret != ESP_OK) {
         spi_hd_release_tx_owner(desc);
         heap_caps_free(desc->buf);
@@ -870,7 +844,6 @@ static int spi_hd_queue_frame(uint8_t *frame, size_t len,
     return ESP_OK;
 }
 
-
 #ifdef CONFIG_ESP_SPI_HD_TX_BATCH
 static void spi_hd_tx_batch_task(void *arg)
 {
@@ -880,14 +853,14 @@ static void spi_hd_tx_batch_task(void *arg)
     esp_err_t ret;
     (void)arg;
 
-    while (s_running) {
+    while (spi_hd_is_running()) {
         /* Wait for input before taking the TX semaphore: boot events must
          * still be able to transmit while this queue is empty.
          */
         if (xQueueReceive(s_tx_pending_slots, &slot, pdMS_TO_TICKS(100)) != pdTRUE)
             continue;
         desc = &s_tx_batch_desc[0];
-        if (xSemaphoreTake(spi_hd_tx_sem, portMAX_DELAY) != pdTRUE)
+        if (spi_hd_wait_sem(spi_hd_tx_sem) != pdTRUE)
             break;
         desc->trans.len = 0;
         desc->raw_tp = slot->raw_tp;
@@ -904,9 +877,10 @@ static void spi_hd_tx_batch_task(void *arg)
             /* The pool buffers stay allocated until driver quiescence;
              * returning a slot does not alter the DMA aggregate.
              */
-            xQueueSend(s_tx_free_slots, &slot, portMAX_DELAY);
+            xQueueSend(s_tx_free_slots, &slot, 0);
             if (frames >= SPI_HD_TX_BATCH_FRAMES ||
                 xQueuePeek(s_tx_pending_slots, &next, 0) != pdTRUE ||
+                next->len > s_host_rx_max - desc->trans.len ||
                 next->raw_tp != desc->raw_tp ||
                 next->run_id != desc->raw_tp_run_id)
                 break;
@@ -918,14 +892,14 @@ static void spi_hd_tx_batch_task(void *arg)
             ret = ESP_FAIL;
         else
             ret = spi_hd_queue_dma(SPI_SLAVE_CHAN_TX,
-                                  &desc->trans, portMAX_DELAY);
+                                  &desc->trans, SPI_HD_WAIT_TICKS);
         if (ret != ESP_OK) {
             spi_hd_release_tx_owner(desc);
             if (desc->raw_tp)
                 debug_raw_tp_tx_failed(desc->raw_tp_frames);
             ESP_LOGE(TAG, "TX batch queue failed: %s", esp_err_to_name(ret));
             xSemaphoreGive(spi_hd_tx_sem);
-            if (s_running)
+            if (spi_hd_is_running())
                 spi_hd_transport_fatal("TX batch DMA queue", ret);
             break;
         }
@@ -933,41 +907,39 @@ static void spi_hd_tx_batch_task(void *arg)
             ESP_LOGI(TAG, "SPI-HD TX batch: frames=%u bytes=%u",
                      frames, (unsigned int)desc->trans.len);
     }
-    s_tx_batch_task_handle = NULL;
-    vTaskDelete(NULL);
+    spi_hd_task_exit(&s_tx_batch_task_handle);
 }
 #endif
 
-static int32_t esp_spi_hd_write(interface_handle_t *handle,
-                                interface_buffer_handle_t *buf_handle)
+static int32_t spi_hd_write_active(interface_handle_t *handle,
+                                  interface_buffer_handle_t *buf_handle)
 {
     struct esp_payload_header *header;
     uint8_t *frame;
     uint16_t offset = sizeof(struct esp_payload_header);
-    size_t total_len;
+    size_t total_len, wire_len;
     bool raw_tp = false;
     esp_err_t ret;
 #ifdef CONFIG_ESP_SPI_HD_TX_BATCH
     spi_hd_tx_slot_t *slot;
-    size_t wire_len;
 #endif
 
-    if (!s_running || !handle || handle->state != ACTIVE || !buf_handle ||
+    if (!spi_hd_is_running() || !handle || handle->state != ACTIVE || !buf_handle ||
         !buf_handle->payload || !buf_handle->payload_len)
         return ESP_FAIL;
 
     total_len = offset + buf_handle->payload_len;
     if (total_len > SPI_HD_FRAME_BUF_SIZE)
         return ESP_FAIL;
+    wire_len = SPIHD_WIRE_SPAN(total_len);
 
 #ifdef CONFIG_ESP_SPI_HD_TX_BATCH
-    if (xQueueReceive(s_tx_free_slots, &slot, portMAX_DELAY) != pdTRUE)
+    if (spi_hd_wait_queue_receive(s_tx_free_slots, &slot) != pdTRUE)
         return ESP_FAIL;
-    wire_len = (total_len + 3) & ~(size_t)3;
     frame = slot->buf;
     memset(frame, 0, wire_len);
 #else
-    frame = heap_caps_calloc(1, total_len, MALLOC_CAP_DMA);
+    frame = heap_caps_calloc(1, wire_len, MALLOC_CAP_DMA);
     if (!frame)
         return ESP_ERR_NO_MEM;
 #endif
@@ -994,12 +966,12 @@ static int32_t esp_spi_hd_write(interface_handle_t *handle,
     slot->len = wire_len;
     slot->raw_tp = raw_tp;
     slot->run_id = raw_tp ? buf_handle->raw_tp_run_id : 0;
-    ret = xQueueSend(s_tx_pending_slots, &slot, portMAX_DELAY) == pdTRUE ?
+    ret = spi_hd_wait_queue_send(s_tx_pending_slots, &slot) == pdTRUE ?
           ESP_OK : ESP_FAIL;
     if (ret != ESP_OK)
-        xQueueSend(s_tx_free_slots, &slot, portMAX_DELAY);
+        xQueueSend(s_tx_free_slots, &slot, 0);
 #else
-    ret = spi_hd_queue_frame(frame, total_len, raw_tp,
+    ret = spi_hd_queue_frame(frame, wire_len, raw_tp,
                              buf_handle->raw_tp_run_id);
 #endif
 
@@ -1008,15 +980,15 @@ static int32_t esp_spi_hd_write(interface_handle_t *handle,
     return ret == ESP_OK ? buf_handle->payload_len : ESP_FAIL;
 }
 
-static int esp_spi_hd_read(interface_handle_t *handle,
-                           interface_buffer_handle_t *buf_handle)
+static int spi_hd_read_active(interface_handle_t *handle,
+                              interface_buffer_handle_t *buf_handle)
 {
     BaseType_t ret = pdFALSE;
 
-    if (!s_running || !handle || handle->state != ACTIVE || !buf_handle)
+    if (!spi_hd_is_running() || !handle || handle->state != ACTIVE || !buf_handle)
         return ESP_FAIL;
 
-    if (xSemaphoreTake(spi_hd_rx_sem, portMAX_DELAY) != pdTRUE)
+    if (spi_hd_wait_sem(spi_hd_rx_sem) != pdTRUE)
         return ESP_FAIL;
 
     if (uxQueueMessagesWaiting(spi_hd_rx_queue[PRIO_Q_HIGH]))
@@ -1027,6 +999,28 @@ static int esp_spi_hd_read(interface_handle_t *handle,
         ret = xQueueReceive(spi_hd_rx_queue[PRIO_Q_LOW], buf_handle, 0);
 
     return ret == pdTRUE ? buf_handle->payload_len : ESP_FAIL;
+}
+
+static int32_t esp_spi_hd_write(interface_handle_t *handle,
+                                interface_buffer_handle_t *buf_handle)
+{
+    int32_t ret;
+    if (!spi_hd_api_enter())
+        return ESP_FAIL;
+    ret = spi_hd_write_active(handle, buf_handle);
+    spi_hd_api_leave();
+    return ret;
+}
+
+static int esp_spi_hd_read(interface_handle_t *handle,
+                           interface_buffer_handle_t *buf_handle)
+{
+    int ret;
+    if (!spi_hd_api_enter())
+        return ESP_FAIL;
+    ret = spi_hd_read_active(handle, buf_handle);
+    spi_hd_api_leave();
+    return ret;
 }
 
 static void spi_hd_bus_cfg(spi_bus_config_t *bus_cfg)
@@ -1066,7 +1060,6 @@ static void spi_hd_slot_cfg(spi_slave_hd_slot_config_t *slot_cfg)
     slot_cfg->queue_size = SPI_HD_RX_QUEUE_SIZE;
     slot_cfg->dma_chan = SPI_HD_DMA_CHAN;
     slot_cfg->cb_config = (spi_slave_hd_callback_config_t) {
-        .cb_recv = spi_hd_cb_rx_done,
 #ifndef CONFIG_ESP_SPI_HD_DMA_APPEND
         .cb_send_dma_ready = spi_hd_cb_tx_ready,
         .cb_recv_dma_ready = spi_hd_cb_rx_ready,
@@ -1088,33 +1081,37 @@ static void spi_hd_cleanup_resources(void)
     uint8_t q;
     int i;
 
-    s_running = false;
+    TickType_t started = xTaskGetTickCount();
+    bool busy;
 
-    /*
-     * Stop application tasks before tearing down the driver they may be
-     * blocked in. FreeRTOS permits deletion of a task blocked in the SPI-HD
-     * driver; after both workers are gone no allocator/descriptor callback can
-     * race the frees below.
-     */
-    if (spi_hd_rx_task_handle) {
-        vTaskDelete(spi_hd_rx_task_handle);
-        spi_hd_rx_task_handle = NULL;
-    }
+    spi_hd_set_running(false);
+    /* Stop admission, then allow bounded waits to finish naturally. Never
+     * delete a task inside a DMA API or free resources beneath a caller. */
+    do {
+        portENTER_CRITICAL(&s_lifecycle_lock);
+        busy = s_api_users || spi_hd_rx_task_handle || spi_hd_tx_done_task_handle;
 #ifdef CONFIG_ESP_SPI_HD_TX_BATCH
-    if (s_tx_batch_task_handle) {
-        vTaskDelete(s_tx_batch_task_handle);
-        s_tx_batch_task_handle = NULL;
-    }
+        busy = busy || s_tx_batch_task_handle;
 #endif
-    if (spi_hd_tx_done_task_handle) {
-        vTaskDelete(spi_hd_tx_done_task_handle);
-        spi_hd_tx_done_task_handle = NULL;
-    }
+        portEXIT_CRITICAL(&s_lifecycle_lock);
+        if (!busy)
+            break;
+        if ((TickType_t)(xTaskGetTickCount() - started) >= SPI_HD_STOP_TICKS) {
+            ESP_LOGE(TAG, "SPI-HD shutdown did not quiesce; restarting");
+            esp_restart();
+            return;
+        }
+        vTaskDelay(1);
+    } while (true);
 
     spi_hd_set_data_ready(false);
     if (s_driver_initialized) {
-        spi_hd_write_reg32(SPI_HD_REG_SLAVE_READY, 0);
-        spi_slave_hd_deinit(SPI_HD_HOST);
+        spi_hd_write_reg32(SPIHD_REG_SLAVE_READY, 0);
+        if (spi_slave_hd_deinit(SPI_HD_HOST) != ESP_OK) {
+            ESP_LOGE(TAG, "SPI-HD DMA deinit failed; restarting");
+            esp_restart();
+            return;
+        }
         s_driver_initialized = false;
     }
 
@@ -1187,10 +1184,7 @@ static void spi_hd_cleanup_resources(void)
     spi_hd_reset_assembly();
     s_tx_ready_bytes = 0;
     s_rx_ready_segments = 0;
-    s_rx_diag_segments = 0;
-    s_rx_hw_diag_segments = 0;
-    s_rx_payload_diag_segments = 0;
-    s_rx_diag_done = false;
+    s_host_rx_max = 0;
     memset(&if_handle_g, 0, sizeof(if_handle_g));
 }
 
@@ -1203,13 +1197,13 @@ static interface_handle_t *esp_spi_hd_init(void)
         .mode = GPIO_MODE_OUTPUT,
         .pin_bit_mask = 1ULL << GPIO_DATA_READY,
     };
-    uint8_t zero_regs[24] = {0};
-    uint32_t value;
+    uint8_t zero_regs[SPIHD_REGISTER_BYTES] = {0};
+    uint32_t value, session_lo, session_hi;
     uint8_t q;
     int i;
     esp_err_t ret;
 
-    s_running = false;
+    spi_hd_set_running(false);
     s_driver_initialized = false;
     memset(s_tx_inflight, 0, sizeof(s_tx_inflight));
     spi_hd_reset_assembly();
@@ -1219,11 +1213,19 @@ static interface_handle_t *esp_spi_hd_init(void)
              GPIO_SCLK, GPIO_CS, GPIO_D0, GPIO_D1, GPIO_D2, GPIO_D3,
              GPIO_DATA_READY, CONFIG_ESP_SPI_HD_MODE);
 
-    gpio_config(&dr_cfg);
+    ret = gpio_config(&dr_cfg);
+    if (ret != ESP_OK)
+        return NULL;
     spi_hd_set_data_ready(false);
-    gpio_set_pull_mode(GPIO_DATA_READY, GPIO_PULLDOWN_ONLY);
-    gpio_set_pull_mode(GPIO_SCLK, GPIO_PULLUP_ONLY);
-    gpio_set_pull_mode(GPIO_CS, GPIO_PULLUP_ONLY);
+    ret = gpio_set_pull_mode(GPIO_DATA_READY, GPIO_PULLDOWN_ONLY);
+    if (ret != ESP_OK)
+        return NULL;
+    ret = gpio_set_pull_mode(GPIO_SCLK, GPIO_PULLUP_ONLY);
+    if (ret != ESP_OK)
+        return NULL;
+    ret = gpio_set_pull_mode(GPIO_CS, GPIO_PULLUP_ONLY);
+    if (ret != ESP_OK)
+        return NULL;
 
     spi_hd_bus_cfg(&bus_cfg);
     spi_hd_slot_cfg(&slot_cfg);
@@ -1250,10 +1252,6 @@ static interface_handle_t *esp_spi_hd_init(void)
 
     s_tx_ready_bytes = 0;
     s_rx_ready_segments = 0;
-    s_rx_diag_segments = 0;
-    s_rx_hw_diag_segments = 0;
-    s_rx_payload_diag_segments = 0;
-    s_rx_diag_done = false;
     spi_slave_hd_write_buffer(SPI_HD_HOST, 0, zero_regs, sizeof(zero_regs));
 
     memset(&if_handle_g, 0, sizeof(if_handle_g));
@@ -1265,16 +1263,8 @@ static interface_handle_t *esp_spi_hd_init(void)
         if (!s_rx_slots[i].buf)
             goto fail;
         memset(&s_rx_slots[i].trans, 0, sizeof(s_rx_slots[i].trans));
-        memset(s_rx_slots[i].buf, 0xa5, SPI_HD_RX_SEGMENT_SIZE);
         s_rx_slots[i].trans.data = s_rx_slots[i].buf;
         s_rx_slots[i].trans.len = SPI_HD_RX_SEGMENT_SIZE;
-        s_rx_slots[i].diag_hw_bits = 0;
-        s_rx_slots[i].diag_ready_dma_conf = 0;
-        s_rx_slots[i].diag_ready_dma_int_raw = 0;
-        s_rx_slots[i].diag_done_dma_conf = 0;
-        s_rx_slots[i].diag_done_dma_int_raw = 0;
-        s_rx_slots[i].diag_wrdma_raw = 0;
-        s_rx_slots[i].diag_cmd7_raw = 0;
     }
 
 #ifdef CONFIG_ESP_SPI_HD_TX_BATCH
@@ -1297,7 +1287,7 @@ static interface_handle_t *esp_spi_hd_init(void)
             goto fail;
     }
 #endif
-    s_running = true;
+    spi_hd_set_running(true);
     if (xTaskCreate(spi_hd_rx_task, "spi_hd_rx",
                     TASK_DEFAULT_STACK_SIZE, NULL, TASK_DEFAULT_PRIO,
                     &spi_hd_rx_task_handle) != pdTRUE)
@@ -1316,19 +1306,34 @@ static interface_handle_t *esp_spi_hd_init(void)
 #else
     value = SPI_HD_FRAME_BUF_SIZE;
 #endif
-    spi_hd_write_reg32(SPI_HD_REG_MAX_TX_BUF_LEN, value);
+    spi_hd_write_reg32(SPIHD_REG_MAX_TX_BUF_LEN, value);
 
     /* RX descriptors are segment-sized; advertise the true WRDMA limit. */
     value = SPI_HD_RX_SEGMENT_SIZE;
-    spi_hd_write_reg32(SPI_HD_REG_MAX_RX_BUF_LEN, value);
+    spi_hd_write_reg32(SPIHD_REG_MAX_RX_BUF_LEN, value);
 
-    value = SPI_HD_STATE_SLAVE_READY;
-#ifdef CONFIG_ESP_SPI_HD_TX_LEN_MIRROR
-    spi_hd_write_reg32(SPI_HD_REG_TX_LEN_MIRROR + 4, 0);
-    spi_hd_write_reg32(SPI_HD_REG_TX_LEN_MIRROR, 0);
-    value |= SPI_HD_CAP_TX_LEN_MIRROR;
+    do {
+        session_lo = esp_random();
+        session_hi = esp_random();
+    } while (!(session_lo | session_hi));
+    spi_hd_write_reg32(SPIHD_REG_SESSION_LO, session_lo);
+    spi_hd_write_reg32(SPIHD_REG_SESSION_HI, session_hi);
+    spi_hd_write_reg32(SPIHD_REG_RX_CREDIT_WINDOW, SPI_HD_RX_QUEUE_SIZE);
+    spi_hd_write_reg32(SPIHD_REG_CONTROL_MAX_HZ,
+                       (CONFIG_ESP_SPI_HD_CONTROL_MAX_CLK_MHZ < CONFIG_ESP_SPI_HD_MAX_CLK_MHZ ?
+                        CONFIG_ESP_SPI_HD_CONTROL_MAX_CLK_MHZ : CONFIG_ESP_SPI_HD_MAX_CLK_MHZ) * 1000000U);
+    spi_hd_write_reg32(SPIHD_REG_PAYLOAD_MAX_HZ,
+                       CONFIG_ESP_SPI_HD_MAX_CLK_MHZ * 1000000U);
+    value = SPIHD_STATE_SLAVE_READY | SPIHD_CAP_PROTOCOL_V3;
+#ifdef CONFIG_ESP_SPI_HD_DMA_APPEND
+    value |= SPIHD_CAP_DMA_APPEND;
 #endif
-    spi_hd_write_reg32(SPI_HD_REG_SLAVE_READY, value);
+#ifdef CONFIG_ESP_SPI_HD_TX_LEN_MIRROR
+    spi_hd_write_reg32(SPIHD_REG_TX_LEN_MIRROR + 4, 0);
+    spi_hd_write_reg32(SPIHD_REG_TX_LEN_MIRROR, 0);
+    value |= SPIHD_CAP_TX_LEN_MIRROR;
+#endif
+    spi_hd_write_reg32(SPIHD_REG_SLAVE_READY, value);
 
     return &if_handle_g;
 
@@ -1367,7 +1372,7 @@ int interface_remove_driver(void)
     return 0;
 }
 
-esp_err_t send_bootup_event_to_host(uint32_t cap, uint32_t ext_cap)
+static esp_err_t spi_hd_send_bootup_event(uint32_t cap, uint32_t ext_cap)
 {
     struct esp_payload_header *header;
     struct esp_internal_bootup_event *event;
@@ -1453,6 +1458,16 @@ esp_err_t send_bootup_event_to_host(uint32_t cap, uint32_t ext_cap)
     header->checksum = htole16(compute_checksum(frame, total_len));
 #endif
 
-    ret = spi_hd_queue_frame(frame, total_len, false, 0);
+    ret = spi_hd_queue_frame(frame, SPIHD_WIRE_SPAN(total_len), false, 0);
+    return ret;
+}
+
+esp_err_t send_bootup_event_to_host(uint32_t cap, uint32_t ext_cap)
+{
+    esp_err_t ret;
+    if (!spi_hd_api_enter())
+        return ESP_ERR_INVALID_STATE;
+    ret = spi_hd_send_bootup_event(cap, ext_cap);
+    spi_hd_api_leave();
     return ret;
 }

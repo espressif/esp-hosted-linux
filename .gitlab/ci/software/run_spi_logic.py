@@ -12,8 +12,8 @@ ROOT = Path(__file__).resolve().parents[3]
 SOURCE = ROOT / "host/spi/esp_spi.c"
 FW_SOURCE = ROOT / "esp/esp_driver/network_adapter/main/spi_slave_api.c"
 HARNESS = ROOT / "tests/software/spi_parser_harness.c"
-FUNCTIONS = ("esp_spi_bootstrap_frame_valid", "spi_get_cmd_info",
-             "spi_is_stateful_packet", "spi_is_dummy_rx",
+FUNCTIONS = ("esp_spi_bootstrap_frame_valid",
+             "spi_is_dummy_rx",
              "spi_is_unadvertised_idle_rx", "esp_spi_next_slot_ready")
 HOST_INT_FUNCTIONS = ("process_rx_buf",)
 FW_BOOL_FUNCTIONS = ("spi_tx_queues_pending", "spi_sync_dummy_slot_data_ready")
@@ -32,6 +32,9 @@ def main():
     if harness.count(marker) != 1:
         raise ValueError("SPI harness marker changed")
     extracted = [extract_function(src, n) for n in FUNCTIONS]
+    common = (ROOT / "host/include/esp_spi_common.h").read_text()
+    extracted.append(extract_typed_function(common, "esp_spi_get_cmd_info", "inline bool"))
+    extracted.append(extract_typed_function(common, "esp_spi_is_stateful_packet", "inline bool"))
     extracted.extend(extract_typed_function(src, n, "int")
                      for n in HOST_INT_FUNCTIONS)
     extracted.append(

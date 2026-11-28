@@ -1,0 +1,50 @@
+spi: dw: reject unrepresentable enhanced-frame phase timing
+
+Standard Linux SPI clients may specify different per-transfer clocks,
+inter-transfer delays and inter-word delays. The enhanced-QIO frame
+collector does not transmit the prior control transfers immediately,
+but folds their phases into a later single controller transaction.
+Reject requests that cannot retain the clients' phase timing and
+clock-divider semantics, rather than silently changing the wire
+operation. Preserve ordinary single-lane and representable frames.
+
+diff --git a/drivers/spi/spi-dw-core.c b/drivers/spi/spi-dw-core.c
+--- a/drivers/spi/spi-dw-core.c
++++ b/drivers/spi/spi-dw-core.c
+@@ -489,11 +489,36 @@
+  * the FIFO later. The instruction comes first then the address.
+  */
+ static int dw_spi_collect_enh_xfer(struct dw_spi *dws,
+ 				   struct spi_transfer *xfer)
+ {
++	struct spi_transfer *following = xfer;
+ 	unsigned int cycles, i;
++
++	/*
++	 * The DesignWare enhanced format collects the preceding SPI phases
++	 * and clocks them during the later multi-lane transfer. Such a frame
++	 * cannot honor transfer-specific interphase or inter-word delays.
++	 * Refuse those shapes before issuing any clocks to the peripheral.
++	 */
++	if (xfer->delay.value || xfer->word_delay.value)
++		return -EOPNOTSUPP;
++
++	/*
++	 * A single enhanced hardware frame has one SCK divider. Do not
++	 * quietly use the final data speed for a command or address that
++	 * requested a different clock. A later collected phase checks its
++	 * own following phases in the same way.
++	 */
++	list_for_each_entry_continue(following,
++				     &dws->host->cur_msg->transfers, transfer_list) {
++		if (following->speed_hz != xfer->speed_hz)
++			return -EOPNOTSUPP;
++		if (following->tx_nbits > SPI_NBITS_SINGLE ||
++		    following->rx_nbits > SPI_NBITS_SINGLE)
++			break;
++	}
+ 
+ 	if (!xfer->tx_buf)
+ 		return -EINVAL;
+ 
+ 	if (xfer->dummy_data) {

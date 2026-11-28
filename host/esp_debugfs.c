@@ -5,10 +5,6 @@
 #include <linux/fs.h>
 #include <linux/uaccess.h>
 
-#ifdef ESP_SPI_HD_DEBUGFS
-#include "esp_spi_hd.h"
-#define SPI_HD_WORK_QUOTAS "spi_hd_work_quotas"
-#endif
 
 #define DEBUGFS_DIR_NAME "esp32"
 #define LOG_LEVEL "log_level"
@@ -29,9 +25,6 @@ struct esp32_debugfs {
 	struct dentry *debugfs_dir;
 	struct dentry *log_level_file; /* log level for host dmesg */
 	struct dentry *version;
-#ifdef ESP_SPI_HD_DEBUGFS
-	struct dentry *spi_hd_work_quotas_file;
-#endif
 #if DEBUGFS_TODO
 	struct dentry *host_log_level_file; /* log level for host logs in debugfs logger */
 	struct dentry *host_log_file; /* debugfs host logger */
@@ -202,68 +195,6 @@ static const struct file_operations version_ops = {
 	.read = version_read,
 };
 
-#ifdef ESP_SPI_HD_DEBUGFS
-/*
- * SPI-HD-only host arbitration: atomic pair update, not two uncoordinated
- * debugfs integers. A single ordered SPI worker observes the new pair at
- * the start of each receive/send pass, even under continuous load.
- *
- *   cat /sys/kernel/debug/esp32/spi_hd_work_quotas
- *   echo '3:2' > /sys/kernel/debug/esp32/spi_hd_work_quotas
- *   echo '2 2' > /sys/kernel/debug/esp32/spi_hd_work_quotas
- *
- * Debugfs is a development interface, not a stable production ABI.
- */
-static ssize_t spi_hd_work_quotas_read(struct file *file, char __user *buf,
-				      size_t count, loff_t *ppos)
-{
-	char result[32];
-	unsigned int e2h, h2e;
-	int n;
-
-	esp_spi_hd_get_work_quotas(&e2h, &h2e);
-	n = scnprintf(result, sizeof(result), "%u:%u\n", e2h, h2e);
-	return simple_read_from_buffer(buf, count, ppos, result, n);
-}
-
-static ssize_t spi_hd_work_quotas_write(struct file *file,
-				       const char __user *buf,
-				       size_t count, loff_t *ppos)
-{
-	char input[32], extra;
-	unsigned int e2h, h2e;
-	int ret;
-
-	if (!count || count >= sizeof(input) || *ppos)
-		return -EINVAL;
-	if (copy_from_user(input, buf, count))
-		return -EFAULT;
-	/* Counted debugfs input must not hide trailing text after NUL. */
-	if (memchr(input, '\0', count))
-		return -EINVAL;
-	input[count] = '\0';
-
-	/* Permit "E2H:H2E" or "E2H H2E"; reject trailing garbage. */
-	if (sscanf(input, "%u:%u %c", &e2h, &h2e, &extra) != 2 &&
-	    sscanf(input, "%u %u %c", &e2h, &h2e, &extra) != 2)
-		return -EINVAL;
-
-	ret = esp_spi_hd_set_work_quotas(e2h, h2e);
-	if (ret)
-		return ret;
-	*ppos += count;
-	esp_info("SPI-HD debugfs work quotas updated E2H=%u H2E=%u\n",
-		 e2h, h2e);
-	return count;
-}
-
-static const struct file_operations spi_hd_work_quotas_ops = {
-	.owner = THIS_MODULE,
-	.read = spi_hd_work_quotas_read,
-	.write = spi_hd_work_quotas_write,
-	.llseek = default_llseek,
-};
-#endif
 
 // Module initialization function
 int debugfs_init(void)
@@ -291,17 +222,6 @@ int debugfs_init(void)
 		goto cleanup;
 	}
 
-#ifdef ESP_SPI_HD_DEBUGFS
-	debugfs->spi_hd_work_quotas_file =
-		debugfs_create_file(SPI_HD_WORK_QUOTAS, 0600,
-				    debugfs->debugfs_dir, NULL,
-				    &spi_hd_work_quotas_ops);
-	if (IS_ERR_OR_NULL(debugfs->spi_hd_work_quotas_file)) {
-		esp_warn("Failed to create SPI-HD work quota debugfs file\n");
-		debugfs->spi_hd_work_quotas_file = NULL;
-		goto cleanup;
-	}
-#endif
 
 #if DEBUGFS_TODO
 	debugfs->host_log_level_file = debugfs_create_file(DEBUGFS_LOG_LEVEL, 0644, debugfs_dir, NULL, &debugfs_log_level_ops);
@@ -342,13 +262,6 @@ cleanup:
 void debugfs_exit(void)
 {
 	struct esp32_debugfs *debugfs = &drv_debugfs;
-#ifdef ESP_SPI_HD_DEBUGFS
-	if (debugfs->spi_hd_work_quotas_file &&
-	    !IS_ERR(debugfs->spi_hd_work_quotas_file)) {
-		debugfs_remove(debugfs->spi_hd_work_quotas_file);
-		debugfs->spi_hd_work_quotas_file = NULL;
-	}
-#endif
 #if DEBUGFS_TODO
 	// Remove debugfs file and directory
 	if (debugfs->fw_log_file)

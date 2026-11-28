@@ -31,18 +31,34 @@ def main():
     parent = git(repo, "rev-parse", QUAD_REF + "^").decode().strip()
     upstream_patch = git(repo, "diff", parent, QUAD_REF, "--",
                          "drivers/spi/spi-dw-core.c", "drivers/spi/spi-dw-dma.c", "drivers/spi/spi-dw.h")
-    local_patch = Path(__file__).with_name("kernel-patches") / "0001-spi-dw-quad-dma.patch"
-    print(f"QSPI_LOCAL_PATCH_SHA256={hashlib.sha256(local_patch.read_bytes()).hexdigest()}",
-          file=__import__("sys").stderr)
+    patch_dir = Path(__file__).with_name("kernel-patches")
+    local_patches = sorted(patch_dir.glob("*.patch"))
+    if not local_patches:
+        raise RuntimeError(f"No local SPI-DW patches found in {patch_dir}")
+    for local_patch in local_patches:
+        print(f"QSPI_LOCAL_PATCH={local_patch.name} "
+              f"SHA256={hashlib.sha256(local_patch.read_bytes()).hexdigest()}",
+              file=__import__("sys").stderr)
     stage = Path(tempfile.mkdtemp(prefix=".qspi-source-", dir=cache))
     try:
         spi = stage / "drivers/spi"
         spi.mkdir(parents=True)
         for name in FILES:
             (spi / name).write_bytes(git(repo, "show", f"{base_sha}:drivers/spi/{name}"))
-        for patch in (upstream_patch, local_patch.read_bytes()):
-            subprocess.run(["patch", "-d", str(stage), "-p1", "--batch", "--forward", "--fuzz=0"],
-                           input=patch, check=True)
+        patches = [("upstream-quad.patch", upstream_patch)] + [
+            (p.name, p.read_bytes()) for p in local_patches
+        ]
+        for patch_name, patch in patches:
+            result = subprocess.run(
+                ["patch", "-d", str(stage), "-p1", "--batch", "--forward", "--fuzz=0"],
+                input=patch, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            )
+            if result.returncode:
+                print(f"Failed to apply {patch_name}:",
+                      file=__import__("sys").stderr)
+                print(result.stdout.decode(errors="replace"),
+                      file=__import__("sys").stderr)
+                result.check_returncode()
         digest = hashlib.sha256()
         for name in FILES:
             digest.update(name.encode())

@@ -33,6 +33,7 @@
 #include "esp_utils.h"
 #include "esp_kernel_port.h"
 #include "esp_host_wire_bounds.h"
+#include "esp_transport_buf.h"
 
 #define MAX_WRITE_RETRIES       2000
 #define TX_MAX_PENDING_COUNT    1000
@@ -758,22 +759,7 @@ static void esp_remove(struct sdio_func *func)
 
 static struct sk_buff * esp_sdio_alloc_skb(u32 len)
 {
-	struct sk_buff *skb = NULL;
-	u32 offset;
-	u32 alloc_len;
-
-	alloc_len = len + INTERFACE_HEADER_PADDING + SKB_DATA_ADDR_ALIGNMENT;
-	skb = netdev_alloc_skb(NULL, alloc_len);
-
-	if (skb) {
-		/* Keep the transport headroom and then align the data pointer. */
-		skb_reserve(skb, INTERFACE_HEADER_PADDING);
-		offset = ((unsigned long)skb->data) & (SKB_DATA_ADDR_ALIGNMENT - 1);
-		if (offset)
-			skb_reserve(skb, SKB_DATA_ADDR_ALIGNMENT - offset);
-	}
-
-	return skb;
+	return esp_transport_alloc_skb(len, len, SKB_DATA_ADDR_ALIGNMENT);
 }
 
 static void sdio_purge_tx_queues(struct esp_sdio_context *context)

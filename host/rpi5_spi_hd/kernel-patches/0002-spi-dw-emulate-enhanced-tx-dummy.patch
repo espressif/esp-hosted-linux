@@ -1,0 +1,161 @@
+spi: dw: emulate supported enhanced-TX dummy clocks
+
+DesignWare SSI exposes SPI_CTRLR0.WAIT_CYCLES for enhanced receive
+frames, but the field does not insert the corresponding idle clocks
+before enhanced transmit data. Protocol drivers should still be able
+to describe command/address/dummy/data phases through the generic SPI
+transfer API without controller-specific workarounds.
+
+For enhanced TX, synthesize a conservative subset of dummy phases by
+appending zero bits to the single-lane address/control FIFO word. This
+produces the requested wire clocks before switching to quad data while
+leaving the peripheral-visible data phase unchanged.
+
+Only accept shapes that are unambiguous and fit the existing 32-bit
+address FIFO entry:
+
+  - dummy phase is single-lane;
+  - instruction/address transfer type is TT0 (single-lane);
+  - dummy length is nibble aligned;
+  - address plus synthesized dummy bits is at most 32 bits.
+
+If there is no address phase, create a zero-valued address control word
+containing only the dummy clocks. Continue rejecting all other
+enhanced-TX WAIT_CYCLES rather than silently emitting an incomplete
+frame.
+
+A default (unspecified) dummy-transfer bus width is treated as single-lane,
+including when calculating its wait cycles, rather than dividing by zero.
+
+The same constraints are reflected in spi-mem supports_op() so clients
+can fall back through the generic transfer path when the operation is
+representable.
+
+diff --git a/drivers/spi/spi-dw-core.c b/drivers/spi/spi-dw-core.c
+--- a/drivers/spi/spi-dw-core.c
++++ b/drivers/spi/spi-dw-core.c
+@@ -9,10 +9,12 @@
+ 	if (xfer->dummy_data) {
+ 		/* Dummy bytes set WAIT_CYCLES, which counts sclk periods */
+-		cycles = xfer->len * BITS_PER_BYTE / xfer->tx_nbits;
++		cycles = xfer->len * BITS_PER_BYTE /
++			 (xfer->tx_nbits ?: SPI_NBITS_SINGLE);
+ 		if (cycles > FIELD_MAX(DW_SPI_ENH_CTRLR0_WAIT_CYCLE_MASK))
+ 			return -EINVAL;
+ 
+ 		dws->enh.cfg.wait_l = cycles;
++		dws->enh.dummy_nbits = xfer->tx_nbits ?: SPI_NBITS_SINGLE;
+ 	} else if (!dws->enh.ctrl_len) {
+ 		/* The instruction comes first, INST_L is a width */
+ 		if (xfer->len == 1)
+@@ -49,6 +51,48 @@
+ 	return 0;
+ }
+ 
++/*
++ * WAIT_CYCLES are receive-side hardware on DWC SSI. For an enhanced write,
++ * emulate the subset that can be represented exactly by extending the
++ * single-lane address/control word with zero bits. The clocks are identical
++ * on the wire; the quad data phase still begins only after the requested
++ * dummy interval.
++ */
++static int dw_spi_emulate_enh_tx_dummy(struct dw_spi *dws)
++{
++	unsigned int addr_bits = dws->enh.cfg.addr_l * 4;
++	unsigned int dummy_bits;
++
++	if (!dws->enh.cfg.wait_l)
++		return 0;
++
++	/*
++	 * Extending ADDR_L can only reproduce a single-lane dummy phase when
++	 * the address/control phase itself is single-lane (TT0).
++	 */
++	if (dws->enh.dummy_nbits != SPI_NBITS_SINGLE ||
++	    dws->enh.cfg.trans_type != DW_SPI_ENH_CTRLR0_TRANS_TYPE_TT0)
++		return -EOPNOTSUPP;
++
++	/* One single-lane wait cycle is one synthesized address bit. */
++	dummy_bits = dws->enh.cfg.wait_l;
++	if (dummy_bits & 3 ||
++	    addr_bits + dummy_bits > sizeof(dws->enh.addr) * BITS_PER_BYTE)
++		return -EOPNOTSUPP;
++
++	if (dummy_bits == sizeof(dws->enh.addr) * BITS_PER_BYTE)
++		dws->enh.addr = 0;
++	else
++		dws->enh.addr <<= dummy_bits;
++
++	dws->enh.cfg.addr_l += dummy_bits / 4;
++	if (dws->enh.ctrl_len == 1)
++		dws->enh.ctrl_len = 2;
++	dws->enh.cfg.wait_l = 0;
++
++	return 0;
++}
++
+ /*
+  * Check the collected frame against the transfer and select its format. Only
+  * spi-mem ops are filtered earlier by dw_spi_supports_enh_mem_op().
+@@ -56,6 +100,8 @@
+ static int dw_spi_check_enh_frame(struct dw_spi *dws, struct dw_spi_cfg *cfg,
+ 				  int buswidth)
+ {
++	int ret;
++
+ 	/* Quad is the only frame format the driver implements */
+ 	if (buswidth != 4 || !(dws->caps & DW_SPI_CAP_QUAD))
+ 		return -EOPNOTSUPP;
+@@ -79,11 +125,11 @@
+ 	    cfg->tmode != DW_SPI_CTRLR0_TMOD_TO)
+ 		return -EINVAL;
+ 
+-	/* Enhanced-write WAIT_CYCLES are unsupported: never silently omit
+-	 * the requested dummy phase of a flash or other QSPI peripheral.
+-	 */
+-	if (cfg->tmode == DW_SPI_CTRLR0_TMOD_TO && dws->enh.cfg.wait_l)
+-		return -EOPNOTSUPP;
++	if (cfg->tmode == DW_SPI_CTRLR0_TMOD_TO && dws->enh.cfg.wait_l) {
++		ret = dw_spi_emulate_enh_tx_dummy(dws);
++		if (ret)
++			return ret;
++	}
+ 
+ 	/* A write ends when the Tx FIFO drains, so all of it has to fit */
+ 	/* above-FIFO quad is accepted ONLY
+@@ -853,10 +899,25 @@
+ 	if (op->data.dir == SPI_MEM_DATA_OUT && op->data.buswidth > 1 &&
+ 	    dws->fifo_len <= DW_SPI_ENH_CTRL_ENTRIES)
+ 		return false;
+-	/* Unsupported enhanced-write dummy clocks: reject early for spi-mem. */
++	/*
++	 * TX dummy clocks are emulated only through a single-lane control
++	 * word that still fits the enhanced address FIFO entry.
++	 */
+ 	if (op->data.dir == SPI_MEM_DATA_OUT && op->data.buswidth == 4 &&
+-	    op->dummy.nbytes)
+-		return false;
++	    op->dummy.nbytes) {
++		/* supports_op must make exactly the same promise as
++		 * dw_spi_emulate_enh_tx_dummy(): only TT0 single-lane
++		 * command/address/dummy frames fit the 32-bit control word.
++		 * Width zero describes an unspecified (single-lane) dummy.
++		 */
++		if (op->cmd.buswidth != 1 ||
++		    (op->dummy.buswidth && op->dummy.buswidth != 1) ||
++		    (op->addr.nbytes && op->addr.buswidth != 1) ||
++		    op->dummy.nbytes >
++			FIELD_MAX(DW_SPI_ENH_CTRLR0_WAIT_CYCLE_MASK) / BITS_PER_BYTE ||
++		    op->addr.nbytes + op->dummy.nbytes > sizeof(u32))
++			return false;
++	}
+ 
+ 	return spi_mem_default_supports_op(mem, op);
+ }
+diff --git a/drivers/spi/spi-dw.h b/drivers/spi/spi-dw.h
+--- a/drivers/spi/spi-dw.h
++++ b/drivers/spi/spi-dw.h
+@@ -1,1 +1,2 @@
+-	u8			ctrl_len;	/* control Tx FIFO entries */
++	u8			ctrl_len;	/* control Tx FIFO entries */
++	u8			dummy_nbits;	/* generic SPI dummy transfer bus width */

@@ -12,13 +12,11 @@ from run_usb_parser import extract_function
 class SpiHdExtractionTests(unittest.TestCase):
     def test_batch_and_ack_paths_are_real_functions(self):
         source = (ROOT / "host/spi_hd/esp_spi_hd.c").read_text()
-        for name in ("spihd_combined_wrdma", "spihd_combined_rddma",
-                     "spihd_batch_rx_ack", "spihd_rx_ack_required"):
+        for name in ("spihd_batch_fits", "spihd_combined_wrdma", "spihd_rx_ack_required"):
             with self.subTest(name=name):
                 body = extract_function(source, name)
                 self.assertIn("return ", body)
-                self.assertIn("READ_ONCE", body) if "combined_" in name else None
-        self.assertIn("spihd_batch_rx_ack(pending, spihd_e2h_lines())", source)
+        self.assertIn("spihd_combined_wrdma(len, wr_lines)", source)
         self.assertIn("spihd_rx_ack_required(status, pending)", source)
 
     def test_missing_ack_fails_extractor(self):

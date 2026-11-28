@@ -1,0 +1,133 @@
+spi: dw: validate enhanced phases and bound TX busy wait
+
+Reject control transfers that the enhanced frame collector cannot
+represent, including full-duplex or non-byte controls, multiple dummy
+phases, invalid lane widths and unsupported per-word data delays.
+Bound the inherited final TX BUSY wait rather than hanging indefinitely.
+Require both DMA phandles to use the RP1 clock provider before enabling
+the legacy integration's empirical DMA policy.
+
+diff --git a/drivers/spi/spi-dw-core.c b/drivers/spi/spi-dw-core.c
+--- a/drivers/spi/spi-dw-core.c
++++ b/drivers/spi/spi-dw-core.c
+@@ -518,13 +518,25 @@
+ 			break;
+ 	}
+ 
+-	if (!xfer->tx_buf)
++	if (!xfer->tx_buf || !xfer->len)
+ 		return -EINVAL;
++	if (xfer->rx_buf || xfer->bits_per_word != 8)
++		return -EOPNOTSUPP;
+ 
++	/* The control FIFO represents instruction, address, then dummy. */
++	if (dws->enh.cfg.wait_l)
++		return -EOPNOTSUPP;
+ 	if (xfer->dummy_data) {
++		unsigned int nbits = xfer->tx_nbits ?: SPI_NBITS_SINGLE;
++
++		if (!dws->enh.ctrl_len ||
++		    (nbits != SPI_NBITS_SINGLE && nbits != SPI_NBITS_QUAD))
++			return -EOPNOTSUPP;
++		if (xfer->len > FIELD_MAX(DW_SPI_ENH_CTRLR0_WAIT_CYCLE_MASK) *
++		    nbits / BITS_PER_BYTE)
++			return -EINVAL;
+ 		/* Dummy bytes set WAIT_CYCLES, which counts sclk periods */
+-		cycles = xfer->len * BITS_PER_BYTE /
+-			 (xfer->tx_nbits ?: SPI_NBITS_SINGLE);
++		cycles = xfer->len * BITS_PER_BYTE / nbits;
+ 		if (cycles > FIELD_MAX(DW_SPI_ENH_CTRLR0_WAIT_CYCLE_MASK))
+ 			return -EINVAL;
+ 
+@@ -532,6 +544,8 @@
+ 		dws->enh.dummy_nbits = xfer->tx_nbits ?: SPI_NBITS_SINGLE;
+ 	} else if (!dws->enh.ctrl_len) {
+ 		/* The instruction comes first, INST_L is a width */
++		if (xfer->tx_nbits > SPI_NBITS_SINGLE)
++			return -EOPNOTSUPP;
+ 		if (xfer->len == 1)
+ 			dws->enh.cfg.inst_l = DW_SPI_ENH_CTRLR0_INST_L_8BIT;
+ 		else if (xfer->len == 2)
+@@ -546,6 +560,9 @@
+ 		dws->enh.ctrl_len = 1;
+ 	} else if (dws->enh.ctrl_len == 1) {
+ 		/* Then the address, one FIFO entry, ADDR_L counts nibbles */
++		if (xfer->tx_nbits > SPI_NBITS_SINGLE &&
++		    xfer->tx_nbits != SPI_NBITS_QUAD)
++			return -EOPNOTSUPP;
+ 		if (xfer->len > sizeof(dws->enh.addr))
+ 			return -EINVAL;
+ 
+@@ -788,6 +805,8 @@
+ 	/* A multi-lane transfer here is the data of an enhanced frame */
+ 	buswidth = transfer->rx_buf ? transfer->rx_nbits : transfer->tx_nbits;
+ 	if (buswidth > 1) {
++		if (transfer->word_delay.value)
++			return -EOPNOTSUPP;
+ 		ret = dw_spi_check_enh_frame(dws, &cfg, buswidth);
+ 		if (ret)
+ 			return ret;
+diff --git a/drivers/spi/spi-dw-dma.c b/drivers/spi/spi-dw-dma.c
+--- a/drivers/spi/spi-dw-dma.c
++++ b/drivers/spi/spi-dw-dma.c
+@@ -373,8 +373,13 @@
+ 	if (!xfer->rx_buf) {
+ 		delay.value = DIV_ROUND_UP(dws->n_bytes * BITS_PER_BYTE,
+ 					   xfer->tx_nbits ?: 1);
+-		while (dw_readl(dws, DW_SPI_SR) & DW_SPI_SR_BUSY)
++		retry = DW_SPI_WAIT_RETRIES;
++		while ((dw_readl(dws, DW_SPI_SR) & DW_SPI_SR_BUSY) && retry--)
+ 			spi_delay_exec(&delay, xfer);
++		if (retry < 0) {
++			dev_err(&dws->host->dev, "SPI controller busy after TX\n");
++			return -ETIMEDOUT;
++		}
+ 	}
+ 
+ 	return 0;
+diff --git a/drivers/spi/spi-dw-mmio.c b/drivers/spi/spi-dw-mmio.c
+--- a/drivers/spi/spi-dw-mmio.c
++++ b/drivers/spi/spi-dw-mmio.c
+@@ -222,14 +222,40 @@
+ 	.byte_tx_align = 4,
+ };
+ 
++static bool dw_spi_rp1_dma_provider(struct device_node *np,
++				     struct device_node *clock,
++				     const char *name)
++{
++	struct of_phandle_args dma;
++	struct device_node *dma_clock;
++	bool matches;
++	int index;
++
++	index = of_property_match_string(np, "dma-names", name);
++	if (index < 0 || of_parse_phandle_with_args(np, "dmas", "#dma-cells",
++						    index, &dma))
++		return false;
++
++	dma_clock = of_parse_phandle(dma.np, "clocks", 0);
++	matches = dma_clock == clock &&
++		  of_device_is_compatible(dma.np, "snps,axi-dma-1.01a");
++	of_node_put(dma_clock);
++	of_node_put(dma.np);
++
++	return matches;
++}
++
+ static int dw_spi_pssi_init(struct platform_device *pdev,
+ 			    struct dw_spi_mmio *dwsmmio)
+ {
++	struct device_node *np = pdev->dev.of_node;
+ 	struct device_node *clock;
+ 
+ 	/* Legacy RP1 DTs use snps,dw-apb-ssi and the RP1 SSI clock. */
+-	clock = of_parse_phandle(pdev->dev.of_node, "clocks", 0);
+-	if (clock && of_device_is_compatible(clock, "raspberrypi,rp1-clocks"))
++	clock = of_parse_phandle(np, "clocks", 0);
++	if (clock && of_device_is_compatible(clock, "raspberrypi,rp1-clocks") &&
++	    dw_spi_rp1_dma_provider(np, clock, "tx") &&
++	    dw_spi_rp1_dma_provider(np, clock, "rx"))
+ 		dwsmmio->dws.enh_dma_config = &dw_spi_rp1_enh_dma;
+ 	of_node_put(clock);
+ 

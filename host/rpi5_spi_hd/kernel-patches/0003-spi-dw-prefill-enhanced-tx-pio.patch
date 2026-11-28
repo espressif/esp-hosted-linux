@@ -1,0 +1,48 @@
+spi: dw: prefill enhanced TX PIO before enabling SER clocks
+
+An enhanced transmit frame ends when the TX FIFO drains. The existing
+PIO path starts the frame with the controller SER channel active and then
+writes instruction, address and payload entries. At quad clocks the FIFO
+can therefore begin draining before software has finished filling a short
+frame, producing a truncated or corrupted transfer even though the whole
+frame fits in the FIFO.
+
+The DMA path already avoids this race by holding native SER inactive while
+the control words and a payload prefix are queued. Apply the same rule to
+non-DMA enhanced writes: temporarily gate native SER, preload the complete
+control+payload frame, then restore SER so wire clocks begin only after the
+FIFO is ready. This internal clock gate also applies when physical CS is
+managed by a Linux SPI GPIO.
+
+This is controller framing, not peripheral policy. Ordinary single-line
+transfers and enhanced RX retain their existing behavior. If native SER is
+already inactive because an outer path is intentionally gating it, leave
+ownership with that caller and only perform the prefill.
+
+diff --git a/drivers/spi/spi-dw-core.c b/drivers/spi/spi-dw-core.c
+--- a/drivers/spi/spi-dw-core.c
++++ b/drivers/spi/spi-dw-core.c
+@@ -1 +1,11 @@
+-	if (dws->enh.ctrl_len) {
++	u32 saved_ser = 0;
++	bool gate_enh_tx = false;
++
++	if (dws->enh.ctrl_len) {
++		gate_enh_tx = dws->tx_len && !dws->dma_mapped;
++		if (gate_enh_tx) {
++			saved_ser = dw_readl(dws, DW_SPI_SER);
++			if (saved_ser)
++				dw_writel(dws, DW_SPI_SER, 0);
++		}
++
+@@ -10,6 +20,10 @@
+ 
+ 		if (dws->tx_len && !dws->dma_mapped)
+ 			dw_writer(dws);
++
++		/* MMIO FIFO writes complete before native CS starts the frame. */
++		if (gate_enh_tx && saved_ser)
++			dw_writel(dws, DW_SPI_SER, saved_ser);
+ 	} else if (!dws->tx_len) {
+ 		dw_writel(dws, DW_SPI_DR, 0);
+ 	}

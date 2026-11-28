@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1040" height="766" viewBox="0 0 1040 766" role="img" aria-labelledby="title desc">
   <title id="title">Raspberry Pi 5 RP1 QSPI to ESP32-C5 SPI-HD wiring</title>
-  <desc id="desc">SCLK BCM11 physical pin 23 to ESP GPIO6; CS BCM8 pin24 to GPIO10; SIO0 BCM10 pin19 to GPIO7; SIO1 BCM9 pin21 to GPIO2; SIO2 BCM1 pin28 to GPIO5; SIO3 BCM0 pin27 to GPIO4; Data Ready BCM12 pin32 to GPIO23; ESP reset BCM6 pin31 to EN/RST; common ground pin39. SPI mode 3, 3.3V logic. Four SIO signals are bidirectional; no classic SPI Handshake line.</desc>
+  <desc id="desc">SCLK BCM11 physical pin 23 to ESP GPIO9; CS BCM8 pin24 to GPIO13; SIO0 BCM10 pin19 to GPIO10; SIO1 BCM9 pin21 to GPIO8; SIO2 BCM1 pin28 to GPIO7; SIO3 BCM0 pin27 to GPIO14; Data Ready BCM12 pin32 to GPIO24; ESP reset BCM6 pin31 to EN/RST; common ground pin39. SPI mode 3, 3.3V logic. Four SIO signals are bidirectional; no classic SPI Handshake line.</desc>
   <style>
     .heading { font: 700 25px sans-serif; fill: #0f172a; }
     .sub { font: 15px sans-serif; fill: #475569; }
@@ -26,7 +26,7 @@
   <circle cx="455" cy="177" r="5" fill="#1d4ed8"/>
   <circle cx="581" cy="177" r="5" fill="#1d4ed8"/>
   <text x="518" y="165" class="direction" text-anchor="middle">Pi → ESP</text>
-  <text x="608" y="182" class="pin">GPIO6</text>
+  <text x="608" y="182" class="pin">GPIO9</text>
   <rect x="24" y="210" width="992" height="49" rx="8" fill="#f3f7fb"/>
   <text x="44" y="241" class="signal">CS0</text>
   <text x="434" y="240" class="pin" text-anchor="end">BCM8 · pin 24</text>
@@ -34,7 +34,7 @@
   <circle cx="455" cy="235" r="5" fill="#1d4ed8"/>
   <circle cx="581" cy="235" r="5" fill="#1d4ed8"/>
   <text x="518" y="223" class="direction" text-anchor="middle">Pi → ESP</text>
-  <text x="608" y="240" class="pin">GPIO10</text>
+  <text x="608" y="240" class="pin">GPIO13</text>
   <rect x="24" y="268" width="992" height="49" rx="8" fill="#ffffff"/>
   <text x="44" y="299" class="signal">SIO0 / D0</text>
   <text x="434" y="298" class="pin" text-anchor="end">BCM10 · pin 19</text>
@@ -42,7 +42,7 @@
   <circle cx="455" cy="293" r="5" fill="#059669"/>
   <circle cx="581" cy="293" r="5" fill="#059669"/>
   <text x="518" y="281" class="direction" text-anchor="middle">bidirectional</text>
-  <text x="608" y="298" class="pin">GPIO7</text>
+  <text x="608" y="298" class="pin">GPIO10</text>
   <rect x="24" y="326" width="992" height="49" rx="8" fill="#f3f7fb"/>
   <text x="44" y="357" class="signal">SIO1 / D1</text>
   <text x="434" y="356" class="pin" text-anchor="end">BCM9 · pin 21</text>
@@ -50,7 +50,7 @@
   <circle cx="455" cy="351" r="5" fill="#059669"/>
   <circle cx="581" cy="351" r="5" fill="#059669"/>
   <text x="518" y="339" class="direction" text-anchor="middle">bidirectional</text>
-  <text x="608" y="356" class="pin">GPIO2</text>
+  <text x="608" y="356" class="pin">GPIO8</text>
   <rect x="24" y="384" width="992" height="49" rx="8" fill="#ffffff"/>
   <text x="44" y="415" class="signal">SIO2 / D2</text>
   <text x="434" y="414" class="pin" text-anchor="end">BCM1 · pin 28</text>
@@ -58,7 +58,7 @@
   <circle cx="455" cy="409" r="5" fill="#059669"/>
   <circle cx="581" cy="409" r="5" fill="#059669"/>
   <text x="518" y="397" class="direction" text-anchor="middle">bidirectional</text>
-  <text x="608" y="414" class="pin">GPIO5</text>
+  <text x="608" y="414" class="pin">GPIO7</text>
   <rect x="24" y="442" width="992" height="49" rx="8" fill="#f3f7fb"/>
   <text x="44" y="473" class="signal">SIO3 / D3</text>
   <text x="434" y="472" class="pin" text-anchor="end">BCM0 · pin 27</text>
@@ -66,7 +66,7 @@
   <circle cx="455" cy="467" r="5" fill="#059669"/>
   <circle cx="581" cy="467" r="5" fill="#059669"/>
   <text x="518" y="455" class="direction" text-anchor="middle">bidirectional</text>
-  <text x="608" y="472" class="pin">GPIO4</text>
+  <text x="608" y="472" class="pin">GPIO14</text>
   <rect x="24" y="500" width="992" height="49" rx="8" fill="#ffffff"/>
   <text x="44" y="531" class="signal">Data Ready</text>
   <text x="434" y="530" class="pin" text-anchor="end">BCM12 · pin 32</text>
@@ -74,7 +74,7 @@
   <circle cx="455" cy="525" r="5" fill="#b45309"/>
   <circle cx="581" cy="525" r="5" fill="#b45309"/>
   <text x="518" y="513" class="direction" text-anchor="middle">ESP → Pi</text>
-  <text x="608" y="530" class="pin">GPIO23</text>
+  <text x="608" y="530" class="pin">GPIO24</text>
   <rect x="24" y="558" width="992" height="49" rx="8" fill="#f3f7fb"/>
   <text x="44" y="589" class="signal">ESP reset / EN</text>
   <text x="434" y="588" class="pin" text-anchor="end">BCM6 · pin 31</text>
